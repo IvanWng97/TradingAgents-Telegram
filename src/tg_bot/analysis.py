@@ -124,7 +124,9 @@ def run_trading_analysis(
             )
     finally:
         set_reporter(None)
-    logger.info("Final state for %s: %s", ticker, final_state)
+    # Don't log final_state itself — it's tens of KB of report text.
+    logger.info("Analysis complete for %s — signal=%s", ticker, signal)
+    logger.debug("Final state for %s: %s", ticker, final_state)
     return final_state, signal
 
 

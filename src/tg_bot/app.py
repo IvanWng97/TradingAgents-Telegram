@@ -65,7 +65,11 @@ def _build_application() -> Application:
     if Config.ALLOWED_USER_IDS:
         logger.info("Auth enabled — ALLOWED_USER_IDS=%s", Config.ALLOWED_USER_IDS)
     else:
-        logger.info("Auth disabled — ALLOWED_USER_IDS empty, all users allowed")
+        logger.warning(
+            "Auth disabled — ALLOWED_USER_IDS empty, the bot is open to anyone "
+            "who finds it. Set ALLOWED_USER_IDS in .env to restrict access "
+            "(your LLM tokens are at risk otherwise)."
+        )
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_cmd))

@@ -26,7 +26,12 @@ class JsonStorage:
             return {}
 
     def _save(self) -> None:
-        """Atomic write: tempfile in the same dir, then os.replace."""
+        """Atomic + durable write: tempfile + flush + fsync, then os.replace.
+
+        Without fsync, a power loss between rename and OS-level flush can
+        leave a renamed-but-empty file; fsync forces the bytes to disk
+        before the rename makes the new file visible.
+        """
         directory = self.file_path.parent
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -37,6 +42,8 @@ class JsonStorage:
             encoding="utf-8",
         ) as tmp:
             json.dump(self._data, tmp, indent=2, ensure_ascii=False)
+            tmp.flush()
+            os.fsync(tmp.fileno())
             tmp_path = tmp.name
         os.replace(tmp_path, self.file_path)
 
