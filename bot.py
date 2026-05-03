@@ -47,7 +47,7 @@ def setup_tradingagents_path() -> bool:
 # Setup TradingAgents path
 setup_tradingagents_path()
 
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
@@ -56,6 +56,22 @@ from telegram.ext import (
     ContextTypes,
     TypeHandler,
 )
+
+
+BOT_COMMANDS = [
+    BotCommand("start", "Welcome message"),
+    BotCommand("help", "Show available commands"),
+    BotCommand("add", "Add a ticker to your watchlist"),
+    BotCommand("del", "Remove a ticker from your watchlist"),
+    BotCommand("watch", "Show your watchlist"),
+    BotCommand("list", "Show your watchlist (alias)"),
+    BotCommand("config", "Configure LLM provider and models"),
+]
+
+
+async def post_init(application: Application) -> None:
+    """Populate the Telegram client's Menu button with our command list."""
+    await application.bot.set_my_commands(BOT_COMMANDS)
 
 from config import Config
 from handlers import (
@@ -104,7 +120,12 @@ def main():
         logger.info("Please set TELEGRAM_BOT_TOKEN environment variable.")
         return
 
-    application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(Config.TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
     # Auth gate: runs before any other handler.
     application.add_handler(TypeHandler(Update, authorize), group=-1)
