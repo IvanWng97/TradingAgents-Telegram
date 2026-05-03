@@ -1,6 +1,0 @@
-python-telegram-bot>=21.0
-python-dotenv>=1.0.0
-telegraph>=2.2.0
-markdown>=3.6
-beautifulsoup4>=4.12
-tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git
