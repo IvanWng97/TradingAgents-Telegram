@@ -13,7 +13,7 @@ dependencies = [
     "telegraph>=2.2.0",
     "markdown>=3.6",
     "beautifulsoup4>=4.12",
-    "tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git@7e9e7b83c7fcc18d941300b253c6ed24d985788d",
+    "tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git",
 ]
 
 [tool.setuptools.packages.find]

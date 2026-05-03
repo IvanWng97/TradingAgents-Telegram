@@ -3,6 +3,11 @@ name: Build and Push Docker Image
 on:
   push:
     branches: ["main"]
+  schedule:
+    # Daily at 06:00 UTC — rebuilds with --no-cache so the pip layer
+    # re-resolves upstream tradingagents@HEAD even though pyproject.toml
+    # is unchanged.
+    - cron: "0 6 * * *"
   workflow_dispatch:
 
 env:
@@ -19,10 +24,36 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Resolve upstream tradingagents SHA
+        id: ta
+        run: |
+          SHA=$(git ls-remote https://github.com/TauricResearch/TradingAgents.git HEAD | cut -f1)
+          echo "Latest tradingagents SHA: $SHA"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Look up previously built tradingagents SHA
+        id: ta_cache
+        uses: actions/cache@v4
+        with:
+          path: .last-tradingagents-sha
+          key: tradingagents-sha-${{ steps.ta.outputs.sha }}
+
+      - name: Decide whether to skip
+        id: gate
+        run: |
+          if [[ "${{ steps.ta_cache.outputs.cache-hit }}" == "true" && "${{ github.event_name }}" == "schedule" ]]; then
+            echo "tradingagents@${{ steps.ta.outputs.sha }} already built — skipping schedule run"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Docker Buildx
+        if: steps.gate.outputs.skip != 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
+        if: steps.gate.outputs.skip != 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -30,6 +61,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
+        if: steps.gate.outputs.skip != 'true'
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
@@ -39,16 +71,29 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
+        if: steps.gate.outputs.skip != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Push events (code changes) reuse the layer cache for fast iteration.
+          # Schedule + manual dispatch bypass the cache so the `pip install`
+          # layer re-resolves tradingagents@HEAD from GitHub.
+          cache-from: ${{ github.event_name == 'push' && 'type=gha' || '' }}
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max' || '' }}
+          no-cache: ${{ github.event_name != 'push' }}
+
+      - name: Mark tradingagents SHA as built
+        # Only after a successful build+push do we record the SHA so the next
+        # scheduled run can skip. If the build failed, the file isn't written
+        # and actions/cache's post-job save is a harmless no-op.
+        if: steps.gate.outputs.skip != 'true'
+        run: echo "${{ steps.ta.outputs.sha }}" > .last-tradingagents-sha
 
       - name: Scan image with Trivy
+        if: steps.gate.outputs.skip != 'true'
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.IMAGE_NAME }}:latest
@@ -58,7 +103,7 @@ jobs:
           exit-code: "0"
 
       - name: Upload Trivy results to GitHub Security tab
+        if: steps.gate.outputs.skip != 'true' && always()
         uses: github/codeql-action/upload-sarif@v3
-        if: always()
         with:
           sarif_file: trivy-results.sarif
