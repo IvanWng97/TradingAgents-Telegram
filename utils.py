@@ -55,14 +55,11 @@ async def publish_to_telegraph(title: str, content: str) -> str:
 def format_analysis_result_markdown(ticker: str, final_state: dict, signal: str) -> str:
     """Format analysis result as Markdown.
 
-    Currently emits only the final trade decision — other sections from
-    final_state can be appended later.
+    Emits the final trade decision and the trader's executable plan.
     """
     return (
-        f"**{ticker} Analysis Result**\n\n"
-        f"**Decision:** {signal}\n\n"
-        f"# Final Trade Decision\n\n"
-        f"{final_state.get('final_trade_decision', 'N/A')}\n"
+        f"{final_state.get('final_trade_decision', 'N/A')}\n\n"
+        f"{final_state.get('trader_investment_plan', '')}\n"
     )
 
 
