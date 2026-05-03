@@ -17,7 +17,7 @@ from tg_bot.analysis import (
 )
 from tg_bot.chart import finviz_chart_url
 from tg_bot.formatters import format_analysis_result_markdown, format_short_message
-from tg_bot.handlers.commands import build_del_keyboard
+from tg_bot.handlers.commands import build_del_keyboard, build_history_response
 from tg_bot.progress import ProgressReporter
 from tg_bot.storage import user_config_storage, watchlist_storage
 from tg_bot.telegraph_client import publish_to_telegraph
@@ -150,6 +150,12 @@ async def _handle_info(
         )
 
 
+async def _handle_history(query, ticker: str, date_str: str) -> None:
+    """Render a historical analysis selected via the date-picker keyboard."""
+    caption = await build_history_response(ticker, date_str)
+    await query.edit_message_text(caption, parse_mode="MarkdownV2")
+
+
 async def _handle_del(query, user_id: int, ticker: str) -> None:
     """Remove a ticker via the inline-button picker and re-render the keyboard."""
     await watchlist_storage.remove_ticker(user_id, ticker)
@@ -225,3 +231,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _handle_del(query, user_id, data.split(":", 1)[1])
     elif data.startswith("cancel:"):
         await _handle_cancel(context, query, user_id, data.split(":", 1)[1])
+    elif data.startswith("hist:"):
+        _, ticker, date_str = data.split(":", 2)
+        await _handle_history(query, ticker, date_str)

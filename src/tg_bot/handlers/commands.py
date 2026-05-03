@@ -1,15 +1,20 @@
-"""Command handlers (/start, /help, /add, /del, /watch, /list, /config)."""
+"""Command handlers (/start, /help, /add, /del, /watch, /list, /config, /history)."""
 
 import logging
 
+import markdown
 from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
+from telegram.helpers import escape_markdown
 
+from tg_bot.formatters import format_analysis_result_markdown
+from tg_bot.history import list_available_dates, load_historical_state, normalize_ticker
 from tg_bot.storage import (
     UserConfigStorage,
     user_config_storage,
     watchlist_storage,
 )
+from tg_bot.telegraph_client import publish_to_telegraph
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +45,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/del [<ticker> ...] - Remove stocks. With no args opens a picker.\n"
         "/watch or /list - Show your watchlist with clickable buttons\n"
         "/config - Configure LLM provider and deep/quick models\n"
+        "/history <ticker> [YYYY-MM-DD] - Look up a past analysis. "
+        "With no date, shows recent runs to pick from.\n"
         "/start - Welcome message"
     )
 
@@ -182,6 +189,91 @@ async def list_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(
         message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2"
     )
+
+
+async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Look up a past TradingAgents analysis from disk.
+
+    Forms:
+      /history                -> usage hint
+      /history NVDA           -> show inline picker of recent dates
+      /history NVDA 2026-04-15 -> publish that day's saved analysis to Telegraph
+    """
+    if not context.args:
+        await update.message.reply_text(
+            "Usage:\n"
+            "  /history <ticker>              — pick from recent runs\n"
+            "  /history <ticker> YYYY-MM-DD   — fetch a specific date"
+        )
+        return
+
+    ticker = normalize_ticker(context.args[0])
+    if ticker is None:
+        await update.message.reply_text("Invalid ticker symbol.")
+        return
+
+    if len(context.args) >= 2:
+        await _send_history_for_date(update.message, ticker, context.args[1].strip())
+    else:
+        await _send_history_picker(update.message, ticker)
+
+
+async def _send_history_picker(message, ticker: str) -> None:
+    """Reply with an inline keyboard of recent analysis dates for `ticker`."""
+    dates = list_available_dates(ticker)
+    if not dates:
+        await message.reply_text(f"No history found for {ticker}.")
+        return
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                d.isoformat(), callback_data=f"hist:{ticker}:{d.isoformat()}"
+            )
+        ]
+        for d in dates
+    ]
+    safe_ticker = escape_markdown(ticker, version=2)
+    await message.reply_text(
+        f"📜 History for `{safe_ticker}` — pick a date:",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def _send_history_for_date(message, ticker: str, date_str: str) -> None:
+    """Reply with the saved analysis for `ticker` on `date_str`."""
+    caption = await build_history_response(ticker, date_str)
+    await message.reply_text(caption, parse_mode="MarkdownV2")
+
+
+async def build_history_response(ticker: str, date_str: str) -> str:
+    """Load + publish a historical analysis. Returns a MarkdownV2 caption.
+
+    Shared by the /history command and the `hist:` inline-button callback so
+    both surfaces produce identical output.
+    """
+    safe_ticker = escape_markdown(ticker, version=2)
+    safe_date = escape_markdown(date_str, version=2)
+
+    state = load_historical_state(ticker, date_str)
+    if state is None:
+        return f"No analysis found for {safe_ticker} on {safe_date}\\."
+
+    md_body = format_analysis_result_markdown(ticker, state, signal="historical")
+    html = markdown.markdown(md_body)
+    telegraph_url = await publish_to_telegraph(f"{ticker} {date_str}", html)
+
+    msg = f"📜 *{safe_ticker}* — {safe_date}\n\n"
+    if telegraph_url:
+        # MarkdownV2 link URLs only need to escape ')' and '\'.
+        safe_url = telegraph_url.replace("\\", "\\\\").replace(")", "\\)")
+        msg += f"📄 [View Full Report]({safe_url})"
+    else:
+        msg += "⚠️ Full report unavailable " + escape_markdown(
+            "(Telegraph publish failed).", version=2
+        )
+    return msg
 
 
 async def config_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

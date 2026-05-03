@@ -21,6 +21,7 @@ from tg_bot.handlers import (
     config_cmd,
     del_ticker,
     help_cmd,
+    history_cmd,
     list_watchlist,
     start,
 )
@@ -41,6 +42,7 @@ BOT_COMMANDS = [
     BotCommand("watch", "Show your watchlist"),
     BotCommand("list", "Show your watchlist (alias)"),
     BotCommand("config", "Configure LLM provider and models"),
+    BotCommand("history", "Look up a past analysis"),
 ]
 
 
@@ -72,6 +74,7 @@ def _build_application() -> Application:
     application.add_handler(CommandHandler("watch", list_watchlist))
     application.add_handler(CommandHandler("list", list_watchlist))
     application.add_handler(CommandHandler("config", config_cmd))
+    application.add_handler(CommandHandler("history", history_cmd))
     application.add_handler(CallbackQueryHandler(button_callback))
 
     # Reply-driven /add: when the user replies to the bot's add-prompt,

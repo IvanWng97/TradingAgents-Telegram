@@ -50,6 +50,7 @@ Top-level: `pyproject.toml` (deps), `Dockerfile`, `docker-compose.yml`, `.env`, 
 - **Callback dispatch** is prefix-based: `provider:`, `deep:`, `quick:`, `info:`. Stay under Telegram's 64-byte `callback_data` limit (longest current value ≈ 42 bytes).
 - **Telegraph CONTENT_TOO_BIG**: `format_analysis_result_markdown` emits only `final_trade_decision` + `trader_investment_plan`. Adding more `final_state` sections risks blowing the cap — truncate or drop sections, don't just append.
 - **finviz cache-busting**: `chart.py:finviz_chart_url` appends `&_=<unix_ts>` so Telegram's CDN doesn't serve a stale cached photo.
+- **History command** (`/history <ticker> [YYYY-MM-DD]`) reads tradingagents' on-disk JSON logs at `<results_dir>/<TICKER>/TradingAgentsStrategy_logs/full_states_log_<date>.json`. `results_dir` defaults to `~/.tradingagents/logs` and is configurable via `TRADINGAGENTS_RESULTS_DIR`. **Docker caveat**: that path is ephemeral by default — set `TRADINGAGENTS_RESULTS_DIR=/app/data/ta-logs` and bind-mount it (or include `data/ta-logs` in the existing `data/` mount) for history to survive container restarts.
 
 ## Environment variables
 

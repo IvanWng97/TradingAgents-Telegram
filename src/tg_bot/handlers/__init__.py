@@ -7,6 +7,7 @@ from .commands import (
     config_cmd,
     del_ticker,
     help_cmd,
+    history_cmd,
     list_watchlist,
     start,
 )
@@ -19,5 +20,6 @@ __all__ = [
     "del_ticker",
     "list_watchlist",
     "config_cmd",
+    "history_cmd",
     "button_callback",
 ]
