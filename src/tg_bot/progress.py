@@ -114,48 +114,51 @@ class ProgressReporter:
 class _DelegatingProgressCallback(BaseCallbackHandler):
     """LangChain callback singleton attached to a cached TradingAgentsGraph.
 
-    On each node entry it reads the per-run reporter from threadlocal storage
-    and bridges the call back onto the asyncio loop that owns the bot. If no
-    reporter is set for the current thread (e.g. a non-bot caller), the event
-    is silently dropped.
+    TradingAgents passes our callbacks into the LLM constructor kwargs, so we
+    receive LLM-level events (`on_chat_model_start` / `on_llm_start`) — NOT
+    `on_chain_start`. LangGraph propagates the surrounding node name as
+    `metadata["langgraph_node"]` on every LLM call inside a node, which is
+    what we use to identify the current pipeline step.
+
+    The callback reads the per-run reporter from threadlocal storage and
+    bridges back onto the asyncio loop that owns the bot. If no reporter is
+    set for the current thread, the event is silently dropped.
     """
 
-    def on_chain_start(
+    def on_chat_model_start(
         self,
         serialized: Optional[dict],
-        inputs: Any,
-        *,
-        run_id: Any = None,
-        parent_run_id: Any = None,
-        tags: Optional[list[str]] = None,
-        metadata: Optional[dict] = None,
+        messages: Any,
         **kwargs: Any,
     ) -> None:
+        self._dispatch(kwargs)
+
+    def on_llm_start(
+        self,
+        serialized: Optional[dict],
+        prompts: Any,
+        **kwargs: Any,
+    ) -> None:
+        self._dispatch(kwargs)
+
+    def _dispatch(self, kwargs: dict) -> None:
         reporter: Optional[ProgressReporter] = getattr(_current_reporter, "value", None)
         if reporter is None:
             return
-
-        node_name = self._extract_node_name(serialized, metadata, kwargs)
+        metadata = kwargs.get("metadata") or {}
+        node_name = metadata.get("langgraph_node")
         if not node_name:
+            # Not an LLM call inside a langgraph node — ignore noise from
+            # any LLM client warm-ups or auxiliary calls.
             return
-
+        logger.debug("Progress event: node=%s", node_name)
         try:
-            asyncio.run_coroutine_threadsafe(reporter.report(node_name), reporter.loop)
+            asyncio.run_coroutine_threadsafe(
+                reporter.report(str(node_name)), reporter.loop
+            )
         except RuntimeError:
             # Loop closed (analysis outlived the chat) — drop the event.
             pass
-
-    @staticmethod
-    def _extract_node_name(
-        serialized: Optional[dict],
-        metadata: Optional[dict],
-        kwargs: dict,
-    ) -> Optional[str]:
-        if metadata and "langgraph_node" in metadata:
-            return str(metadata["langgraph_node"])
-        # Fallbacks for older langgraph or non-graph chains.
-        name = kwargs.get("name") or (serialized or {}).get("name")
-        return str(name) if name else None
 
 
 # Single instance reused across all cached graphs — the per-run target lives
