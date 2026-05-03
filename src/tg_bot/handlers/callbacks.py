@@ -18,6 +18,7 @@ from tg_bot.analysis import (
 from tg_bot.chart import finviz_chart_url
 from tg_bot.formatters import format_analysis_result_markdown, format_short_message
 from tg_bot.handlers.commands import build_del_keyboard
+from tg_bot.progress import ProgressReporter
 from tg_bot.storage import user_config_storage, watchlist_storage
 from tg_bot.telegraph_client import publish_to_telegraph
 
@@ -108,9 +109,17 @@ async def _handle_info(
         )
         return
 
+    reporter = ProgressReporter(
+        bot=context.bot,
+        chat_id=chat_id,
+        message_id=progress_msg.message_id,
+        ticker=ticker,
+        loop=asyncio.get_running_loop(),
+    )
+
     try:
         final_state, signal = await asyncio.to_thread(
-            run_trading_analysis, ticker, user_id, user_config_storage
+            run_trading_analysis, ticker, user_id, user_config_storage, reporter
         )
         if final_state is None:
             await context.bot.edit_message_caption(

@@ -6,6 +6,11 @@ from datetime import date
 from typing import Optional
 
 from tg_bot.config import Config
+from tg_bot.progress import (
+    ProgressReporter,
+    delegating_progress_callback,
+    set_reporter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +76,18 @@ def _resolve_models(
     return deep, quick
 
 
-def run_trading_analysis(ticker: str, user_id, user_config_storage):
+def run_trading_analysis(
+    ticker: str,
+    user_id,
+    user_config_storage,
+    reporter: Optional[ProgressReporter] = None,
+):
     """Run TradingAgentsGraph for `ticker` using the user's stored LLM config.
+
+    `reporter`, when supplied, receives per-step caption updates via the
+    delegating LangChain callback baked into every cached graph. Reporter
+    is bound to the current thread for the duration of propagate() so the
+    singleton callback can dispatch to it.
 
     Returns (final_state, signal). (None, None) if tradingagents isn't
     available — caller should surface a helpful error.
@@ -101,8 +116,14 @@ def run_trading_analysis(ticker: str, user_id, user_config_storage):
             )
 
     ta, lock = _get_or_create_graph(config)
-    with lock:
-        final_state, signal = ta.propagate(company_name=ticker, trade_date=date.today())
+    set_reporter(reporter)
+    try:
+        with lock:
+            final_state, signal = ta.propagate(
+                company_name=ticker, trade_date=date.today()
+            )
+    finally:
+        set_reporter(None)
     logger.info("Final state for %s: %s", ticker, final_state)
     return final_state, signal
 
@@ -110,7 +131,12 @@ def run_trading_analysis(ticker: str, user_id, user_config_storage):
 def _get_or_create_graph(config: dict) -> _GraphCacheEntry:
     """Return a cached TradingAgentsGraph for this LLM-config combo, building
     one if it hasn't been seen before. The returned lock must be held while
-    calling propagate() since the graph carries mutable per-call state."""
+    calling propagate() since the graph carries mutable per-call state.
+
+    The delegating progress callback is attached to every fresh graph so
+    per-run progress can be dispatched via a threadlocal target — see
+    tg_bot.progress.
+    """
     key = (
         config.get("llm_provider", ""),
         config.get("deep_think_llm", ""),
@@ -121,7 +147,11 @@ def _get_or_create_graph(config: dict) -> _GraphCacheEntry:
         if entry is None:
             logger.info("Building TradingAgentsGraph for %s", key)
             entry = (
-                TradingAgentsGraph(debug=Config.TA_DEBUG, config=config),
+                TradingAgentsGraph(
+                    debug=Config.TA_DEBUG,
+                    config=config,
+                    callbacks=[delegating_progress_callback],
+                ),
                 threading.Lock(),
             )
             _graph_cache[key] = entry
