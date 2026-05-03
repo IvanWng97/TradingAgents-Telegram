@@ -72,7 +72,15 @@ TG_BOT_DATA_DIR=data                  # default
 
 ## Known limitations
 
-- `openrouter` and `azure` providers have no model catalog; their selection step is skipped and analysis falls back to `DEFAULT_CONFIG` models. Custom-model-ID input UI is not yet wired.
-- `format_short_message` mixes `*bold*` and `**bold**` while sent with `parse_mode="MarkdownV2"`; the `**` doesn't render and any unescaped MarkdownV2 special char in the signal can break parsing.
-- `publish_to_telegraph` swallows exceptions and returns `None`; callers render a Telegraph-link-less caption with no failure indication.
+- `openrouter` and `azure` providers have no model catalog; their selection step short-circuits with a notice and analysis falls back to `DEFAULT_CONFIG` models. Custom-model-ID input UI is not yet wired.
+- `send_photo` / Telegraph publish have no explicit timeouts; if finviz or Telegraph hangs, PTB's defaults apply (~5s) and the user sees no progress beyond the "Analyzing…" caption.
+- `Config.TA_DEBUG` is read once at process start; toggling `TG_BOT_TA_DEBUG` requires a bot restart (and would still only affect graphs built *after* the restart since cached entries carry their `debug` flag from init time).
+- Cached `TradingAgentsGraph` instances are never evicted; the cache grows unbounded (realistically capped at ~60 entries from the catalog combinatorics, so not pressing).
 - No tests, no structured logging / correlation id, no graceful shutdown hooks.
+
+## Recently fixed (May 2026)
+
+- All Telegram messages now use `parse_mode="MarkdownV2"` consistently. Variable content goes through `telegram.helpers.escape_markdown(version=2)` (or sits inside `` `…` `` code spans which need no escaping). Don't mix legacy `Markdown` back in.
+- Telegraph publish failures surface as `"⚠️ Full report unavailable (Telegraph publish failed)."` in the caption instead of a silently missing link.
+- `tradingagents` is pinned to a commit SHA in `pyproject.toml`. Bumping is an explicit edit; floating HEAD is not.
+- `TradingAgentsGraph(debug=…)` now reads from `Config.TA_DEBUG` (env: `TG_BOT_TA_DEBUG`); defaults to `False` for prod.
