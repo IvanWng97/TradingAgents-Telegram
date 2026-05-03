@@ -4,18 +4,12 @@ import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
-from telegram.helpers import escape_markdown
 
 from tg_bot.storage import (
     UserConfigStorage,
     user_config_storage,
     watchlist_storage,
 )
-
-
-def _v2(text: str) -> str:
-    """Shorthand for MarkdownV2 escaping of variable content."""
-    return escape_markdown(text, version=2)
 
 
 logger = logging.getLogger(__name__)
@@ -95,9 +89,8 @@ async def list_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     ]
     # Tickers go inside `…` code spans, where the only chars needing escape
     # are backticks and backslashes — neither valid in a stock symbol.
-    message = (
-        f"*Your Watchlist \\({len(watchlist)} stocks\\):*\n\n"
-        + "\n".join(f"• `{t}`" for t in watchlist)
+    message = f"*Your Watchlist \\({len(watchlist)} stocks\\):*\n\n" + "\n".join(
+        f"• `{t}`" for t in watchlist
     )
     await update.message.reply_text(
         message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2"

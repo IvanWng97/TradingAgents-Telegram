@@ -9,11 +9,6 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
-
-def _v2(text: str) -> str:
-    """Shorthand for MarkdownV2 escaping of variable content."""
-    return escape_markdown(text, version=2)
-
 from tg_bot.analysis import (
     TRADINGAGENTS_AVAILABLE,
     get_model_options,
@@ -48,7 +43,7 @@ async def _handle_provider(query, user_id: int, provider: str) -> None:
         await query.edit_message_text(
             f"Provider set to `{provider}`\\.\n\n"
             "This provider needs a custom model ID — model selection isn't "
-            f"wired up for it yet, so the run will use {_v2('DEFAULT_CONFIG')} "
+            f"wired up for it yet, so the run will use {escape_markdown('DEFAULT_CONFIG', version=2)} "
             "models\\.",
             parse_mode="MarkdownV2",
         )
@@ -97,7 +92,7 @@ async def _handle_info(
     progress_msg = await context.bot.send_photo(
         chat_id=chat_id,
         photo=chart_url,
-        caption=f"📊 Analyzing *{_v2(ticker)}*… please wait\\.",
+        caption=f"📊 Analyzing *{escape_markdown(ticker, version=2)}*… please wait\\.",
         parse_mode="MarkdownV2",
     )
 
