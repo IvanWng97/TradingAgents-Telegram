@@ -1,19 +1,22 @@
 # TradingAgents Telegram Bot
 
-Telegram bot wrapping the [TradingAgents](https://github.com/TauricResearch/TradingAgents) framework. Users add tickers to a watchlist via Telegram, tap a ticker, and the bot runs `TradingAgentsGraph.propagate(...)` and replies with a finviz chart, the trade decision, and a Telegraph link to the full analysis.
+Telegram bot wrapping the [TradingAgents](https://github.com/TauricResearch/TradingAgents) framework. Curate a watchlist via Telegram, tap a ticker, and the bot runs `TradingAgentsGraph.propagate(...)` and replies with a finviz chart, the trade decision, and a Telegraph link to the full analysis. Per-step pipeline progress (Market Analyst → Bull Researcher → … → Portfolio Manager) streams back into the message caption while the analysis runs.
 
 ## Commands
 
 | Command | Description |
 |---|---|
-| `/start` | Welcome message |
-| `/help` | Show available commands |
-| `/add <ticker>` | Add a ticker to your watchlist (e.g. `/add NVDA`) |
-| `/del <ticker>` | Remove a ticker from your watchlist |
-| `/watch` / `/list` | Show your watchlist with clickable buttons — tap a ticker to run analysis |
-| `/config` | Pick LLM provider, then deep-think and quick-think models |
+| `/start`, `/help` | Welcome / help text |
+| `/add NVDA AAPL TSLA` | Bulk-add multiple tickers in one shot |
+| `/add` (no args) | Bot prompts; reply with the ticker(s) you want to add |
+| `/del NVDA AAPL` | Bulk-remove |
+| `/del` (no args) | Pop up an inline-button picker — tap ❌ on each ticker, `✅ Done` to close |
+| `/watch`, `/list` | Show your watchlist with clickable buttons — tap a ticker to run analysis |
+| `/config` | Three-step picker: provider → deep model → quick model. `❌ Cancel` at any step rolls back to your prior settings |
+| `/history NVDA` | Inline-button picker of recent analysis dates for that ticker |
+| `/history NVDA 2026-04-15` | Direct lookup — publishes that day's saved analysis to Telegraph |
 
-The Telegram client also exposes a Menu button next to the input field with the same commands (populated via `set_my_commands`).
+The Telegram client also exposes a Menu button next to the input field with the same commands (populated via `set_my_commands`), and `/`-autocomplete works after typing the first letter or two.
 
 ## Quick start (local)
 
@@ -22,7 +25,7 @@ git clone <repo>
 cd TradingAgents-Telegram
 
 # 1. Set up venv + install
-python3 -m venv .venv
+python3.14 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 
@@ -30,15 +33,21 @@ pip install -e .
 cat > .env <<EOF
 TELEGRAM_BOT_TOKEN=...
 TELEGRAPH_ACCESS_TOKEN=...
-ALLOWED_USER_IDS=        # comma-separated user IDs; empty = open to everyone
-DEEPSEEK_API_KEY=...     # or OPENAI_API_KEY / ANTHROPIC_API_KEY / etc.
+ALLOWED_USER_IDS=12345678          # IMPORTANT: leave empty only if you trust the public
+DEEPSEEK_API_KEY=...               # or OPENAI_API_KEY / ANTHROPIC_API_KEY / etc.
 EOF
 
-# 3. Run
+# 3. (macOS only, once per fresh install) clear macOS UF_HIDDEN flag
+#    on the editable .pth so Python 3.14 stops skipping it
+chflags nohidden .venv/lib/python3.14/site-packages/*.pth
+
+# 4. Run
 python -m tg_bot
 ```
 
 Get a bot token from [@BotFather](https://t.me/BotFather) (`/newbot`); get a Telegraph access token from [Telegraph's API docs](https://telegra.ph/api).
+
+> ⚠️ Leaving `ALLOWED_USER_IDS` empty makes the bot open to anyone who finds your bot handle, and they will burn your LLM tokens. The bot replies with the requesting user's Telegram ID on rejection so you can whitelist them.
 
 ## Deploy with Docker
 
@@ -47,9 +56,11 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
-`docker-compose.yml` mounts `./data` into the container so per-user watchlists and LLM settings persist across restarts, and reads `.env` via `env_file:` (the file is never baked into the image).
+`docker-compose.yml` mounts `./data` into the container so per-user watchlists, LLM settings, and (with the env vars below) tradingagents history/cache survive restarts. `.env` is loaded via `env_file:` and is never baked into the image.
 
 To upgrade later: `git pull && docker compose up -d --build`.
+
+**To pick up new upstream `tradingagents` commits**: GitHub Actions has a daily cron that resolves upstream HEAD via `git ls-remote`, skips the build when nothing changed, and otherwise rebuilds the image with `--no-cache`. Manual dispatch forces a rebuild. From the VPS just `docker compose pull && docker compose up -d`.
 
 ## Configuration
 
@@ -59,8 +70,11 @@ Set in `.env` (or as compose env vars):
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | yes | from @BotFather |
 | `TELEGRAPH_ACCESS_TOKEN` | yes | for Telegraph publishing |
-| `ALLOWED_USER_IDS` | no | comma-separated; empty = open. The bot replies with `Your user ID is <id>` to unauthorized users so you can whitelist them. |
+| `ALLOWED_USER_IDS` | strongly recommended | comma-separated; empty = open to anyone (logged at WARNING). Bot replies with the user's Telegram ID on rejection so you can whitelist them. |
 | `TG_BOT_DATA_DIR` | no | default `data` |
+| `TG_BOT_TA_DEBUG` | no | `1`/`true` enables `TradingAgentsGraph(debug=True)` (streams every langgraph chunk to stdout — verbose, dev only). Default off. |
+| `TRADINGAGENTS_RESULTS_DIR` | recommended in Docker | `/history` reads from here. Defaults to `~/.tradingagents/logs` (ephemeral in containers). Set to e.g. `/app/data/ta-logs` and bind-mount to persist. |
+| `TRADINGAGENTS_CACHE_DIR` | recommended in Docker | yfinance cache. Defaults to `~/.tradingagents/cache` (ephemeral). Set to `/app/data/ta-cache` to skip re-downloads on every restart. |
 | Provider keys | yes (one) | `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, etc. — must match the provider you select via `/config` |
 
 Supported LLM providers (set via `/config`): `openai`, `google`, `anthropic`, `xai`, `deepseek`, `qwen`, `glm`, `ollama` (have built-in model catalogs); `openrouter`, `azure` (require manual model IDs — UI not yet wired).
@@ -70,22 +84,25 @@ Supported LLM providers (set via `/config`): `openai`, `google`, `anthropic`, `x
 ```
 src/tg_bot/
 ├── __main__.py            # `python -m tg_bot`
-├── app.py                 # Application builder, BOT_COMMANDS
+├── app.py                 # Application builder, BOT_COMMANDS, post_init
 ├── auth.py                # ALLOWED_USER_IDS gate (TypeHandler at group=-1)
-├── analysis.py            # TradingAgents adapter + model catalog
+├── config.py              # env-driven Config
+├── analysis.py            # TradingAgents adapter, graph cache, model catalog
 ├── chart.py               # finviz_chart_url
 ├── formatters.py          # Telegram caption + Telegraph markdown
+├── progress.py            # ProgressReporter + LangChain BaseCallbackHandler
+├── history.py             # disk-readers for past analyses
 ├── telegraph_client.py    # sanitize + publish
-├── config.py              # env-driven Config
 ├── handlers/{commands,callbacks}.py
-└── storage/               # JSON-backed, atomic writes; per-user
-    ├── _base.py           # JsonStorage
+└── storage/                # JSON-backed, atomic + fsync writes; per-user
+    ├── _base.py            # JsonStorage (async wrapper for mutations)
     ├── watchlist.py
     ├── user_config.py
-    └── __init__.py        # exports singletons
+    └── __init__.py         # exports singletons
 data/                       # runtime state (watchlist.json, user_config.json)
+.github/workflows/          # ruff lint, Docker build with SHA-check skip
 pyproject.toml              # deps + package metadata
 Dockerfile, docker-compose.yml
 ```
 
-See [`CLAUDE.md`](./CLAUDE.md) for architecture notes and current limitations.
+See [`CLAUDE.md`](./CLAUDE.md) for architecture notes, key contracts, and current limitations.
