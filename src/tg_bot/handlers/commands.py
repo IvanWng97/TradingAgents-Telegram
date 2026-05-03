@@ -30,8 +30,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Available commands:\n\n"
-        "/add <ticker> - Add a stock to watchlist (e.g. /add NVDA)\n"
-        "/del <ticker> - Remove a stock from watchlist\n"
+        "/add <ticker> [<ticker> ...] - Add stocks (e.g. /add NVDA AAPL TSLA)\n"
+        "/del [<ticker> ...] - Remove stocks. With no args opens a picker.\n"
         "/watch or /list - Show your watchlist with clickable buttons\n"
         "/config - Configure LLM provider and deep/quick models\n"
         "/start - Welcome message"
@@ -39,35 +39,87 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def add_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Accept one or more tickers in a single command."""
     user_id = update.effective_user.id
     if not context.args:
         await update.message.reply_text(
-            "Please provide a ticker symbol.\nExample: /add NVDA"
+            "Please provide one or more ticker symbols.\nExample: /add NVDA AAPL TSLA"
         )
         return
 
-    ticker = context.args[0].strip().upper()
-    if await watchlist_storage.add_ticker(user_id, ticker):
-        await update.message.reply_text(f"Added {ticker} to your watchlist!")
-    else:
-        await update.message.reply_text(f"{ticker} is already in your watchlist.")
+    added: list[str] = []
+    duplicate: list[str] = []
+    for raw in context.args:
+        ticker = raw.strip().upper()
+        if not ticker:
+            continue
+        if await watchlist_storage.add_ticker(user_id, ticker):
+            added.append(ticker)
+        else:
+            duplicate.append(ticker)
+
+    parts: list[str] = []
+    if added:
+        parts.append(f"✅ Added: {', '.join(added)}")
+    if duplicate:
+        parts.append(f"➖ Already in watchlist: {', '.join(duplicate)}")
+    if not parts:
+        parts.append("No valid tickers provided.")
+    await update.message.reply_text("\n".join(parts))
 
 
 async def del_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """With args: bulk-remove. Without args: open an inline-button picker."""
     user_id = update.effective_user.id
+
     if not context.args:
-        await update.message.reply_text(
-            "Please provide a ticker symbol.\nExample: /del NVDA"
-        )
+        await _send_del_picker(update, user_id)
         return
 
-    ticker = context.args[0].strip().upper()
-    if await watchlist_storage.remove_ticker(user_id, ticker):
-        await update.message.reply_text(f"Removed {ticker} from your watchlist.")
-    else:
-        await update.message.reply_text(
-            f"{ticker} is not in your watchlist.\nUse /watch to see your current watchlist."
-        )
+    removed: list[str] = []
+    missing: list[str] = []
+    for raw in context.args:
+        ticker = raw.strip().upper()
+        if not ticker:
+            continue
+        if await watchlist_storage.remove_ticker(user_id, ticker):
+            removed.append(ticker)
+        else:
+            missing.append(ticker)
+
+    parts: list[str] = []
+    if removed:
+        parts.append(f"✅ Removed: {', '.join(removed)}")
+    if missing:
+        parts.append(f"❓ Not in watchlist: {', '.join(missing)}")
+    if not parts:
+        parts.append("No valid tickers provided.")
+    await update.message.reply_text("\n".join(parts))
+
+
+async def _send_del_picker(update: Update, user_id: int) -> None:
+    """Render the watchlist as a keyboard of ❌-prefixed remove buttons."""
+    watchlist = watchlist_storage.get_watchlist(user_id)
+    if not watchlist:
+        await update.message.reply_text("Your watchlist is empty.")
+        return
+
+    keyboard = build_del_keyboard(watchlist)
+    await update.message.reply_text(
+        "Tap a ticker to remove it from your watchlist:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+def build_del_keyboard(tickers: list[str]) -> list[list[InlineKeyboardButton]]:
+    """3-per-row grid of ❌-prefixed delete buttons."""
+    return [
+        [
+            InlineKeyboardButton(f"❌ {t}", callback_data=f"del:{t}")
+            for t in tickers[i : i + 3]
+        ]
+        for i in range(0, len(tickers), 3)
+    ]
 
 
 async def list_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -17,7 +17,8 @@ from tg_bot.analysis import (
 )
 from tg_bot.chart import finviz_chart_url
 from tg_bot.formatters import format_analysis_result_markdown, format_short_message
-from tg_bot.storage import user_config_storage
+from tg_bot.handlers.commands import build_del_keyboard
+from tg_bot.storage import user_config_storage, watchlist_storage
 from tg_bot.telegraph_client import publish_to_telegraph
 
 
@@ -25,11 +26,14 @@ logger = logging.getLogger(__name__)
 
 
 def _model_keyboard(mode: str, provider: str) -> InlineKeyboardMarkup:
-    """One button per row — provider model labels can be long."""
+    """One button per row — provider model labels can be long. A trailing
+    Cancel row lets users bail out of the multi-step config flow without
+    finishing every selection."""
     keyboard = [
         [InlineKeyboardButton(label, callback_data=f"{mode}:{provider}:{model_id}")]
         for label, model_id in get_model_options(provider, mode)
     ]
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel:config")])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -137,6 +141,30 @@ async def _handle_info(
         )
 
 
+async def _handle_del(query, user_id: int, ticker: str) -> None:
+    """Remove a ticker via the inline-button picker and re-render the keyboard."""
+    await watchlist_storage.remove_ticker(user_id, ticker)
+    remaining = watchlist_storage.get_watchlist(user_id)
+    if not remaining:
+        await query.edit_message_text("Your watchlist is now empty.")
+        return
+    await query.edit_message_text(
+        "Tap a ticker to remove it from your watchlist:",
+        reply_markup=InlineKeyboardMarkup(build_del_keyboard(remaining)),
+    )
+
+
+async def _handle_cancel(query, what: str) -> None:
+    """Bail out of a multi-step flow. `what` names the flow being cancelled."""
+    if what == "config":
+        await query.edit_message_text(
+            "❌ LLM configuration cancelled — settings unchanged\\.",
+            parse_mode="MarkdownV2",
+        )
+    else:
+        await query.edit_message_text("Cancelled.")
+
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Dispatch on the callback_data prefix."""
     query = update.callback_query
@@ -154,3 +182,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _handle_quick(query, user_id, provider, model)
     elif data.startswith("info:"):
         await _handle_info(query, context, user_id, data.split(":", 1)[1])
+    elif data.startswith("del:"):
+        await _handle_del(query, user_id, data.split(":", 1)[1])
+    elif data.startswith("cancel:"):
+        await _handle_cancel(query, data.split(":", 1)[1])
