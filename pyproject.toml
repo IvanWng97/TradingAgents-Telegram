@@ -9,7 +9,7 @@ description = "Telegram bot wrapper around TradingAgents."
 requires-python = ">=3.11"
 dependencies = [
     "python-telegram-bot>=22.7",
-    "python-dotenv>=1.0.0",
+    "python-dotenv>=1.2.2",
     "telegraph>=2.2.0",
     "markdown>=3.10.2",
     "beautifulsoup4>=4.14.3",
