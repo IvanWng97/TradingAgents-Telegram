@@ -62,7 +62,7 @@ jobs:
       - name: Extract metadata
         id: meta
         if: steps.gate.outputs.skip != 'true'
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
