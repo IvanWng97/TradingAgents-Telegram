@@ -163,13 +163,43 @@ async def _handle_del(query, user_id: int, ticker: str) -> None:
     )
 
 
-async def _handle_cancel(query, what: str) -> None:
-    """Bail out of a multi-step flow. `what` names the flow being cancelled."""
+async def _handle_cancel(
+    context: ContextTypes.DEFAULT_TYPE, query, user_id: int, what: str
+) -> None:
+    """Bail out of a multi-step flow. `what` names the flow being cancelled.
+
+    For `config`, restores the (provider, deep, quick) snapshot taken when
+    /config was first invoked, so any provider/model writes that happened
+    mid-flow are rolled back.
+
+    For `del`, just dismisses the picker (each ❌ tap committed already).
+    """
     if what == "config":
+        snapshot = context.user_data.pop("llm_snapshot", None)
+        if snapshot is not None:
+            if snapshot["provider"]:
+                # Restore prior provider; set_llm_provider clears deep/quick,
+                # so re-write them after.
+                await user_config_storage.set_llm_provider(
+                    user_id, snapshot["provider"]
+                )
+                if snapshot["deep"]:
+                    await user_config_storage.set_llm_model(
+                        user_id, "deep", snapshot["deep"]
+                    )
+                if snapshot["quick"]:
+                    await user_config_storage.set_llm_model(
+                        user_id, "quick", snapshot["quick"]
+                    )
+            else:
+                # No prior provider — wipe whatever was just written.
+                await user_config_storage.clear(user_id)
         await query.edit_message_text(
-            "❌ LLM configuration cancelled — settings unchanged\\.",
+            "❌ LLM configuration cancelled — previous settings restored\\.",
             parse_mode="MarkdownV2",
         )
+    elif what == "del":
+        await query.edit_message_text("✅ Done\\.", parse_mode="MarkdownV2")
     else:
         await query.edit_message_text("Cancelled.")
 
@@ -194,4 +224,4 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data.startswith("del:"):
         await _handle_del(query, user_id, data.split(":", 1)[1])
     elif data.startswith("cancel:"):
-        await _handle_cancel(query, data.split(":", 1)[1])
+        await _handle_cancel(context, query, user_id, data.split(":", 1)[1])

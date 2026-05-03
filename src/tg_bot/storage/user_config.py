@@ -57,3 +57,12 @@ class UserConfigStorage(JsonStorage):
 
     def get_config(self, user_id: str) -> dict[str, str]:
         return self._data.get(str(user_id), {})
+
+    async def clear(self, user_id: str) -> bool:
+        """Remove a user's entire config entry. Used to roll back partial /config flows."""
+        user_id = str(user_id)
+        if user_id not in self._data:
+            return False
+        del self._data[user_id]
+        await self._save_async()
+        return True

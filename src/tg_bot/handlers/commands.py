@@ -2,7 +2,7 @@
 
 import logging
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from tg_bot.storage import (
@@ -13,6 +13,12 @@ from tg_bot.storage import (
 
 
 logger = logging.getLogger(__name__)
+
+
+# Sentinel string used to recognize replies to our add-prompt. Matched
+# verbatim against `update.message.reply_to_message.text` so the reply
+# handler doesn't fire on every reply to the bot.
+ADD_PROMPT = "📝 Send the ticker symbol(s) to add (e.g. NVDA AAPL TSLA):"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -38,18 +44,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def add_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Accept one or more tickers in a single command."""
-    user_id = update.effective_user.id
-    if not context.args:
-        await update.message.reply_text(
-            "Please provide one or more ticker symbols.\nExample: /add NVDA AAPL TSLA"
-        )
-        return
-
+async def _apply_add(user_id: int, tokens: list[str]) -> str:
+    """Add `tokens` (raw ticker strings) to user's watchlist; return a summary."""
     added: list[str] = []
     duplicate: list[str] = []
-    for raw in context.args:
+    for raw in tokens:
         ticker = raw.strip().upper()
         if not ticker:
             continue
@@ -65,7 +64,39 @@ async def add_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         parts.append(f"➖ Already in watchlist: {', '.join(duplicate)}")
     if not parts:
         parts.append("No valid tickers provided.")
-    await update.message.reply_text("\n".join(parts))
+    return "\n".join(parts)
+
+
+async def add_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/add NVDA AAPL` adds inline; bare `/add` opens a reply prompt."""
+    user_id = update.effective_user.id
+    if context.args:
+        await update.message.reply_text(await _apply_add(user_id, context.args))
+        return
+
+    # No args: open a ForceReply prompt. Telegram clients pop the reply box
+    # automatically; the user types tickers and add_via_reply catches them.
+    await update.message.reply_text(
+        ADD_PROMPT,
+        reply_markup=ForceReply(selective=True),
+    )
+
+
+async def add_via_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle replies to our ADD_PROMPT message — treat reply text as tickers."""
+    msg = update.message
+    if msg is None or msg.reply_to_message is None:
+        return
+    replied = msg.reply_to_message
+    # Only fire when the reply is to OUR add prompt (not random replies to the bot).
+    if not replied.from_user or not replied.from_user.is_bot:
+        return
+    if (replied.text or "") != ADD_PROMPT:
+        return
+
+    tokens = (msg.text or "").split()
+    summary = await _apply_add(update.effective_user.id, tokens)
+    await msg.reply_text(summary)
 
 
 async def del_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -112,14 +143,18 @@ async def _send_del_picker(update: Update, user_id: int) -> None:
 
 
 def build_del_keyboard(tickers: list[str]) -> list[list[InlineKeyboardButton]]:
-    """3-per-row grid of ❌-prefixed delete buttons."""
-    return [
+    """3-per-row grid of ❌-prefixed delete buttons + a Done row to close
+    the picker. Deletes happen on each tap, so the trailing button is just
+    a dismissal — not a rollback."""
+    rows = [
         [
             InlineKeyboardButton(f"❌ {t}", callback_data=f"del:{t}")
             for t in tickers[i : i + 3]
         ]
         for i in range(0, len(tickers), 3)
     ]
+    rows.append([InlineKeyboardButton("✅ Done", callback_data="cancel:del")])
+    return rows
 
 
 async def list_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -157,6 +192,13 @@ async def config_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     current_deep = user_config_storage.get_llm_model(user_id, "deep") or "default"
     current_quick = user_config_storage.get_llm_model(user_id, "quick") or "default"
 
+    # Snapshot the current LLM state so a Cancel during the flow can restore it.
+    context.user_data["llm_snapshot"] = {
+        "provider": user_config_storage.get_llm_provider(user_id),
+        "deep": user_config_storage.get_llm_model(user_id, "deep"),
+        "quick": user_config_storage.get_llm_model(user_id, "quick"),
+    }
+
     providers = UserConfigStorage.VALID_PROVIDERS
     keyboard = [
         [
@@ -165,6 +207,7 @@ async def config_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         ]
         for i in range(0, len(providers), 2)
     ]
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel:config")])
     # Provider/model strings inside `…` code spans need no escaping.
     message = (
         "*LLM Configuration*\n\n"

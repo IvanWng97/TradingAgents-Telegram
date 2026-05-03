@@ -7,13 +7,16 @@ from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
+    MessageHandler,
     TypeHandler,
+    filters,
 )
 
 from tg_bot.auth import authorize
 from tg_bot.config import Config
 from tg_bot.handlers import (
     add_ticker,
+    add_via_reply,
     button_callback,
     config_cmd,
     del_ticker,
@@ -70,6 +73,13 @@ def _build_application() -> Application:
     application.add_handler(CommandHandler("list", list_watchlist))
     application.add_handler(CommandHandler("config", config_cmd))
     application.add_handler(CallbackQueryHandler(button_callback))
+
+    # Reply-driven /add: when the user replies to the bot's add-prompt,
+    # parse the reply text as ticker(s). add_via_reply itself filters by
+    # exact prompt-text match so other replies to the bot are ignored.
+    application.add_handler(
+        MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, add_via_reply)
+    )
 
     return application
 
