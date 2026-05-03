@@ -5,11 +5,12 @@ Message formatting and sending.
 
 import logging
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 from telegraph import Telegraph
 
-load_dotenv()
+load_dotenv(Path(__file__).parent / ".env")
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +53,17 @@ async def publish_to_telegraph(title: str, content: str) -> str:
 
 
 def format_analysis_result_markdown(ticker: str, final_state: dict, signal: str) -> str:
-    """Format analysis result as Markdown."""
-    content = f"**{ticker} Analysis Result**\n\n**Decision:** {signal}\n\n"
-    decision = final_state.get("final_trade_decision", "N/A")
-    content += f"# Final Trade Decision\n\n{decision}\n\n"
-    return content
+    """Format analysis result as Markdown.
+
+    Currently emits only the final trade decision — other sections from
+    final_state can be appended later.
+    """
+    return (
+        f"**{ticker} Analysis Result**\n\n"
+        f"**Decision:** {signal}\n\n"
+        f"# Final Trade Decision\n\n"
+        f"{final_state.get('final_trade_decision', 'N/A')}\n"
+    )
 
 
 def format_short_message(ticker: str, signal: str, telegraph_url: str = None) -> str:

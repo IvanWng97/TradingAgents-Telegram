@@ -119,6 +119,8 @@ async def config_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /config command."""
     user_id = update.effective_user.id
     current_provider = user_config_storage.get_llm_provider(user_id) or "default (openai)"
+    current_deep = user_config_storage.get_llm_model(user_id, "deep") or "default"
+    current_quick = user_config_storage.get_llm_model(user_id, "quick") or "default"
 
     # Create inline keyboard with provider buttons
     providers = UserConfigStorage.VALID_PROVIDERS
@@ -133,9 +135,11 @@ async def config_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     message = (
-        f"*LLM Provider Configuration*\n\n"
-        f"Current: `{current_provider}`\n\n"
-        f"Select a provider below:"
+        f"*LLM Configuration*\n\n"
+        f"Provider: `{current_provider}`\n"
+        f"Deep: `{current_deep}`\n"
+        f"Quick: `{current_quick}`\n\n"
+        f"Pick a provider — you'll then choose deep and quick models."
     )
 
     await update.message.reply_text(

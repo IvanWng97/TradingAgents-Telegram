@@ -6,8 +6,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load .env from project root (parent of telegram_bot directory)
-PROJECT_ROOT = Path(__file__).parent.parent
+PROJECT_ROOT = Path(__file__).parent
 load_dotenv(PROJECT_ROOT / ".env")
 
 
