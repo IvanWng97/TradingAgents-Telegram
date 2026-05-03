@@ -8,7 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 import markdown
 
-from storage import UserConfigStorage
+from storage import user_config_storage
 from analysis import (
     run_trading_analysis,
     TRADINGAGENTS_AVAILABLE,
@@ -23,8 +23,6 @@ from utils import (
 )
 
 logger = logging.getLogger(__name__)
-
-user_config_storage = UserConfigStorage()
 
 
 def _model_keyboard(mode: str, provider: str):

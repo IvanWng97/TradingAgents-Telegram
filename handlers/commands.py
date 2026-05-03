@@ -6,12 +6,9 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from storage import WatchlistStorage, UserConfigStorage
+from storage import UserConfigStorage, watchlist_storage as storage, user_config_storage
 
 logger = logging.getLogger(__name__)
-
-storage = WatchlistStorage()
-user_config_storage = UserConfigStorage()
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -163,3 +163,9 @@ class UserConfigStorage:
         """Get all config for a user."""
         user_id = str(user_id)
         return self._data.get(user_id, {})
+
+
+# Process-wide singletons. Handlers import these instead of constructing
+# their own instances, so all readers/writers share the same in-memory dict.
+watchlist_storage = WatchlistStorage()
+user_config_storage = UserConfigStorage()
