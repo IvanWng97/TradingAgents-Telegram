@@ -39,6 +39,33 @@ def sanitize_html_for_telegraph(html: str) -> str:
     return str(soup)
 
 
+def finviz_chart_url(
+    ticker: str,
+    chart_type: str = "c",
+    indicators: bool = True,
+    period: str = "d",
+    size: str = "l",
+) -> str:
+    """Return a finviz chart URL.
+
+    chart_type: 'c' candle, 'l' line, 'b' bar.
+    indicators: True overlays SMAs/RSI/MACD/volume.
+    period: 'd' daily, 'w' weekly, 'm' monthly, 'i5'/'i15'/'i30'/'i60' intraday.
+    size: 's' small, 'm' medium, 'l' large.
+
+    A cache-busting timestamp is appended so Telegram (which caches photos by
+    URL on its CDN) refetches finviz on every call instead of serving a stale
+    image. Finviz ignores the unknown param.
+    """
+    import time
+    cache_bust = int(time.time())
+    return (
+        f"https://finviz.com/chart.ashx?t={ticker}"
+        f"&ty={chart_type}&ta={int(indicators)}&p={period}&s={size}"
+        f"&_={cache_bust}"
+    )
+
+
 async def publish_to_telegraph(title: str, content: str) -> str:
     """Publish content to Telegraph and return URL."""
     try:

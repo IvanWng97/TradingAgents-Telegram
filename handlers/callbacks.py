@@ -15,7 +15,12 @@ from analysis import (
     get_model_options,
     has_model_catalog,
 )
-from utils import publish_to_telegraph, format_analysis_result_markdown, format_short_message
+from utils import (
+    publish_to_telegraph,
+    format_analysis_result_markdown,
+    format_short_message,
+    finviz_chart_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,51 +87,70 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data and query.data.startswith("info:"):
-        # Handle ticker analysis
         ticker = query.data.split(":", 1)[1]
+        chat_id = update.effective_chat.id
+        chart_url = finviz_chart_url(ticker)
+        logger.info("[%s] initial chart_url=%s", ticker, chart_url)
+        print(f"Chart URL for {ticker}: {chart_url}")
 
-        # Send initial message
-        await query.edit_message_text(f"Analyzing {ticker}... Please wait.")
+        # Replace the watchlist menu with a chart + "analyzing" caption.
+        # send_photo can't replace edit a text message in place, so we delete
+        # the original and post a fresh photo message that we'll edit later.
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+        progress_msg = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=chart_url,
+            caption=f"📊 Analyzing *{ticker}*… please wait.",
+            parse_mode="Markdown",
+        )
 
         if not TRADINGAGENTS_AVAILABLE:
-            await query.edit_message_text(
-                "TradingAgents module not available.\n\n"
-                "Please install the tradingagents package."
+            await context.bot.edit_message_caption(
+                chat_id=chat_id,
+                message_id=progress_msg.message_id,
+                caption="TradingAgents module not available.",
             )
             return
 
         try:
-            # Run TradingAgentsGraph in a thread pool since it's blocking
             final_state, signal = await asyncio.to_thread(
                 run_trading_analysis,
                 ticker,
                 user_id,
-                user_config_storage
+                user_config_storage,
             )
 
             if final_state is None:
-                await query.edit_message_text(
-                    "Analysis failed. TradingAgents module not available."
+                await context.bot.edit_message_caption(
+                    chat_id=chat_id,
+                    message_id=progress_msg.message_id,
+                    caption="Analysis failed. TradingAgents module not available.",
                 )
                 return
 
-            # Format as Markdown
             markdown_content = format_analysis_result_markdown(ticker, final_state, signal)
-            print(markdown_content)  # Debug print
-            # Convert Markdown to HTML
             html_content = markdown.markdown(markdown_content)
-            print(html_content)  # Debug print
-            # Publish to Telegraph
+            # Embed chart at the top of the Telegraph page.
+            logger.info("[%s] telegraph chart_url=%s", ticker, chart_url)
+            html_content = f'<img src="{chart_url}"/>{html_content}'
             telegraph_url = await publish_to_telegraph(f"{ticker} Analysis", html_content)
 
-            # Send short message with Telegraph link
-            message = format_short_message(ticker, signal, telegraph_url)
-            await query.edit_message_text(message, parse_mode="MarkdownV2")
+            caption = format_short_message(ticker, signal, telegraph_url)
+            await context.bot.edit_message_caption(
+                chat_id=chat_id,
+                message_id=progress_msg.message_id,
+                caption=caption,
+                parse_mode="MarkdownV2",
+            )
 
         except Exception as e:
             logger.error(f"Error analyzing {ticker}: {e}")
             traceback.print_exc()
-            await query.edit_message_text(
-                f"Error analyzing {ticker}.\n\n"
-                f"Details: {str(e)[:200]}"
+            await context.bot.edit_message_caption(
+                chat_id=chat_id,
+                message_id=progress_msg.message_id,
+                caption=f"Error analyzing {ticker}.\n\nDetails: {str(e)[:200]}",
             )
