@@ -12,7 +12,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "telegraph>=2.2.0",
     "markdown>=3.10.2",
-    "beautifulsoup4>=4.12",
+    "beautifulsoup4>=4.14.3",
     "tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git",
 ]
 
