@@ -47,10 +47,14 @@ def setup_tradingagents_path() -> bool:
 # Setup TradingAgents path
 setup_tradingagents_path()
 
+from telegram import Update
 from telegram.ext import (
     Application,
-    CommandHandler,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    TypeHandler,
 )
 
 from config import Config
@@ -63,6 +67,28 @@ from handlers import (
     config_cmd,
     button_callback,
 )
+
+
+async def authorize(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Block updates from users not in ALLOWED_USER_IDS.
+
+    Runs at group=-1 so it intercepts before any command/callback handler.
+    """
+    user = update.effective_user
+    if user is None:
+        return
+    if Config.is_authorized(user.id):
+        return
+
+    logger.warning("Unauthorized access attempt from user_id=%s", user.id)
+    if update.callback_query is not None:
+        await update.callback_query.answer("Not authorized.", show_alert=True)
+    elif update.effective_message is not None:
+        await update.effective_message.reply_text(
+            f"Not authorized. Your user ID is `{user.id}`.",
+            parse_mode="Markdown",
+        )
+    raise ApplicationHandlerStop
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -79,6 +105,13 @@ def main():
         return
 
     application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
+
+    # Auth gate: runs before any other handler.
+    application.add_handler(TypeHandler(Update, authorize), group=-1)
+    if Config.ALLOWED_USER_IDS:
+        logger.info("Auth enabled — ALLOWED_USER_IDS=%s", Config.ALLOWED_USER_IDS)
+    else:
+        logger.info("Auth disabled — ALLOWED_USER_IDS empty, all users allowed")
 
     # Register command handlers
     application.add_handler(CommandHandler("start", start))
