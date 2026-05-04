@@ -14,6 +14,7 @@ import threading
 from typing import Any, Optional
 
 from langchain_core.callbacks import BaseCallbackHandler
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.helpers import escape_markdown
 
 
@@ -110,12 +111,28 @@ class ProgressReporter:
         else:
             caption = f"📊 Analyzing *{ticker_v2}* — running {friendly_v2}…"
 
+        # Telegram's editMessageCaption drops the existing reply_markup unless
+        # we re-send it — so re-attach the cancel button on every step update.
+        reply_markup = None
+        if self.cancel_event is not None:
+            reply_markup = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "❌ Cancel",
+                            callback_data=f"cancel_analysis:{self.message_id}",
+                        )
+                    ]
+                ]
+            )
+
         try:
             await self.bot.edit_message_caption(
                 chat_id=self.chat_id,
                 message_id=self.message_id,
                 caption=caption,
                 parse_mode="MarkdownV2",
+                reply_markup=reply_markup,
             )
         except Exception as e:
             # Final result may have already replaced the caption, or Telegram
