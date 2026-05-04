@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-import traceback
+import threading
 
 import markdown
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -21,8 +21,9 @@ from tg_bot.handlers.commands import (
     build_del_keyboard,
     build_history_dates_response,
     build_history_response,
+    build_history_tickers_response,
 )
-from tg_bot.progress import ProgressReporter
+from tg_bot.progress import CancelledByUserError, ProgressReporter
 from tg_bot.storage import user_config_storage, watchlist_storage
 from tg_bot.telegraph_client import publish_to_telegraph
 
@@ -113,12 +114,40 @@ async def _handle_info(
         )
         return
 
+    # Per-run cancellation: button on the progress photo sets this event,
+    # ProgressReporter checks it at each step boundary and raises
+    # CancelledByUserError to abort the pipeline.
+    cancel_event = threading.Event()
+    cancel_registry = context.chat_data.setdefault("analysis_cancels", {})
+    cancel_registry[progress_msg.message_id] = cancel_event
+
+    cancel_kb = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "❌ Cancel",
+                    callback_data=f"cancel_analysis:{progress_msg.message_id}",
+                )
+            ]
+        ]
+    )
+    try:
+        await context.bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=progress_msg.message_id,
+            reply_markup=cancel_kb,
+        )
+    except Exception:
+        # Keyboard is best-effort — analysis still runs without it.
+        pass
+
     reporter = ProgressReporter(
         bot=context.bot,
         chat_id=chat_id,
         message_id=progress_msg.message_id,
         ticker=ticker,
         loop=asyncio.get_running_loop(),
+        cancel_event=cancel_event,
     )
 
     try:
@@ -130,6 +159,7 @@ async def _handle_info(
                 chat_id=chat_id,
                 message_id=progress_msg.message_id,
                 caption="Analysis failed. TradingAgents module not available.",
+                reply_markup=None,
             )
             return
 
@@ -143,26 +173,62 @@ async def _handle_info(
             message_id=progress_msg.message_id,
             caption=caption,
             parse_mode="MarkdownV2",
+            reply_markup=None,
+        )
+    except CancelledByUserError:
+        logger.info("Analysis cancelled by user for %s", ticker)
+        await context.bot.edit_message_caption(
+            chat_id=chat_id,
+            message_id=progress_msg.message_id,
+            caption=f"❌ Analysis cancelled for *{escape_markdown(ticker, version=2)}*\\.",
+            parse_mode="MarkdownV2",
+            reply_markup=None,
         )
     except Exception as e:
-        logger.error("Error analyzing %s: %s", ticker, e)
-        traceback.print_exc()
+        logger.exception("Error analyzing %s", ticker)
         await context.bot.edit_message_caption(
             chat_id=chat_id,
             message_id=progress_msg.message_id,
             caption=f"Error analyzing {ticker}.\n\nDetails: {str(e)[:200]}",
+            reply_markup=None,
         )
+    finally:
+        cancel_registry.pop(progress_msg.message_id, None)
 
 
 async def _handle_history(query, ticker: str, date_str: str) -> None:
     """Render a historical analysis selected via the date-picker keyboard."""
     caption = await build_history_response(ticker, date_str)
-    await query.edit_message_text(caption, parse_mode="MarkdownV2")
+    back_kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("← Back", callback_data=f"hist_back:dates:{ticker}")]]
+    )
+    await query.edit_message_text(
+        caption, parse_mode="MarkdownV2", reply_markup=back_kb
+    )
 
 
 async def _handle_history_ticker(query, ticker: str) -> None:
     """Drill down from the ticker-picker into the date picker for `ticker`."""
     text, kb = build_history_dates_response(ticker)
+    if kb is None:
+        await query.edit_message_text(text, parse_mode="MarkdownV2")
+    else:
+        await query.edit_message_text(text, parse_mode="MarkdownV2", reply_markup=kb)
+
+
+async def _handle_history_back(query, target: str) -> None:
+    """Navigate up one level in the /history flow.
+
+    `target` is "tickers" (re-render ticker picker) or "dates:{ticker}"
+    (re-render date picker for that ticker).
+    """
+    if target == "tickers":
+        text, kb = build_history_tickers_response()
+    elif target.startswith("dates:"):
+        text, kb = build_history_dates_response(target.split(":", 1)[1])
+    else:
+        await query.edit_message_text("Cancelled.")
+        return
     if kb is None:
         await query.edit_message_text(text, parse_mode="MarkdownV2")
     else:
@@ -180,6 +246,39 @@ async def _handle_del(query, user_id: int, ticker: str) -> None:
         "Tap a ticker to remove it from your watchlist:",
         reply_markup=InlineKeyboardMarkup(build_del_keyboard(remaining)),
     )
+
+
+async def _handle_cancel_analysis(
+    context: ContextTypes.DEFAULT_TYPE, query, message_id_str: str
+) -> None:
+    """Set the cancel flag for a running analysis on a given message.
+
+    The actual abort happens at the next pipeline step boundary inside
+    ProgressReporter — the in-flight LLM call still completes. We update
+    the caption immediately so the user sees acknowledgement.
+    """
+    try:
+        message_id = int(message_id_str)
+    except ValueError:
+        return
+    cancel_registry = context.chat_data.get("analysis_cancels") or {}
+    event = cancel_registry.get(message_id)
+    if event is None:
+        # Already finished or never registered — nothing to abort.
+        return
+    event.set()
+    try:
+        await context.bot.edit_message_caption(
+            chat_id=query.message.chat_id,
+            message_id=message_id,
+            caption=(
+                "❌ Cancelling… will stop after the current step finishes\\."
+            ),
+            parse_mode="MarkdownV2",
+            reply_markup=None,
+        )
+    except Exception as e:
+        logger.debug("Cancel-acknowledgement edit skipped: %s", e)
 
 
 async def _handle_cancel(
@@ -219,6 +318,11 @@ async def _handle_cancel(
         )
     elif what == "del":
         await query.edit_message_text("✅ Done\\.", parse_mode="MarkdownV2")
+    elif what in ("watch", "hist"):
+        try:
+            await query.delete_message()
+        except Exception:
+            await query.edit_message_text("✅ Done\\.", parse_mode="MarkdownV2")
     else:
         await query.edit_message_text("Cancelled.")
 
@@ -242,8 +346,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _handle_info(query, context, user_id, data.split(":", 1)[1])
     elif data.startswith("del:"):
         await _handle_del(query, user_id, data.split(":", 1)[1])
+    elif data.startswith("cancel_analysis:"):
+        await _handle_cancel_analysis(context, query, data.split(":", 1)[1])
     elif data.startswith("cancel:"):
         await _handle_cancel(context, query, user_id, data.split(":", 1)[1])
+    elif data.startswith("hist_back:"):
+        await _handle_history_back(query, data.split(":", 1)[1])
     elif data.startswith("hist_t:"):
         await _handle_history_ticker(query, data.split(":", 1)[1])
     elif data.startswith("hist:"):

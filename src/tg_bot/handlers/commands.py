@@ -1,5 +1,6 @@
 """Command handlers (/start, /help, /add, /del, /watch, /list, /config, /history)."""
 
+import asyncio
 import logging
 
 import markdown
@@ -20,6 +21,7 @@ from tg_bot.storage import (
     watchlist_storage,
 )
 from tg_bot.telegraph_client import publish_to_telegraph
+from tg_bot.validation import validate_ticker
 
 
 logger = logging.getLogger(__name__)
@@ -57,33 +59,61 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _apply_add(user_id: int, tokens: list[str]) -> str:
-    """Add `tokens` (raw ticker strings) to user's watchlist; return a summary."""
+    """Add `tokens` (raw ticker strings) to the user's watchlist; return a
+    summary. Each token is validated against yfinance in parallel before any
+    storage write — invalid tickers report a hint instead of silently joining
+    the watchlist."""
+    cleaned = [t for t in (raw.strip() for raw in tokens) if t]
+    if not cleaned:
+        return "No valid tickers provided."
+
+    results = await asyncio.gather(*(validate_ticker(t) for t in cleaned))
+
     added: list[str] = []
     duplicate: list[str] = []
-    for raw in tokens:
-        ticker = raw.strip().upper()
-        if not ticker:
+    invalid: list[str] = []
+    notes: list[str] = []
+    for raw, (canonical, hint) in zip(cleaned, results):
+        if canonical is None:
+            invalid.append(hint or f"`{raw}` is invalid.")
             continue
-        if await watchlist_storage.add_ticker(user_id, ticker):
-            added.append(ticker)
+        if hint:  # auto-correction note (canonical differs from raw)
+            notes.append(hint)
+        if await watchlist_storage.add_ticker(user_id, canonical):
+            added.append(canonical)
         else:
-            duplicate.append(ticker)
+            duplicate.append(canonical)
 
     parts: list[str] = []
     if added:
         parts.append(f"✅ Added: {', '.join(added)}")
     if duplicate:
         parts.append(f"➖ Already in watchlist: {', '.join(duplicate)}")
+    if notes:
+        parts.extend(notes)
+    if invalid:
+        parts.append("❌ " + " ".join(invalid))
     if not parts:
         parts.append("No valid tickers provided.")
     return "\n".join(parts)
+
+
+async def _send_summary_with_watchlist(message, user_id: int, summary: str) -> None:
+    """Reply with the add/del summary, then re-render the watchlist below it."""
+    await message.reply_text(summary)
+    text, kb = build_watchlist_response(user_id)
+    if kb is None:
+        await message.reply_text(text)
+    else:
+        await message.reply_text(text, reply_markup=kb, parse_mode="MarkdownV2")
 
 
 async def add_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """`/add NVDA AAPL` adds inline; bare `/add` opens a reply prompt."""
     user_id = update.effective_user.id
     if context.args:
-        await update.message.reply_text(await _apply_add(user_id, context.args))
+        summary = await _apply_add(user_id, context.args)
+        await _send_summary_with_watchlist(update.message, user_id, summary)
         return
 
     # No args: open a ForceReply prompt. Telegram clients pop the reply box
@@ -106,9 +136,10 @@ async def add_via_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if (replied.text or "") != ADD_PROMPT:
         return
 
+    user_id = update.effective_user.id
     tokens = (msg.text or "").split()
-    summary = await _apply_add(update.effective_user.id, tokens)
-    await msg.reply_text(summary)
+    summary = await _apply_add(user_id, tokens)
+    await _send_summary_with_watchlist(msg, user_id, summary)
 
 
 async def del_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -137,7 +168,7 @@ async def del_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         parts.append(f"❓ Not in watchlist: {', '.join(missing)}")
     if not parts:
         parts.append("No valid tickers provided.")
-    await update.message.reply_text("\n".join(parts))
+    await _send_summary_with_watchlist(update.message, user_id, "\n".join(parts))
 
 
 async def _send_del_picker(update: Update, user_id: int) -> None:
@@ -169,15 +200,17 @@ def build_del_keyboard(tickers: list[str]) -> list[list[InlineKeyboardButton]]:
     return rows
 
 
-async def list_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    watchlist = watchlist_storage.get_watchlist(user_id)
+def build_watchlist_response(
+    user_id: int,
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Render the watchlist as MarkdownV2 + a tap-to-analyze keyboard.
 
+    Returns (text, keyboard) — keyboard is None when the watchlist is empty
+    so the caller can decide whether to attach it.
+    """
+    watchlist = watchlist_storage.get_watchlist(user_id)
     if not watchlist:
-        await update.message.reply_text(
-            "Your watchlist is empty.\nUse /add <ticker> to add stocks."
-        )
-        return
+        return ("Your watchlist is empty.\nUse /add <ticker> to add stocks.", None)
 
     keyboard = [
         [
@@ -186,14 +219,22 @@ async def list_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ]
         for i in range(0, len(watchlist), 3)
     ]
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel:watch")])
     # Tickers go inside `…` code spans, where the only chars needing escape
     # are backticks and backslashes — neither valid in a stock symbol.
     message = f"*Your Watchlist \\({len(watchlist)} stocks\\):*\n\n" + "\n".join(
         f"• `{t}`" for t in watchlist
     )
-    await update.message.reply_text(
-        message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2"
-    )
+    return (message, InlineKeyboardMarkup(keyboard))
+
+
+async def list_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    text, kb = build_watchlist_response(user_id)
+    if kb is None:
+        await update.message.reply_text(text)
+    else:
+        await update.message.reply_text(text, reply_markup=kb, parse_mode="MarkdownV2")
 
 
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -252,6 +293,7 @@ def build_history_tickers_response() -> tuple[str, InlineKeyboardMarkup | None]:
         ]
         for i in range(0, len(tickers), 3)
     ]
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel:hist")])
     return "📜 Pick a ticker:", InlineKeyboardMarkup(keyboard)
 
 
@@ -276,6 +318,12 @@ def build_history_dates_response(
         ]
         for d in dates
     ]
+    keyboard.append(
+        [
+            InlineKeyboardButton("← Back", callback_data="hist_back:tickers"),
+            InlineKeyboardButton("❌ Cancel", callback_data="cancel:hist"),
+        ]
+    )
     return (
         f"📜 History for `{safe_ticker}` — pick a date:",
         InlineKeyboardMarkup(keyboard),

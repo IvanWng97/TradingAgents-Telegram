@@ -57,6 +57,16 @@ def _resolve_step(raw_name: str) -> tuple[str, Optional[int]]:
     return cleaned or raw_name, None
 
 
+class CancelledByUserError(RuntimeError):
+    """Raised from the progress callback when the user taps Cancel mid-run.
+
+    Bubbles up through tradingagents/langgraph back into `asyncio.to_thread`
+    so the analysis handler can render a "Cancelled" caption instead of a
+    result. Cancellation is checked at LLM-call boundaries — the in-flight
+    LLM call still completes; downstream steps are skipped.
+    """
+
+
 class ProgressReporter:
     """Edits a Telegram photo caption to reflect the current pipeline step.
 
@@ -72,12 +82,14 @@ class ProgressReporter:
         message_id: int,
         ticker: str,
         loop: asyncio.AbstractEventLoop,
+        cancel_event: Optional[threading.Event] = None,
     ) -> None:
         self.bot = bot
         self.chat_id = chat_id
         self.message_id = message_id
         self.ticker = ticker
         self.loop = loop
+        self.cancel_event = cancel_event
         self._last_step: Optional[str] = None
 
     async def report(self, raw_node_name: str) -> None:
@@ -145,6 +157,11 @@ class _DelegatingProgressCallback(BaseCallbackHandler):
         reporter: Optional[ProgressReporter] = getattr(_current_reporter, "value", None)
         if reporter is None:
             return
+        # Check the cancel flag BEFORE dispatching the next step's UI update —
+        # this is our only hook into the running pipeline. Raising here aborts
+        # the about-to-start LLM call and bubbles up through langgraph.
+        if reporter.cancel_event is not None and reporter.cancel_event.is_set():
+            raise CancelledByUserError("Analysis cancelled by user")
         metadata = kwargs.get("metadata") or {}
         node_name = metadata.get("langgraph_node")
         if not node_name:
