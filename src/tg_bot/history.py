@@ -52,6 +52,32 @@ def normalize_ticker(raw: str) -> Optional[str]:
     return t if _TICKER_RE.match(t) else None
 
 
+def list_available_tickers(limit: int = 20) -> list[str]:
+    """Return tickers with at least one saved analysis under `results_dir`,
+    sorted alphabetically. Capped at `limit` to keep the keyboard reasonable."""
+    base = _results_dir()
+    if base is None or not base.exists():
+        return []
+
+    found: list[str] = []
+    for entry in base.iterdir():
+        if not entry.is_dir():
+            continue
+        ticker = entry.name.upper()
+        if normalize_ticker(ticker) is None:
+            continue
+        log_dir = entry / "TradingAgentsStrategy_logs"
+        if not log_dir.exists():
+            continue
+        # Cheap probe: any file matching the pattern is enough.
+        if any(
+            _DATE_FILENAME_RE.match(p.name) for p in log_dir.iterdir() if p.is_file()
+        ):
+            found.append(ticker)
+    found.sort()
+    return found[:limit]
+
+
 def list_available_dates(ticker: str, limit: int = 10) -> list[date]:
     """Return the most-recent `limit` dates with saved analyses for `ticker`."""
     safe = normalize_ticker(ticker)

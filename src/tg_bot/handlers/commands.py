@@ -8,7 +8,12 @@ from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
 from tg_bot.formatters import format_analysis_result_markdown
-from tg_bot.history import list_available_dates, load_historical_state, normalize_ticker
+from tg_bot.history import (
+    list_available_dates,
+    list_available_tickers,
+    load_historical_state,
+    normalize_ticker,
+)
 from tg_bot.storage import (
     UserConfigStorage,
     user_config_storage,
@@ -45,8 +50,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/del [<ticker> ...] - Remove stocks. With no args opens a picker.\n"
         "/watch or /list - Show your watchlist with clickable buttons\n"
         "/config - Configure LLM provider and deep/quick models\n"
-        "/history <ticker> [YYYY-MM-DD] - Look up a past analysis. "
-        "With no date, shows recent runs to pick from.\n"
+        "/history [<ticker>] [YYYY-MM-DD] - Browse past analyses. "
+        "With no args, shows tickers with saved history.\n"
         "/start - Welcome message"
     )
 
@@ -195,16 +200,18 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Look up a past TradingAgents analysis from disk.
 
     Forms:
-      /history                -> usage hint
-      /history NVDA           -> show inline picker of recent dates
-      /history NVDA 2026-04-15 -> publish that day's saved analysis to Telegraph
+      /history                  -> ticker picker (all tickers with any history)
+      /history NVDA             -> date picker for that ticker
+      /history NVDA 2026-04-15  -> publish that day's saved analysis to Telegraph
     """
     if not context.args:
-        await update.message.reply_text(
-            "Usage:\n"
-            "  /history <ticker>              — pick from recent runs\n"
-            "  /history <ticker> YYYY-MM-DD   — fetch a specific date"
-        )
+        text, kb = build_history_tickers_response()
+        if kb is None:
+            await update.message.reply_text(text, parse_mode="MarkdownV2")
+        else:
+            await update.message.reply_text(
+                text, parse_mode="MarkdownV2", reply_markup=kb
+            )
         return
 
     ticker = normalize_ticker(context.args[0])
@@ -213,18 +220,54 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if len(context.args) >= 2:
-        await _send_history_for_date(update.message, ticker, context.args[1].strip())
+        caption = await build_history_response(ticker, context.args[1].strip())
+        await update.message.reply_text(caption, parse_mode="MarkdownV2")
     else:
-        await _send_history_picker(update.message, ticker)
+        text, kb = build_history_dates_response(ticker)
+        if kb is None:
+            await update.message.reply_text(text, parse_mode="MarkdownV2")
+        else:
+            await update.message.reply_text(
+                text, parse_mode="MarkdownV2", reply_markup=kb
+            )
 
 
-async def _send_history_picker(message, ticker: str) -> None:
-    """Reply with an inline keyboard of recent analysis dates for `ticker`."""
+def build_history_tickers_response() -> tuple[str, InlineKeyboardMarkup | None]:
+    """Build the ticker-picker keyboard for users with saved analyses.
+
+    Returns (MarkdownV2 caption, keyboard) — keyboard is None when there's
+    nothing to pick. Shared by /history (no args) and any caller that wants
+    to re-render the picker in place.
+    """
+    tickers = list_available_tickers()
+    if not tickers:
+        return (
+            "No history yet — run /watch and tap a ticker to start building history\\.",
+            None,
+        )
+    keyboard = [
+        [
+            InlineKeyboardButton(t, callback_data=f"hist_t:{t}")
+            for t in tickers[i : i + 3]
+        ]
+        for i in range(0, len(tickers), 3)
+    ]
+    return "📜 Pick a ticker:", InlineKeyboardMarkup(keyboard)
+
+
+def build_history_dates_response(
+    ticker: str,
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Build the date-picker keyboard for a single ticker.
+
+    Returns (MarkdownV2 caption, keyboard) — keyboard is None when no logs
+    exist. Shared by /history <ticker> and the `hist_t:` callback so both
+    surfaces produce identical output.
+    """
+    safe_ticker = escape_markdown(ticker, version=2)
     dates = list_available_dates(ticker)
     if not dates:
-        await message.reply_text(f"No history found for {ticker}.")
-        return
-
+        return f"No history found for {safe_ticker}\\.", None
     keyboard = [
         [
             InlineKeyboardButton(
@@ -233,18 +276,10 @@ async def _send_history_picker(message, ticker: str) -> None:
         ]
         for d in dates
     ]
-    safe_ticker = escape_markdown(ticker, version=2)
-    await message.reply_text(
+    return (
         f"📜 History for `{safe_ticker}` — pick a date:",
-        parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        InlineKeyboardMarkup(keyboard),
     )
-
-
-async def _send_history_for_date(message, ticker: str, date_str: str) -> None:
-    """Reply with the saved analysis for `ticker` on `date_str`."""
-    caption = await build_history_response(ticker, date_str)
-    await message.reply_text(caption, parse_mode="MarkdownV2")
 
 
 async def build_history_response(ticker: str, date_str: str) -> str:
