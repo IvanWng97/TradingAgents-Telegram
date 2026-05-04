@@ -264,9 +264,7 @@ async def _handle_select_toggle(
         await query.edit_message_text(text, reply_markup=kb, parse_mode="MarkdownV2")
 
 
-async def _handle_done(
-    query, context: ContextTypes.DEFAULT_TYPE, user_id: int
-) -> None:
+async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
     """Unified entry point for both single and multi-ticker analysis runs.
 
     1 selected → cached graph (fast init, no parallel benefit anyway).
@@ -420,9 +418,7 @@ async def _handle_cancel_analysis(
         await context.bot.edit_message_caption(
             chat_id=query.message.chat_id,
             message_id=message_id,
-            caption=(
-                "❌ Cancelling… will stop after the current step finishes\\."
-            ),
+            caption=("❌ Cancelling… will stop after the current step finishes\\."),
             parse_mode="MarkdownV2",
             reply_markup=None,
         )
