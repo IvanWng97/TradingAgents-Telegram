@@ -291,6 +291,7 @@ async def _handle_done(
     # Multi-ticker: parallel runs share the per-key graph pool — first run
     # in a fresh pool pays init cost, subsequent reuse warm instances.
     safe_list = escape_markdown(", ".join(selection), version=2)
+    queue_msg_id = query.message.message_id
     try:
         await query.edit_message_text(
             f"🚀 Running queue: {safe_list}\n\n"
@@ -311,12 +312,27 @@ async def _handle_done(
     completed = sum(1 for r in results if r == "completed")
     cancelled = sum(1 for r in results if r == "cancelled")
     failed = len(results) - completed - cancelled
-    parts = [f"✅ Queue done — {completed} completed"]
+    parts = [f"{completed} completed"]
     if cancelled:
         parts.append(f"{cancelled} cancelled")
     if failed:
         parts.append(f"{failed} failed")
-    await context.bot.send_message(chat_id=chat_id, text=", ".join(parts) + ".")
+    final = f"✅ Queue done — {safe_list}: " + ", ".join(parts) + "\\."
+
+    # Overwrite the original queue-header message instead of stacking a new
+    # one — keeps the chat tidier. Falls back to a fresh message if the edit
+    # fails (e.g., user deleted the header).
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=queue_msg_id,
+            text=final,
+            parse_mode="MarkdownV2",
+        )
+    except Exception:
+        await context.bot.send_message(
+            chat_id=chat_id, text=final, parse_mode="MarkdownV2"
+        )
 
 
 async def _handle_history(query, ticker: str, date_str: str) -> None:
