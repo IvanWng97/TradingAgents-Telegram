@@ -357,7 +357,7 @@ async def build_history_response(ticker: str, date_str: str) -> str:
         return f"No analysis found for {safe_ticker} on {safe_date}\\."
 
     md_body = format_analysis_result_markdown(ticker, state, signal="historical")
-    html = markdown.markdown(md_body)
+    html = markdown.markdown(md_body, extensions=["tables"])
     telegraph_url = await publish_to_telegraph(f"{ticker} {date_str}", html)
 
     msg = f"📜 *{safe_ticker}* — {safe_date}\n\n"

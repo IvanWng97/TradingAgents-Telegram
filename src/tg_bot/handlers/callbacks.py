@@ -199,7 +199,12 @@ async def _run_analysis_for_ticker(
             return "unavailable"
 
         markdown_content = format_analysis_result_markdown(ticker, final_state, signal)
-        html_content = f'<img src="{chart_url}"/>{markdown.markdown(markdown_content)}'
+        # `tables` extension generates <table> for GFM pipe-tables; the
+        # telegraph_client then rewrites them into <ul> since Telegraph
+        # strips <table>. Without this extension the pipes survive as
+        # literal `|` text in the rendered page.
+        rendered_md = markdown.markdown(markdown_content, extensions=["tables"])
+        html_content = f'<img src="{chart_url}"/>{rendered_md}'
         telegraph_url = await publish_to_telegraph(f"{ticker} Analysis", html_content)
 
         # Re-check cancel flag — Telegraph publish is also a network round-trip
