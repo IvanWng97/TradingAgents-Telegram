@@ -6,7 +6,13 @@ from telegram.helpers import escape_markdown
 
 
 # MarkdownV2-aware emoji prefix per decision verb.
-_DECISION_EMOJI = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}
+_DECISION_EMOJI = {
+    "BUY": "🟢",
+    "OVERWEIGHT": "🟩",
+    "HOLD": "🟡",
+    "UNDERWEIGHT": "🟥",
+    "SELL": "🔴",
+}
 
 
 def format_analysis_result_markdown(ticker: str, final_state: dict, signal: str) -> str:
