@@ -52,9 +52,16 @@ async def _post_init(application: Application) -> None:
 
 
 def _build_application() -> Application:
+    # concurrent_updates=True is load-bearing for cancellation. Without it
+    # PTB processes updates with a single worker, so a Cancel-button tap
+    # sits in the queue until the in-flight analysis handler returns —
+    # exactly when we no longer need it. With concurrent_updates the
+    # cancel handler runs in parallel with the awaiting analysis task,
+    # sets the cancel_event, and ProgressReporter aborts at the next step.
     application = (
         Application.builder()
         .token(Config.TELEGRAM_BOT_TOKEN)
+        .concurrent_updates(True)
         .post_init(_post_init)
         .build()
     )

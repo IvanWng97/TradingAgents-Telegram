@@ -190,35 +190,57 @@ def build_del_keyboard(tickers: list[str]) -> list[list[InlineKeyboardButton]]:
 
 def build_watchlist_response(
     user_id: int,
+    selected: set[str] | None = None,
 ) -> tuple[str, InlineKeyboardMarkup | None]:
-    """Render the watchlist as MarkdownV2 + a tap-to-analyze keyboard.
+    """Render the watchlist as MarkdownV2 + a select-mode keyboard.
 
-    Returns (text, keyboard) — keyboard is None when the watchlist is empty
-    so the caller can decide whether to attach it.
+    Every ticker is a toggle button (callback `multi:<ticker>`); selected
+    ones get a ✅ prefix. Bottom row: "✅ Done (N)" runs the analyses,
+    "❌ Cancel" dismisses. Single vs parallel-queue is decided in the Done
+    handler based on len(selected) — 1 ticker uses the cached graph for
+    fast init, 2+ get dedicated graphs for true parallelism.
+
+    Returns (text, keyboard) — keyboard is None when the watchlist is empty.
     """
     watchlist = watchlist_storage.get_watchlist(user_id)
     if not watchlist:
         return ("Your watchlist is empty.\nUse /add <ticker> to add stocks.", None)
 
+    selected = selected or set()
+
     keyboard = [
         [
-            InlineKeyboardButton(t, callback_data=f"info:{t}")
+            InlineKeyboardButton(
+                f"✅ {t}" if t in selected else t,
+                callback_data=f"multi:{t}",
+            )
             for t in watchlist[i : i + 3]
         ]
         for i in range(0, len(watchlist), 3)
     ]
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel:watch")])
-    # Tickers go inside `…` code spans, where the only chars needing escape
-    # are backticks and backslashes — neither valid in a stock symbol.
-    message = f"*Your Watchlist \\({len(watchlist)} stocks\\):*\n\n" + "\n".join(
-        f"• `{t}`" for t in watchlist
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                f"✅ Done ({len(selected)})", callback_data="runall:go"
+            ),
+            InlineKeyboardButton("❌ Cancel", callback_data="cancel:watch"),
+        ]
+    )
+    # Tickers are already visible as buttons — no point listing them in the
+    # message body too. Just a short header.
+    message = (
+        f"*Your Watchlist \\({len(watchlist)} stocks\\)* — "
+        "tap to select, then ✅ Done\\."
     )
     return (message, InlineKeyboardMarkup(keyboard))
 
 
 async def list_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    text, kb = build_watchlist_response(user_id)
+    # Fresh /watch always starts with no selection — clear any leftover from
+    # an abandoned previous render in this chat.
+    context.chat_data["watch_selection"] = set()
+    text, kb = build_watchlist_response(user_id, selected=set())
     if kb is None:
         await update.message.reply_text(text)
     else:

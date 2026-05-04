@@ -1,22 +1,27 @@
 # TradingAgents Telegram Bot
 
-Telegram bot wrapping the [TradingAgents](https://github.com/TauricResearch/TradingAgents) framework. Curate a watchlist via Telegram, tap a ticker, and the bot runs `TradingAgentsGraph.propagate(...)` and replies with a finviz chart, the trade decision, and a Telegraph link to the full analysis. Per-step pipeline progress (Market Analyst → Bull Researcher → … → Portfolio Manager) streams back into the message caption while the analysis runs.
+Telegram bot wrapping the [TradingAgents](https://github.com/TauricResearch/TradingAgents) framework. Curate a watchlist via Telegram, tap one or more tickers, and the bot runs `TradingAgentsGraph.propagate(...)` for each and replies with a finviz chart, the trade decision, a short summary, and a Telegraph link to the full analysis. Per-step pipeline progress (Market Analyst → Bull Researcher → … → Portfolio Manager) streams back into the message caption while the analysis runs, and every in-flight analysis carries its own ❌ Cancel button.
 
 ## Commands
 
 | Command | Description |
 |---|---|
 | `/start`, `/help` | Welcome / help text |
-| `/add NVDA AAPL TSLA` | Bulk-add multiple tickers in one shot |
+| `/add NVDA AAPL TSLA` | Bulk-add tickers. Each is validated against yfinance — invalid symbols are rejected with a hint, and US class-share dot forms (`BRK.B`) auto-correct to dash form (`BRK-B`). |
 | `/add` (no args) | Bot prompts; reply with the ticker(s) you want to add |
 | `/del NVDA AAPL` | Bulk-remove |
-| `/del` (no args) | Pop up an inline-button picker — tap ❌ on each ticker, `✅ Done` to close |
-| `/watch`, `/list` | Show your watchlist with clickable buttons — tap a ticker to run analysis |
+| `/del` (no args) | Inline-button picker — tap ❌ on each ticker, `✅ Done` to close |
+| `/watch`, `/list` | Show your watchlist as a select-mode keyboard. Tap any ticker to toggle (✅ prefix), then `✅ Done` runs the selected ones — single ticker uses the cached graph (fast), multi runs in parallel with independent ❌ Cancel buttons. |
 | `/config` | Three-step picker: provider → deep model → quick model. `❌ Cancel` at any step rolls back to your prior settings |
-| `/history NVDA` | Inline-button picker of recent analysis dates for that ticker |
+| `/history` (no args) | Inline-button picker of all tickers with saved analyses |
+| `/history NVDA` | Inline-button picker of recent analysis dates for that ticker. `← Back` returns to the ticker picker. |
 | `/history NVDA 2026-04-15` | Direct lookup — publishes that day's saved analysis to Telegraph |
 
 The Telegram client also exposes a Menu button next to the input field with the same commands (populated via `set_my_commands`), and `/`-autocomplete works after typing the first letter or two.
+
+## Cancellation
+
+Every running analysis attaches a ❌ Cancel button to its progress message. Tapping it sets a per-run flag that the LangChain progress callback checks at every LLM-call boundary; the next call raises `CancelledByUserError`, which propagates out of langgraph and aborts the pipeline. The in-flight LLM call still completes (we can't kill an HTTP request that's already on the wire), but no further steps run. In a multi-ticker queue, cancelling one only stops that one — the rest keep going.
 
 ## Quick start (local)
 
@@ -87,12 +92,13 @@ src/tg_bot/
 ├── app.py                 # Application builder, BOT_COMMANDS, post_init
 ├── auth.py                # ALLOWED_USER_IDS gate (TypeHandler at group=-1)
 ├── config.py              # env-driven Config
-├── analysis.py            # TradingAgents adapter, graph cache, model catalog
+├── analysis.py            # TradingAgents adapter, graph pool, model catalog
 ├── chart.py               # finviz_chart_url
-├── formatters.py          # Telegram caption + Telegraph markdown
-├── progress.py            # ProgressReporter + LangChain BaseCallbackHandler
+├── formatters.py          # Telegram caption (signal emoji + summary) + Telegraph markdown
+├── progress.py            # ProgressReporter + cancel-aware LangChain BaseCallbackHandler
 ├── history.py             # disk-readers for past analyses
 ├── telegraph_client.py    # sanitize + publish
+├── validation.py          # yfinance-backed ticker validation + class-share rewrite
 ├── handlers/{commands,callbacks}.py
 └── storage/                # JSON-backed, atomic + fsync writes; per-user
     ├── _base.py            # JsonStorage (async wrapper for mutations)

@@ -28,8 +28,28 @@ def format_analysis_result_markdown(ticker: str, final_state: dict, signal: str)
     )
 
 
+def extract_summary(decision_text: str, max_len: int = 280) -> str:
+    """Pull the lead paragraph out of `final_trade_decision` for the caption.
+
+    Agents reliably lead with the verdict-rationale paragraph; clipping the
+    first paragraph to ~280 chars captures the substance without bloating the
+    caption (Telegram caps photo captions at 1024 chars). Returns "" if the
+    input is empty.
+    """
+    if not decision_text:
+        return ""
+    paragraphs = [p.strip() for p in decision_text.split("\n\n") if p.strip()]
+    first = paragraphs[0] if paragraphs else decision_text.strip()
+    if len(first) <= max_len:
+        return first
+    return first[:max_len].rstrip() + "…"
+
+
 def format_short_message(
-    ticker: str, signal: str, telegraph_url: str | None = None
+    ticker: str,
+    signal: str,
+    telegraph_url: str | None = None,
+    summary: str | None = None,
 ) -> str:
     """MarkdownV2 caption shown alongside the chart in the Telegram message.
 
@@ -46,9 +66,12 @@ def format_short_message(
     lines = [
         f"{emoji} *{safe_ticker}* — *{safe_signal}*",
         "",
-        f"_Generated {timestamp}_",
-        "",
     ]
+    if summary:
+        lines.append(escape_markdown(summary, version=2))
+        lines.append("")
+    lines.append(f"_Generated {timestamp}_")
+    lines.append("")
 
     if telegraph_url:
         # In MarkdownV2 link URLs only ')' and '\' need escaping; Telegraph

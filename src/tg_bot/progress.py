@@ -152,7 +152,16 @@ class _DelegatingProgressCallback(BaseCallbackHandler):
     The callback reads the per-run reporter from threadlocal storage and
     bridges back onto the asyncio loop that owns the bot. If no reporter is
     set for the current thread, the event is silently dropped.
+
+    raise_error=True is load-bearing: LangChain's callback manager swallows
+    exceptions from handler methods by default, which would defeat our
+    cancellation strategy of raising CancelledByUserError out of `_dispatch`
+    to abort the in-flight LLM call. With raise_error=True the exception
+    propagates into the LLM invocation chain and bubbles up through
+    langgraph back to our `to_thread` await.
     """
+
+    raise_error = True
 
     def on_chat_model_start(
         self,
@@ -173,11 +182,17 @@ class _DelegatingProgressCallback(BaseCallbackHandler):
     def _dispatch(self, kwargs: dict) -> None:
         reporter: Optional[ProgressReporter] = getattr(_current_reporter, "value", None)
         if reporter is None:
+            logger.debug("dispatch: no reporter on this thread, ignoring callback")
             return
         # Check the cancel flag BEFORE dispatching the next step's UI update —
         # this is our only hook into the running pipeline. Raising here aborts
         # the about-to-start LLM call and bubbles up through langgraph.
         if reporter.cancel_event is not None and reporter.cancel_event.is_set():
+            logger.info(
+                "dispatch: cancel flag is set for ticker=%s message_id=%s — raising",
+                reporter.ticker,
+                reporter.message_id,
+            )
             raise CancelledByUserError("Analysis cancelled by user")
         metadata = kwargs.get("metadata") or {}
         node_name = metadata.get("langgraph_node")

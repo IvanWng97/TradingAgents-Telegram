@@ -16,12 +16,17 @@ from tg_bot.analysis import (
     run_trading_analysis,
 )
 from tg_bot.chart import finviz_chart_url
-from tg_bot.formatters import format_analysis_result_markdown, format_short_message
+from tg_bot.formatters import (
+    extract_summary,
+    format_analysis_result_markdown,
+    format_short_message,
+)
 from tg_bot.handlers.commands import (
     build_del_keyboard,
     build_history_dates_response,
     build_history_response,
     build_history_tickers_response,
+    build_watchlist_response,
 )
 from tg_bot.progress import CancelledByUserError, ProgressReporter
 from tg_bot.storage import user_config_storage, watchlist_storage
@@ -84,20 +89,27 @@ async def _handle_quick(query, user_id: int, provider: str, model: str) -> None:
     )
 
 
-async def _handle_info(
-    query, context: ContextTypes.DEFAULT_TYPE, user_id: int, ticker: str
-) -> None:
-    chat_id = query.message.chat_id
+async def _run_analysis_for_ticker(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user_id: int,
+    ticker: str,
+) -> str:
+    """Run a single analysis end-to-end. Sends its own progress photo +
+    caption, registers a cancel event, and renders the final result.
+
+    The graph instance comes from a pool — see analysis._get_or_create_pool.
+    Pool serves both single-tap and parallel queue paths uniformly.
+
+    Returns one of:
+    - "completed" — analysis finished (success or non-cancel error).
+    - "cancelled" — user tapped Cancel mid-run.
+    - "unavailable" — tradingagents module not loaded.
+    """
+    cancel_registry = context.chat_data.setdefault("analysis_cancels", {})
+
     chart_url = finviz_chart_url(ticker)
     logger.info("[%s] chart_url=%s", ticker, chart_url)
-
-    # Replace the watchlist menu with a chart + "analyzing" caption.
-    # send_photo can't replace a text message in place, so we delete
-    # the original and post a fresh photo message that we'll edit later.
-    try:
-        await query.delete_message()
-    except Exception:
-        pass
 
     progress_msg = await context.bot.send_photo(
         chat_id=chat_id,
@@ -112,13 +124,12 @@ async def _handle_info(
             message_id=progress_msg.message_id,
             caption="TradingAgents module not available.",
         )
-        return
+        return "unavailable"
 
     # Per-run cancellation: button on the progress photo sets this event,
     # ProgressReporter checks it at each step boundary and raises
     # CancelledByUserError to abort the pipeline.
     cancel_event = threading.Event()
-    cancel_registry = context.chat_data.setdefault("analysis_cancels", {})
     cancel_registry[progress_msg.message_id] = cancel_event
 
     cancel_kb = InlineKeyboardMarkup(
@@ -150,33 +161,7 @@ async def _handle_info(
         cancel_event=cancel_event,
     )
 
-    try:
-        final_state, signal = await asyncio.to_thread(
-            run_trading_analysis, ticker, user_id, user_config_storage, reporter
-        )
-        if final_state is None:
-            await context.bot.edit_message_caption(
-                chat_id=chat_id,
-                message_id=progress_msg.message_id,
-                caption="Analysis failed. TradingAgents module not available.",
-                reply_markup=None,
-            )
-            return
-
-        markdown_content = format_analysis_result_markdown(ticker, final_state, signal)
-        html_content = f'<img src="{chart_url}"/>{markdown.markdown(markdown_content)}'
-        telegraph_url = await publish_to_telegraph(f"{ticker} Analysis", html_content)
-
-        caption = format_short_message(ticker, signal, telegraph_url)
-        await context.bot.edit_message_caption(
-            chat_id=chat_id,
-            message_id=progress_msg.message_id,
-            caption=caption,
-            parse_mode="MarkdownV2",
-            reply_markup=None,
-        )
-    except CancelledByUserError:
-        logger.info("Analysis cancelled by user for %s", ticker)
+    async def _render_cancelled() -> None:
         await context.bot.edit_message_caption(
             chat_id=chat_id,
             message_id=progress_msg.message_id,
@@ -184,6 +169,58 @@ async def _handle_info(
             parse_mode="MarkdownV2",
             reply_markup=None,
         )
+
+    try:
+        final_state, signal = await asyncio.to_thread(
+            run_trading_analysis,
+            ticker,
+            user_id,
+            user_config_storage,
+            reporter,
+        )
+        # Race close: the user can tap Cancel after the final LLM call but
+        # before any next step-boundary check. propagate() then returns
+        # cleanly even though the user wanted to abort. Honour the cancel
+        # flag and discard the result instead of overwriting "Cancelling…".
+        if cancel_event.is_set():
+            logger.info("Analysis cancelled by user (post-completion) for %s", ticker)
+            await _render_cancelled()
+            return "cancelled"
+
+        if final_state is None:
+            await context.bot.edit_message_caption(
+                chat_id=chat_id,
+                message_id=progress_msg.message_id,
+                caption="Analysis failed. TradingAgents module not available.",
+                reply_markup=None,
+            )
+            return "unavailable"
+
+        markdown_content = format_analysis_result_markdown(ticker, final_state, signal)
+        html_content = f'<img src="{chart_url}"/>{markdown.markdown(markdown_content)}'
+        telegraph_url = await publish_to_telegraph(f"{ticker} Analysis", html_content)
+
+        # Re-check cancel flag — Telegraph publish is also a network round-trip
+        # the user might cancel through.
+        if cancel_event.is_set():
+            logger.info("Analysis cancelled by user (post-publish) for %s", ticker)
+            await _render_cancelled()
+            return "cancelled"
+
+        summary = extract_summary(final_state.get("final_trade_decision", ""))
+        caption = format_short_message(ticker, signal, telegraph_url, summary=summary)
+        await context.bot.edit_message_caption(
+            chat_id=chat_id,
+            message_id=progress_msg.message_id,
+            caption=caption,
+            parse_mode="MarkdownV2",
+            reply_markup=None,
+        )
+        return "completed"
+    except CancelledByUserError:
+        logger.info("Analysis cancelled by user for %s", ticker)
+        await _render_cancelled()
+        return "cancelled"
     except Exception as e:
         logger.exception("Error analyzing %s", ticker)
         await context.bot.edit_message_caption(
@@ -192,8 +229,94 @@ async def _handle_info(
             caption=f"Error analyzing {ticker}.\n\nDetails: {str(e)[:200]}",
             reply_markup=None,
         )
+        return "completed"
     finally:
         cancel_registry.pop(progress_msg.message_id, None)
+
+
+async def _handle_info(
+    query, context: ContextTypes.DEFAULT_TYPE, user_id: int, ticker: str
+) -> None:
+    """Single-tap analysis from the watchlist menu."""
+    chat_id = query.message.chat_id
+    # Replace the watchlist menu with the analysis flow. send_photo can't
+    # replace a text message in place, so we delete the original here.
+    try:
+        await query.delete_message()
+    except Exception:
+        pass
+    await _run_analysis_for_ticker(context, chat_id, user_id, ticker)
+
+
+async def _handle_select_toggle(
+    query, context: ContextTypes.DEFAULT_TYPE, user_id: int, ticker: str
+) -> None:
+    """Toggle a ticker in the watchlist selection and re-render the keyboard."""
+    selection: set[str] = context.chat_data.setdefault("watch_selection", set())
+    if ticker in selection:
+        selection.discard(ticker)
+    else:
+        selection.add(ticker)
+    text, kb = build_watchlist_response(user_id, selected=selection)
+    if kb is None:
+        await query.edit_message_text(text)
+    else:
+        await query.edit_message_text(text, reply_markup=kb, parse_mode="MarkdownV2")
+
+
+async def _handle_done(
+    query, context: ContextTypes.DEFAULT_TYPE, user_id: int
+) -> None:
+    """Unified entry point for both single and multi-ticker analysis runs.
+
+    1 selected → cached graph (fast init, no parallel benefit anyway).
+    N selected → fresh graph per ticker, run in parallel via asyncio.gather.
+    """
+    selection = sorted(context.chat_data.get("watch_selection") or set())
+    if not selection:
+        await query.answer("No tickers selected.", show_alert=True)
+        return
+    chat_id = query.message.chat_id
+    context.chat_data.pop("watch_selection", None)
+
+    if len(selection) == 1:
+        # Single-ticker: replace the watchlist menu with the analysis flow.
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+        await _run_analysis_for_ticker(context, chat_id, user_id, selection[0])
+        return
+
+    # Multi-ticker: parallel runs share the per-key graph pool — first run
+    # in a fresh pool pays init cost, subsequent reuse warm instances.
+    safe_list = escape_markdown(", ".join(selection), version=2)
+    try:
+        await query.edit_message_text(
+            f"🚀 Running queue: {safe_list}\n\n"
+            "_Analyses run in parallel — cancel each independently\\._",
+            parse_mode="MarkdownV2",
+        )
+    except Exception:
+        pass
+
+    results = await asyncio.gather(
+        *(
+            _run_analysis_for_ticker(context, chat_id, user_id, ticker)
+            for ticker in selection
+        ),
+        return_exceptions=True,
+    )
+
+    completed = sum(1 for r in results if r == "completed")
+    cancelled = sum(1 for r in results if r == "cancelled")
+    failed = len(results) - completed - cancelled
+    parts = [f"✅ Queue done — {completed} completed"]
+    if cancelled:
+        parts.append(f"{cancelled} cancelled")
+    if failed:
+        parts.append(f"{failed} failed")
+    await context.bot.send_message(chat_id=chat_id, text=", ".join(parts) + ".")
 
 
 async def _handle_history(query, ticker: str, date_str: str) -> None:
@@ -260,13 +383,23 @@ async def _handle_cancel_analysis(
     try:
         message_id = int(message_id_str)
     except ValueError:
+        logger.warning("cancel_analysis: bad message_id %r", message_id_str)
         return
     cancel_registry = context.chat_data.get("analysis_cancels") or {}
+    logger.info(
+        "cancel_analysis tapped: message_id=%s registry_keys=%s",
+        message_id,
+        list(cancel_registry.keys()),
+    )
     event = cancel_registry.get(message_id)
     if event is None:
-        # Already finished or never registered — nothing to abort.
+        logger.warning(
+            "cancel_analysis: no event for message_id=%s — already finished?",
+            message_id,
+        )
         return
     event.set()
+    logger.info("cancel_analysis: event set for message_id=%s", message_id)
     try:
         await context.bot.edit_message_caption(
             chat_id=query.message.chat_id,
@@ -278,7 +411,7 @@ async def _handle_cancel_analysis(
             reply_markup=None,
         )
     except Exception as e:
-        logger.debug("Cancel-acknowledgement edit skipped: %s", e)
+        logger.warning("Cancel-acknowledgement edit failed: %s", e)
 
 
 async def _handle_cancel(
@@ -343,7 +476,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         _, provider, model = data.split(":", 2)
         await _handle_quick(query, user_id, provider, model)
     elif data.startswith("info:"):
+        # Back-compat: stale buttons in old chat history. New /watch renders
+        # don't generate `info:` callbacks anymore — the unified Done flow
+        # handles single + multi via `runall:`.
         await _handle_info(query, context, user_id, data.split(":", 1)[1])
+    elif data.startswith("multi:"):
+        await _handle_select_toggle(query, context, user_id, data.split(":", 1)[1])
+    elif data.startswith("runall:"):
+        await _handle_done(query, context, user_id)
     elif data.startswith("del:"):
         await _handle_del(query, user_id, data.split(":", 1)[1])
     elif data.startswith("cancel_analysis:"):
