@@ -16,8 +16,15 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install Ruff
-        run: pip install ruff
+      - name: Install Ruff (pinned via pyproject [dev] extra)
+        # Use --only-deps via the dev extra spec without installing the
+        # package or its tradingagents git dependency — lint doesn't need
+        # the runtime, just ruff. Falls back to pinned `pip install ruff`
+        # at the version declared in pyproject.toml.
+        run: |
+          PIN=$(python -c "import tomllib;import sys;d=tomllib.load(open('pyproject.toml','rb'));print([x for x in d['project']['optional-dependencies']['dev'] if x.startswith('ruff')][0])")
+          echo "Installing $PIN"
+          pip install "$PIN"
 
       - name: Ruff check
         run: ruff check .

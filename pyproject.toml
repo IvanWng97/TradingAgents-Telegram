@@ -16,5 +16,10 @@ dependencies = [
     "tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git",
 ]
 
+[project.optional-dependencies]
+# Pin dev tooling so local + CI stay in lockstep. Dependabot bumps this
+# via PR — bumping the pin re-runs CI on the new version everywhere.
+dev = ["ruff==0.15.12"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
