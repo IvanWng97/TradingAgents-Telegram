@@ -16,6 +16,7 @@ Telegram bot wrapping the [TradingAgents](https://github.com/TauricResearch/Trad
 | `/history` (no args) | Inline-button picker of all tickers with saved analyses |
 | `/history NVDA` | Inline-button picker of recent analysis dates for that ticker. `← Back` returns to the ticker picker. |
 | `/history NVDA 2026-04-15` | Direct lookup — publishes that day's saved analysis to Telegraph |
+| `/status` | Operational snapshot: bot uptime, # analyses since boot, graph-pool size, your current LLM config |
 
 The Telegram client also exposes a Menu button next to the input field with the same commands (populated via `set_my_commands`), and `/`-autocomplete works after typing the first letter or two.
 
@@ -110,5 +111,9 @@ data/                       # runtime state (watchlist.json, user_config.json)
 pyproject.toml              # deps + package metadata
 Dockerfile, docker-compose.yml
 ```
+
+## TODO
+
+- **Daily digest scheduler** — cron-like `JobQueue` job that walks each user's watchlist nightly and posts a single summary message with all signals, so users get a passive daily read without tapping anything.
 
 See [`CLAUDE.md`](./CLAUDE.md) for architecture notes, key contracts, and current limitations.

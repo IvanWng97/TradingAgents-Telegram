@@ -49,6 +49,11 @@ class GraphPool:
         self._max = max_size
         self._mutex = threading.Lock()
 
+    @property
+    def size(self) -> int:
+        """Current number of built instances (in pool + in flight)."""
+        return self._size
+
     @contextlib.contextmanager
     def acquire(self):
         graph = None
@@ -84,6 +89,12 @@ class GraphPool:
 
 _graph_pool: "OrderedDict[tuple[str, str, str], GraphPool]" = OrderedDict()
 _pool_mutex = threading.Lock()
+
+
+def pool_stats() -> tuple[int, int]:
+    """Snapshot of (num_keys, total_instances) for the /status command."""
+    with _pool_mutex:
+        return (len(_graph_pool), sum(p.size for p in _graph_pool.values()))
 
 
 # Tradingagents is treated as an external dependency.  When it isn't

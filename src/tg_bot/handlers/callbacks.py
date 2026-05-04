@@ -107,6 +107,8 @@ async def _run_analysis_for_ticker(
     - "unavailable" — tradingagents module not loaded.
     """
     cancel_registry = context.chat_data.setdefault("analysis_cancels", {})
+    # /status counter — counts each analysis attempt across the whole bot.
+    context.bot_data["analysis_count"] = context.bot_data.get("analysis_count", 0) + 1
 
     chart_url = finviz_chart_url(ticker)
     logger.info("[%s] chart_url=%s", ticker, chart_url)

@@ -55,8 +55,9 @@ Top-level: `pyproject.toml` (deps), `Dockerfile`, `docker-compose.yml`, `.env`, 
 | `/history` (no args) | Inline picker of all tickers with saved history, with `❌ Cancel` to dismiss |
 | `/history NVDA` | Inline picker of recent analysis dates with `← Back` (returns to ticker picker) and `❌ Cancel` |
 | `/history NVDA 2026-04-15` | Direct lookup by date — publishes the saved analysis to Telegraph (final view also has `← Back` to the date picker) |
+| `/status` | Diagnostic snapshot — process uptime, total analyses run since boot (`bot_data["analysis_count"]`), graph pool size from `analysis.pool_stats()`, and the requesting user's `(provider, deep, quick)` LLM config |
 
-`set_my_commands` in `app.py:_post_init` exposes these as Telegram's native Menu button + `/`-autocomplete.
+`set_my_commands` in `app.py:_post_init` exposes these as Telegram's native Menu button + `/`-autocomplete. `_post_init` also stamps `bot_data["start_time"] = time.time()` so `/status` can compute uptime.
 
 ## Key contracts
 
@@ -137,6 +138,7 @@ Apply once after each fresh install. Docker (Linux) is unaffected.
 
 ## Recently fixed (May 2026)
 
+- **`/status` command** + `analysis.pool_stats()` helper. Tracks uptime via `bot_data["start_time"]` (set in `_post_init`) and a global `bot_data["analysis_count"]` incremented at the top of every `_run_analysis_for_ticker` invocation. Surfaces graph pool stats (key count + total instances) for diagnosing pool exhaustion.
 - **Mid-analysis cancellation.** Each progress message now carries a ❌ Cancel button. Tapping it sets a `threading.Event` checked at every LLM-call boundary in `progress._dispatch`; raising `CancelledByUserError` aborts the pipeline. Required `concurrent_updates=True` on the PTB Application (otherwise the cancel update queues behind the in-flight handler) and `raise_error = True` on the callback handler (otherwise LangChain swallows the exception). Multiple race-close checks in the analysis flow ensure a late tap discards the result.
 - **Graph pool replaces single-instance cache.** `GraphPool` per `(provider, deep, quick)` allows N parallel runs to each hold their own instance (no lock contention) while still caching across runs. Builds happen outside the mutex so cold-start parallelism scales. Single-tap and queue paths both go through the pool.
 - **Watchlist UX simplified to one mode.** `/watch` is always select-mode: tap to toggle (✅ prefix), `Done` runs the selected ticker(s). Internal logic decides cached graph (1 ticker) vs parallel via `asyncio.gather` (N tickers). Old "single-tap" + "multi-select toggle" duality is gone.

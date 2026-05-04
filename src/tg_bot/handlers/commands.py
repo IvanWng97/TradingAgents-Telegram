@@ -1,13 +1,15 @@
-"""Command handlers (/start, /help, /add, /del, /watch, /list, /config, /history)."""
+"""Command handlers (/start, /help, /add, /del, /watch, /list, /config, /history, /status)."""
 
 import asyncio
 import logging
+import time
 
 import markdown
 from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
+from tg_bot.analysis import pool_stats
 from tg_bot.formatters import format_analysis_result_markdown
 from tg_bot.history import (
     list_available_dates,
@@ -54,6 +56,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/config - Configure LLM provider and deep/quick models\n"
         "/history [<ticker>] [YYYY-MM-DD] - Browse past analyses. "
         "With no args, shows tickers with saved history.\n"
+        "/status - Bot uptime, pool stats, and your current LLM config\n"
         "/start - Welcome message"
     )
 
@@ -404,3 +407,50 @@ async def config_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(
         message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2"
     )
+
+
+def _format_uptime(seconds: int) -> str:
+    """Render '2d 3h 14m' style — coarsest non-zero unit downward."""
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if not parts:
+        parts.append(f"{secs}s")
+    return " ".join(parts)
+
+
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Operational snapshot: uptime, # analyses since boot, graph pool size,
+    requesting user's LLM config. Useful for spotting a silently-broken bot
+    (expired LLM key, blown pool cap) without running a full analysis."""
+    user_id = update.effective_user.id
+
+    start_ts = context.bot_data.get("start_time")
+    uptime_str = _format_uptime(int(time.time() - start_ts)) if start_ts else "unknown"
+    analyses_run = context.bot_data.get("analysis_count", 0)
+    pool_keys, pool_instances = pool_stats()
+
+    provider = user_config_storage.get_llm_provider(user_id) or "default (openai)"
+    deep = user_config_storage.get_llm_model(user_id, "deep") or "default"
+    quick = user_config_storage.get_llm_model(user_id, "quick") or "default"
+
+    # Numbers + simple ASCII labels are MarkdownV2-safe; user-facing values
+    # go inside `…` code spans (no escape needed).
+    message = (
+        "*Bot status*\n"
+        f"• Uptime: `{escape_markdown(uptime_str, version=2)}`\n"
+        f"• Analyses since boot: `{analyses_run}`\n"
+        f"• Graph pool: `{pool_keys}` keys, `{pool_instances}` instances\n\n"
+        "*Your LLM config*\n"
+        f"• Provider: `{provider}`\n"
+        f"• Deep: `{deep}`\n"
+        f"• Quick: `{quick}`"
+    )
+    await update.message.reply_text(message, parse_mode="MarkdownV2")

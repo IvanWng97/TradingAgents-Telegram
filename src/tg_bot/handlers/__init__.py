@@ -10,6 +10,7 @@ from .commands import (
     history_cmd,
     list_watchlist,
     start,
+    status_cmd,
 )
 
 __all__ = [
@@ -21,5 +22,6 @@ __all__ = [
     "list_watchlist",
     "config_cmd",
     "history_cmd",
+    "status_cmd",
     "button_callback",
 ]

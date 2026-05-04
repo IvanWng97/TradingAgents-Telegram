@@ -1,6 +1,7 @@
 """Application wiring: handler registration and process entry point."""
 
 import logging
+import time
 
 from telegram import BotCommand, Update
 from telegram.ext import (
@@ -24,6 +25,7 @@ from tg_bot.handlers import (
     history_cmd,
     list_watchlist,
     start,
+    status_cmd,
 )
 
 
@@ -43,11 +45,14 @@ BOT_COMMANDS = [
     BotCommand("list", "Show your watchlist (alias)"),
     BotCommand("config", "Configure LLM provider and models"),
     BotCommand("history", "Look up a past analysis"),
+    BotCommand("status", "Show bot uptime, pool, and your LLM config"),
 ]
 
 
 async def _post_init(application: Application) -> None:
-    """Populate the Telegram client's Menu button + autocomplete."""
+    """Populate the Telegram client's Menu button + autocomplete and stamp
+    a process start time used by /status."""
+    application.bot_data["start_time"] = time.time()
     await application.bot.set_my_commands(BOT_COMMANDS)
 
 
@@ -86,6 +91,7 @@ def _build_application() -> Application:
     application.add_handler(CommandHandler("list", list_watchlist))
     application.add_handler(CommandHandler("config", config_cmd))
     application.add_handler(CommandHandler("history", history_cmd))
+    application.add_handler(CommandHandler("status", status_cmd))
     application.add_handler(CallbackQueryHandler(button_callback))
 
     # Reply-driven /add: when the user replies to the bot's add-prompt,
