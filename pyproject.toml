@@ -21,7 +21,9 @@ dependencies = [
 [project.optional-dependencies]
 # Pin dev tooling so local + CI stay in lockstep. Dependabot bumps this
 # via PR — bumping the pin re-runs CI on the new version everywhere.
-dev = ["ruff==0.15.12"]
+# Note: when bumping `ruff`, also bump the same `rev:` in
+# `.pre-commit-config.yaml` so the local hook runs the same version.
+dev = ["ruff==0.15.12", "pre-commit>=4.0.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -30,10 +30,11 @@ Every running analysis attaches a ❌ Cancel button to its progress message. Tap
 git clone <repo>
 cd TradingAgents-Telegram
 
-# 1. Set up venv + install
+# 1. Set up venv + install (the [dev] extra adds ruff + pre-commit)
 python3.14 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[dev]"
+pre-commit install   # one-time: lints/formats on every git commit
 
 # 2. Configure secrets
 cat > .env <<EOF
