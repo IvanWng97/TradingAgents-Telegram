@@ -98,22 +98,11 @@ async def _apply_add(user_id: int, tokens: list[str]) -> str:
     return "\n".join(parts)
 
 
-async def _send_summary_with_watchlist(message, user_id: int, summary: str) -> None:
-    """Reply with the add/del summary, then re-render the watchlist below it."""
-    await message.reply_text(summary)
-    text, kb = build_watchlist_response(user_id)
-    if kb is None:
-        await message.reply_text(text)
-    else:
-        await message.reply_text(text, reply_markup=kb, parse_mode="MarkdownV2")
-
-
 async def add_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """`/add NVDA AAPL` adds inline; bare `/add` opens a reply prompt."""
     user_id = update.effective_user.id
     if context.args:
-        summary = await _apply_add(user_id, context.args)
-        await _send_summary_with_watchlist(update.message, user_id, summary)
+        await update.message.reply_text(await _apply_add(user_id, context.args))
         return
 
     # No args: open a ForceReply prompt. Telegram clients pop the reply box
@@ -136,10 +125,9 @@ async def add_via_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if (replied.text or "") != ADD_PROMPT:
         return
 
-    user_id = update.effective_user.id
     tokens = (msg.text or "").split()
-    summary = await _apply_add(user_id, tokens)
-    await _send_summary_with_watchlist(msg, user_id, summary)
+    summary = await _apply_add(update.effective_user.id, tokens)
+    await msg.reply_text(summary)
 
 
 async def del_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -168,7 +156,7 @@ async def del_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         parts.append(f"❓ Not in watchlist: {', '.join(missing)}")
     if not parts:
         parts.append("No valid tickers provided.")
-    await _send_summary_with_watchlist(update.message, user_id, "\n".join(parts))
+    await update.message.reply_text("\n".join(parts))
 
 
 async def _send_del_picker(update: Update, user_id: int) -> None:
