@@ -7,6 +7,8 @@ name = "tg_bot"
 version = "0.1.0"
 description = "Telegram bot wrapper around TradingAgents."
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "python-telegram-bot>=22.7",
     "python-dotenv>=1.2.2",
