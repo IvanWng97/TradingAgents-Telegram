@@ -86,6 +86,7 @@ Set in `.env` (or as compose env vars):
 | `ALLOWED_USER_IDS` | strongly recommended | comma-separated; empty = open to anyone (logged at WARNING). Bot replies with the user's Telegram ID on rejection so you can whitelist them. |
 | `TG_BOT_DATA_DIR` | no | default `data` |
 | `TG_BOT_TA_DEBUG` | no | `1`/`true` enables `TradingAgentsGraph(debug=True)` (streams every langgraph chunk to stdout — verbose, dev only). Default off. |
+| `TG_BOT_MAX_CONCURRENT_ANALYSES` | no | Max analyses running simultaneously across the whole bot. Default `3`. Acts as a coroutine-level FIFO queue — selections beyond this show "⏳ Queued" until a slot frees up, and stay cancellable while waiting. Also sizes the per-LLM-config graph instance pool, so each analysis gets a cached instance with no thread-level blocking. Higher = more parallelism, more memory (~50–200 MB per cached graph: LLM clients + ChromaDB). |
 | `TRADINGAGENTS_RESULTS_DIR` | recommended in Docker | `/history` reads from here. Defaults to `~/.tradingagents/logs` (ephemeral in containers). Set to e.g. `/app/data/ta-logs` and bind-mount to persist. |
 | `TRADINGAGENTS_CACHE_DIR` | recommended in Docker | yfinance cache. Defaults to `~/.tradingagents/cache` (ephemeral). Set to `/app/data/ta-cache` to skip re-downloads on every restart. |
 | Provider keys | yes (one) | `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, etc. — must match the provider you select via `/config` |
