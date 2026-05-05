@@ -84,6 +84,7 @@ class ProgressReporter:
         ticker: str,
         loop: asyncio.AbstractEventLoop,
         cancel_event: Optional[threading.Event] = None,
+        cancel_run_id: Optional[str] = None,
     ) -> None:
         self.bot = bot
         self.chat_id = chat_id
@@ -91,6 +92,10 @@ class ProgressReporter:
         self.ticker = ticker
         self.loop = loop
         self.cancel_event = cancel_event
+        # Stable per-run id used in the Cancel button's callback_data.
+        # Re-attached on every caption edit since editMessageCaption drops
+        # reply_markup unless re-sent.
+        self.cancel_run_id = cancel_run_id
         self._last_step: Optional[str] = None
 
     async def report(self, raw_node_name: str) -> None:
@@ -114,13 +119,13 @@ class ProgressReporter:
         # Telegram's editMessageCaption drops the existing reply_markup unless
         # we re-send it — so re-attach the cancel button on every step update.
         reply_markup = None
-        if self.cancel_event is not None:
+        if self.cancel_event is not None and self.cancel_run_id is not None:
             reply_markup = InlineKeyboardMarkup(
                 [
                     [
                         InlineKeyboardButton(
                             "❌ Cancel",
-                            callback_data=f"cancel_analysis:{self.message_id}",
+                            callback_data=f"cancel_analysis:{self.cancel_run_id}",
                         )
                     ]
                 ]

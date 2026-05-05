@@ -3,6 +3,8 @@
 import asyncio
 import logging
 import threading
+import time
+import uuid
 
 import markdown
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -15,6 +17,7 @@ from tg_bot.analysis import (
     has_model_catalog,
     run_trading_analysis,
 )
+from tg_bot.config import Config
 from tg_bot.chart import finviz_chart_url
 from tg_bot.formatters import (
     extract_summary,
@@ -34,6 +37,52 @@ from tg_bot.telegraph_client import publish_to_telegraph
 
 
 logger = logging.getLogger(__name__)
+
+
+# Bounds total concurrent analyses across the whole bot. Acts as a
+# coroutine-level FIFO queue (waiters are served in arrival order).
+# Lazy-init on first use so we bind it to the running loop, not the
+# module-import loop.
+_run_semaphore: "asyncio.Semaphore | None" = None
+
+
+def _get_run_semaphore() -> asyncio.Semaphore:
+    global _run_semaphore
+    if _run_semaphore is None:
+        _run_semaphore = asyncio.Semaphore(Config.MAX_CONCURRENT_ANALYSES)
+    return _run_semaphore
+
+
+# Serializes cancel-ack caption edits so a multi-cancel burst doesn't
+# overrun Telegram's per-chat edit limit (~1/sec). Each call holds the
+# lock and sleeps if the last edit fired less than _MIN_CANCEL_INTERVAL
+# seconds ago, then executes. Effectively a FIFO queue with rate-aware
+# pacing — toasts already covered the user's immediate feedback, this
+# just lands the persistent "Cancelling…" caption one by one.
+_cancel_edit_lock = asyncio.Lock()
+_last_cancel_edit_at: float = 0.0
+_MIN_CANCEL_INTERVAL = 1.1  # safe margin under Telegram's per-chat limit
+
+
+async def _queued_cancel_edit(bot, chat_id: int, message_id: int) -> None:
+    """Lock-serialized variant of `edit_message_caption` for cancel-ack."""
+    global _last_cancel_edit_at
+    async with _cancel_edit_lock:
+        now = time.monotonic()
+        wait = _MIN_CANCEL_INTERVAL - (now - _last_cancel_edit_at)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        try:
+            await bot.edit_message_caption(
+                chat_id=chat_id,
+                message_id=message_id,
+                caption="❌ Cancelling… will stop after the current step finishes\\.",
+                parse_mode="MarkdownV2",
+                reply_markup=None,
+            )
+        except Exception as e:
+            logger.warning("queued cancel-ack edit failed: %s", e)
+        _last_cancel_edit_at = time.monotonic()
 
 
 def _model_keyboard(mode: str, provider: str) -> InlineKeyboardMarkup:
@@ -110,15 +159,45 @@ async def _run_analysis_for_ticker(
     # /status counter — counts each analysis attempt across the whole bot.
     context.bot_data["analysis_count"] = context.bot_data.get("analysis_count", 0) + 1
 
-    chart_url = finviz_chart_url(ticker)
-    logger.info("[%s] chart_url=%s", ticker, chart_url)
+    # Per-run UUID is the cancel-callback key. Lets us attach the cancel
+    # button via send_photo's reply_markup (which doesn't yet know the
+    # message_id Telegram will assign), avoiding a second API call. With
+    # N parallel queue runs, that second call commonly hit Telegram's
+    # per-bot rate limit (~30/s) and silently dropped — leaving later
+    # tickers stuck on "Analyzing… please wait" with no cancel button.
+    run_id = uuid.uuid4().hex[:8]
+    cancel_event = threading.Event()
+    cancel_registry[run_id] = {"event": cancel_event, "message_id": None}
+    cancel_kb = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "❌ Cancel",
+                    callback_data=f"cancel_analysis:{run_id}",
+                )
+            ]
+        ]
+    )
 
+    chart_url = finviz_chart_url(ticker)
+    logger.info("[%s] chart_url=%s run_id=%s", ticker, chart_url, run_id)
+
+    # Initial caption: "Queued" if semaphore is full, otherwise "Analyzing".
+    # Saves a follow-up edit when there's an immediate slot.
+    sem = _get_run_semaphore()
+    initial_caption = (
+        f"⏳ *{escape_markdown(ticker, version=2)}* queued — waiting for slot…"
+        if sem.locked()
+        else f"📊 Analyzing *{escape_markdown(ticker, version=2)}*… please wait\\."
+    )
     progress_msg = await context.bot.send_photo(
         chat_id=chat_id,
         photo=chart_url,
-        caption=f"📊 Analyzing *{escape_markdown(ticker, version=2)}*… please wait\\.",
+        caption=initial_caption,
         parse_mode="MarkdownV2",
+        reply_markup=cancel_kb,
     )
+    cancel_registry[run_id]["message_id"] = progress_msg.message_id
 
     if not TRADINGAGENTS_AVAILABLE:
         await context.bot.edit_message_caption(
@@ -128,32 +207,6 @@ async def _run_analysis_for_ticker(
         )
         return "unavailable"
 
-    # Per-run cancellation: button on the progress photo sets this event,
-    # ProgressReporter checks it at each step boundary and raises
-    # CancelledByUserError to abort the pipeline.
-    cancel_event = threading.Event()
-    cancel_registry[progress_msg.message_id] = cancel_event
-
-    cancel_kb = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "❌ Cancel",
-                    callback_data=f"cancel_analysis:{progress_msg.message_id}",
-                )
-            ]
-        ]
-    )
-    try:
-        await context.bot.edit_message_reply_markup(
-            chat_id=chat_id,
-            message_id=progress_msg.message_id,
-            reply_markup=cancel_kb,
-        )
-    except Exception:
-        # Keyboard is best-effort — analysis still runs without it.
-        pass
-
     reporter = ProgressReporter(
         bot=context.bot,
         chat_id=chat_id,
@@ -161,6 +214,7 @@ async def _run_analysis_for_ticker(
         ticker=ticker,
         loop=asyncio.get_running_loop(),
         cancel_event=cancel_event,
+        cancel_run_id=run_id,
     )
 
     async def _render_cancelled() -> None:
@@ -172,7 +226,37 @@ async def _run_analysis_for_ticker(
             reply_markup=None,
         )
 
+    # Wait for a concurrency slot. We poll cancel_event every 0.5s instead
+    # of `async with sem:` so a Cancel tap during the queued phase aborts
+    # without waiting for a slot to free up.
+    acquired = False
     try:
+        while not cancel_event.is_set():
+            try:
+                await asyncio.wait_for(sem.acquire(), timeout=0.5)
+                acquired = True
+                break
+            except asyncio.TimeoutError:
+                continue
+        if cancel_event.is_set() and not acquired:
+            logger.info("Analysis cancelled while queued: %s", ticker)
+            await _render_cancelled()
+            return "cancelled"
+
+        # Slot granted — flip the caption from "Queued" to "Analyzing"
+        # if we showed the queued state initially. Best-effort.
+        if initial_caption.startswith("⏳"):
+            try:
+                await context.bot.edit_message_caption(
+                    chat_id=chat_id,
+                    message_id=progress_msg.message_id,
+                    caption=f"📊 Analyzing *{escape_markdown(ticker, version=2)}*… please wait\\.",
+                    parse_mode="MarkdownV2",
+                    reply_markup=cancel_kb,
+                )
+            except Exception:
+                pass
+
         final_state, signal = await asyncio.to_thread(
             run_trading_analysis,
             ticker,
@@ -238,7 +322,9 @@ async def _run_analysis_for_ticker(
         )
         return "completed"
     finally:
-        cancel_registry.pop(progress_msg.message_id, None)
+        if acquired:
+            sem.release()
+        cancel_registry.pop(run_id, None)
 
 
 async def _handle_info(
@@ -393,44 +479,40 @@ async def _handle_del(query, user_id: int, ticker: str) -> None:
 
 
 async def _handle_cancel_analysis(
-    context: ContextTypes.DEFAULT_TYPE, query, message_id_str: str
+    context: ContextTypes.DEFAULT_TYPE, query, run_id: str
 ) -> None:
-    """Set the cancel flag for a running analysis on a given message.
+    """Set the cancel flag for a running analysis identified by run_id.
 
-    The actual abort happens at the next pipeline step boundary inside
-    ProgressReporter — the in-flight LLM call still completes. We update
-    the caption immediately so the user sees acknowledgement.
+    The persistent "❌ Cancelling…" caption edit is fired through the
+    serializing queue (`_queued_cancel_edit`) so a multi-cancel burst
+    doesn't overrun Telegram's per-chat edit limit; later taps land
+    their captions in FIFO order at ~1/sec. The dispatcher already
+    answered the callback query with an empty ack.
     """
-    try:
-        message_id = int(message_id_str)
-    except ValueError:
-        logger.warning("cancel_analysis: bad message_id %r", message_id_str)
-        return
     cancel_registry = context.chat_data.get("analysis_cancels") or {}
+    entry = cancel_registry.get(run_id)
     logger.info(
-        "cancel_analysis tapped: message_id=%s registry_keys=%s",
-        message_id,
+        "cancel_analysis tapped: run_id=%s registry_keys=%s",
+        run_id,
         list(cancel_registry.keys()),
     )
-    event = cancel_registry.get(message_id)
-    if event is None:
+    if entry is None:
         logger.warning(
-            "cancel_analysis: no event for message_id=%s — already finished?",
-            message_id,
+            "cancel_analysis: no entry for run_id=%s — already finished?", run_id
         )
         return
-    event.set()
-    logger.info("cancel_analysis: event set for message_id=%s", message_id)
-    try:
-        await context.bot.edit_message_caption(
-            chat_id=query.message.chat_id,
-            message_id=message_id,
-            caption=("❌ Cancelling… will stop after the current step finishes\\."),
-            parse_mode="MarkdownV2",
-            reply_markup=None,
-        )
-    except Exception as e:
-        logger.warning("Cancel-acknowledgement edit failed: %s", e)
+    entry["event"].set()
+    logger.info("cancel_analysis: event set for run_id=%s", run_id)
+
+    message_id = entry.get("message_id")
+    if message_id is None:
+        return
+    # Fire-and-forget through the serializing queue. Returns immediately;
+    # the actual edit lands in FIFO order respecting Telegram's per-chat
+    # rate limit (~1/sec).
+    asyncio.create_task(
+        _queued_cancel_edit(context.bot, query.message.chat_id, message_id)
+    )
 
 
 async def _handle_cancel(

@@ -25,12 +25,13 @@ logger = logging.getLogger(__name__)
 #
 # A pool gives us both: parallel runs (each gets its own instance) AND
 # caching across runs (instances are returned to the pool on completion).
-# Pool grows lazily up to GRAPH_POOL_MAX_PER_KEY; further parallel runs
-# block on queue.get() until an instance is returned.
-#
-# Key-level LRU at GRAPH_CACHE_MAX — when too many keys are tracked, the
-# oldest pool (and all its instances) is evicted.
-GRAPH_POOL_MAX_PER_KEY = 5
+# Per-key cap matches Config.MAX_CONCURRENT_ANALYSES — the asyncio
+# semaphore in the handler already prevents over-subscription, so the
+# pool's blocking-queue branch is unreachable. Pool memory is bounded
+# by the same knob users set for concurrency. Key-level LRU at
+# GRAPH_CACHE_MAX evicts the oldest pool (and all its instances) when
+# too many distinct LLM-config keys are tracked.
+GRAPH_POOL_MAX_PER_KEY = Config.MAX_CONCURRENT_ANALYSES
 GRAPH_CACHE_MAX = 4
 
 
