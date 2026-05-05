@@ -10,7 +10,9 @@ requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
-    "python-telegram-bot>=22.7",
+    # [rate-limiter] extra pulls in `aiolimiter` so AIORateLimiter can
+    # throttle outgoing Telegram requests under per-chat / per-bot caps.
+    "python-telegram-bot[rate-limiter]>=22.7",
     "python-dotenv>=1.2.2",
     "telegraph>=2.2.0",
     "markdown>=3.10.2",

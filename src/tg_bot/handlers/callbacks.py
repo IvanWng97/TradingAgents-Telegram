@@ -53,6 +53,21 @@ def _get_run_semaphore() -> asyncio.Semaphore:
     return _run_semaphore
 
 
+def _try_acquire_nonblocking(sem: asyncio.Semaphore) -> bool:
+    """Mimic asyncio.Semaphore.acquire()'s fast-path synchronously — safe
+    in asyncio because coroutines are cooperative (no preemption between
+    `if` and `_value -= 1`). Avoids the broken `wait_for(..., timeout=0)`
+    pattern, which cancels the inner task before the event loop can run
+    its fast-path, so it always reports failure.
+    """
+    if not sem.locked() and (
+        sem._waiters is None or all(w.cancelled() for w in sem._waiters)
+    ):
+        sem._value -= 1
+        return True
+    return False
+
+
 # Serializes cancel-ack caption edits so a multi-cancel burst doesn't
 # overrun Telegram's per-chat edit limit (~1/sec). Each call holds the
 # lock and sleeps if the last edit fired less than _MIN_CANCEL_INTERVAL
@@ -166,8 +181,16 @@ async def _run_analysis_for_ticker(
     # per-bot rate limit (~30/s) and silently dropped — leaving later
     # tickers stuck on "Analyzing… please wait" with no cancel button.
     run_id = uuid.uuid4().hex[:8]
+    # Two cancel signals: threading.Event for the LangChain callback (runs
+    # in a worker thread), asyncio.Event for the queue-wait (asyncio loop).
+    # Both set together by the cancel handler — see _handle_cancel_analysis.
     cancel_event = threading.Event()
-    cancel_registry[run_id] = {"event": cancel_event, "message_id": None}
+    cancel_async = asyncio.Event()
+    cancel_registry[run_id] = {
+        "event": cancel_event,
+        "async_event": cancel_async,
+        "message_id": None,
+    }
     cancel_kb = InlineKeyboardMarkup(
         [
             [
@@ -182,24 +205,82 @@ async def _run_analysis_for_ticker(
     chart_url = finviz_chart_url(ticker)
     logger.info("[%s] chart_url=%s run_id=%s", ticker, chart_url, run_id)
 
-    # Initial caption: "Queued" if semaphore is full, otherwise "Analyzing".
-    # Saves a follow-up edit when there's an immediate slot.
+    # Try to acquire a slot synchronously BEFORE the send_photo. This
+    # determines whether the initial caption should be "Analyzing" (slot
+    # in hand) or "Queued" (will wait). Doing the acquire first is what
+    # makes the caption reflect reality — `sem.locked()` checked AFTER
+    # all 7 coroutines have entered but BEFORE any have acquired would
+    # show every one of them as "not locked", so all would label
+    # themselves "Analyzing" even though only N can actually run.
     sem = _get_run_semaphore()
+    acquired = _try_acquire_nonblocking(sem)
+    logger.info(
+        "[%s] sem state after sync-acquire: acquired=%s, _value=%d, _waiters=%d",
+        ticker,
+        acquired,
+        sem._value,
+        len(sem._waiters) if sem._waiters else 0,
+    )
+
     initial_caption = (
-        f"⏳ *{escape_markdown(ticker, version=2)}* queued — waiting for slot…"
-        if sem.locked()
-        else f"📊 Analyzing *{escape_markdown(ticker, version=2)}*… please wait\\."
+        f"📊 Analyzing *{escape_markdown(ticker, version=2)}*… please wait\\."
+        if acquired
+        else f"⏳ *{escape_markdown(ticker, version=2)}* queued — waiting for slot…"
     )
-    progress_msg = await context.bot.send_photo(
-        chat_id=chat_id,
-        photo=chart_url,
-        caption=initial_caption,
-        parse_mode="MarkdownV2",
-        reply_markup=cancel_kb,
+    logger.info(
+        "[%s] send_photo START caption=%s",
+        ticker,
+        "Analyzing" if acquired else "Queued",
     )
+    progress_msg = None
+    last_err: Exception | None = None
+    # Retry once on transient TimedOut. Telegram fetches finviz URLs
+    # server-side and a burst of parallel send_photos against the
+    # per-chat rate limit causes occasional 5–30s tail latencies.
+    # Retrying avoids dropping the ticker entirely on a single flap.
+    for attempt in range(2):
+        try:
+            progress_msg = await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=chart_url,
+                caption=initial_caption,
+                parse_mode="MarkdownV2",
+                reply_markup=cancel_kb,
+            )
+            break
+        except Exception as e:
+            last_err = e
+            is_timeout = type(e).__name__ in ("TimedOut", "TimeoutError")
+            if is_timeout and attempt == 0:
+                logger.warning(
+                    "[%s] send_photo TimedOut (attempt 1) — retrying", ticker
+                )
+                await asyncio.sleep(1.0)
+                continue
+            break
+
+    if progress_msg is None:
+        # Telegram rate-limit / network error / retries exhausted. Without
+        # this guard, the exception propagates out of the coroutine,
+        # leaks the acquired semaphore slot AND the cancel_registry entry
+        # — and the user sees no message at all for this ticker.
+        logger.error(
+            "[%s] send_photo FAILED: %s (type=%s)",
+            ticker,
+            last_err,
+            type(last_err).__name__ if last_err else "unknown",
+        )
+        if acquired:
+            sem.release()
+            logger.info("[%s] released slot after send_photo failure", ticker)
+        cancel_registry.pop(run_id, None)
+        return "completed"  # not "cancelled" — counts toward 'failed' tally
+    logger.info("[%s] send_photo OK message_id=%s", ticker, progress_msg.message_id)
     cancel_registry[run_id]["message_id"] = progress_msg.message_id
 
     if not TRADINGAGENTS_AVAILABLE:
+        if acquired:
+            sem.release()
         await context.bot.edit_message_caption(
             chat_id=chat_id,
             message_id=progress_msg.message_id,
@@ -226,26 +307,48 @@ async def _run_analysis_for_ticker(
             reply_markup=None,
         )
 
-    # Wait for a concurrency slot. We poll cancel_event every 0.5s instead
-    # of `async with sem:` so a Cancel tap during the queued phase aborts
-    # without waiting for a slot to free up.
-    acquired = False
+    # If the synchronous acquire didn't succeed, wait for either a slot
+    # OR a cancel signal — whichever fires first. asyncio.wait races the
+    # two; instant cancel response, no polling churn on the semaphore's
+    # waiter list.
     try:
-        while not cancel_event.is_set():
+        if not acquired:
+            logger.info("[%s] entering wait-for-slot", ticker)
+            acquire_task = asyncio.create_task(sem.acquire())
+            cancel_task = asyncio.create_task(cancel_async.wait())
             try:
-                await asyncio.wait_for(sem.acquire(), timeout=0.5)
-                acquired = True
-                break
-            except asyncio.TimeoutError:
-                continue
-        if cancel_event.is_set() and not acquired:
-            logger.info("Analysis cancelled while queued: %s", ticker)
-            await _render_cancelled()
-            return "cancelled"
+                done, pending = await asyncio.wait(
+                    [acquire_task, cancel_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                for t in (acquire_task, cancel_task):
+                    if not t.done():
+                        t.cancel()
 
-        # Slot granted — flip the caption from "Queued" to "Analyzing"
-        # if we showed the queued state initially. Best-effort.
+            if acquire_task in done and not acquire_task.cancelled():
+                acquired = True
+                logger.info("[%s] queued slot acquired", ticker)
+            else:
+                # Cancel won the race. If acquire ALSO completed before we
+                # got to inspect (rare race), give the slot back.
+                if acquire_task.done() and not acquire_task.cancelled():
+                    try:
+                        acquire_task.result()
+                        sem.release()
+                        logger.info(
+                            "[%s] released raced-acquire slot during cancel", ticker
+                        )
+                    except Exception:
+                        pass
+                logger.info("[%s] cancelled while queued", ticker)
+                await _render_cancelled()
+                return "cancelled"
+
+        # If we showed "Queued" initially, flip the caption to "Analyzing"
+        # now that we have the slot. Best-effort — drop on rate-limit.
         if initial_caption.startswith("⏳"):
+            logger.info("[%s] flipping caption Queued → Analyzing", ticker)
             try:
                 await context.bot.edit_message_caption(
                     chat_id=chat_id,
@@ -254,15 +357,22 @@ async def _run_analysis_for_ticker(
                     parse_mode="MarkdownV2",
                     reply_markup=cancel_kb,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("[%s] caption flip failed: %s", ticker, e)
 
+        logger.info("[%s] entering to_thread(run_trading_analysis)", ticker)
         final_state, signal = await asyncio.to_thread(
             run_trading_analysis,
             ticker,
             user_id,
             user_config_storage,
             reporter,
+        )
+        logger.info(
+            "[%s] to_thread returned signal=%s final_state=%s",
+            ticker,
+            signal,
+            "present" if final_state else "None",
         )
         # Race close: the user can tap Cancel after the final LLM call but
         # before any next step-boundary check. propagate() then returns
@@ -324,7 +434,19 @@ async def _run_analysis_for_ticker(
     finally:
         if acquired:
             sem.release()
+            logger.info(
+                "[%s] sem released, _value=%d, _waiters=%d",
+                ticker,
+                sem._value,
+                len(sem._waiters) if sem._waiters else 0,
+            )
         cancel_registry.pop(run_id, None)
+        logger.info(
+            "[%s] run_id=%s exiting; registry size=%d",
+            ticker,
+            run_id,
+            len(cancel_registry),
+        )
 
 
 async def _handle_info(
@@ -392,6 +514,7 @@ async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) 
     except Exception:
         pass
 
+    logger.info("queue: launching gather for %d tickers: %s", len(selection), selection)
     results = await asyncio.gather(
         *(
             _run_analysis_for_ticker(context, chat_id, user_id, ticker)
@@ -399,6 +522,12 @@ async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) 
         ),
         return_exceptions=True,
     )
+    logger.info("queue: gather returned %d results", len(results))
+    for ticker, r in zip(selection, results):
+        if isinstance(r, BaseException):
+            logger.error("[%s] task raised: %s (type=%s)", ticker, r, type(r).__name__)
+        else:
+            logger.info("[%s] task result: %s", ticker, r)
 
     completed = sum(1 for r in results if r == "completed")
     cancelled = sum(1 for r in results if r == "cancelled")
@@ -502,7 +631,10 @@ async def _handle_cancel_analysis(
         )
         return
     entry["event"].set()
-    logger.info("cancel_analysis: event set for run_id=%s", run_id)
+    async_event = entry.get("async_event")
+    if async_event is not None:
+        async_event.set()
+    logger.info("cancel_analysis: events set for run_id=%s", run_id)
 
     message_id = entry.get("message_id")
     if message_id is None:

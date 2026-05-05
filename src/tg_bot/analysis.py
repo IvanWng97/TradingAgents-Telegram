@@ -25,13 +25,10 @@ logger = logging.getLogger(__name__)
 #
 # A pool gives us both: parallel runs (each gets its own instance) AND
 # caching across runs (instances are returned to the pool on completion).
-# Per-key cap matches Config.MAX_CONCURRENT_ANALYSES — the asyncio
-# semaphore in the handler already prevents over-subscription, so the
-# pool's blocking-queue branch is unreachable. Pool memory is bounded
-# by the same knob users set for concurrency. Key-level LRU at
-# GRAPH_CACHE_MAX evicts the oldest pool (and all its instances) when
-# too many distinct LLM-config keys are tracked.
-GRAPH_POOL_MAX_PER_KEY = Config.MAX_CONCURRENT_ANALYSES
+# Per-key pool size is `Config.MAX_CONCURRENT_ANALYSES` — the asyncio
+# semaphore prevents over-subscription, so the pool's blocking branch is
+# unreachable. Key-level LRU at GRAPH_CACHE_MAX evicts the oldest pool
+# (and all its instances) when too many distinct LLM-config keys exist.
 GRAPH_CACHE_MAX = 4
 
 
@@ -60,6 +57,11 @@ class GraphPool:
         graph = None
         try:
             graph = self._q.get_nowait()
+            logger.info(
+                "pool.acquire: reused cached instance (size=%d, free=%d)",
+                self._size,
+                self._q.qsize(),
+            )
         except queue.Empty:
             pass
 
@@ -72,6 +74,11 @@ class GraphPool:
             if should_build:
                 # Build OUTSIDE the mutex — graph init is slow and other
                 # concurrent acquires shouldn't be blocked on it.
+                logger.info(
+                    "pool.acquire: no free instance, building (now size=%d/%d)",
+                    self._size,
+                    self._max,
+                )
                 try:
                     graph = self._builder()
                 except Exception:
@@ -80,12 +87,19 @@ class GraphPool:
                     raise
             else:
                 # Pool already at max; block until one is returned.
+                logger.info("pool.acquire: at max=%d, blocking on queue.get", self._max)
                 graph = self._q.get()
+                logger.info("pool.acquire: woke from blocking get")
 
         try:
             yield graph
         finally:
             self._q.put(graph)
+            logger.info(
+                "pool.release: returned to pool (size=%d, free=%d)",
+                self._size,
+                self._q.qsize(),
+            )
 
 
 _graph_pool: "OrderedDict[tuple[str, str, str], GraphPool]" = OrderedDict()
@@ -164,8 +178,8 @@ def run_trading_analysis(
 
     Graph instances come from a per-(provider, deep, quick) pool so single-
     tap and parallel queue runs both benefit from caching. Pool grows on
-    demand up to GRAPH_POOL_MAX_PER_KEY; further parallel runs queue until
-    an instance is returned. No `dedicated` flag — pool handles both cases.
+    demand up to `Config.MAX_CONCURRENT_ANALYSES`; the asyncio semaphore in
+    the handler bounds how many runs reach the pool at once.
 
     Returns (final_state, signal). (None, None) if tradingagents isn't
     available — caller should surface a helpful error.
@@ -195,6 +209,7 @@ def run_trading_analysis(
 
     pool = _get_or_create_pool(config)
     set_reporter(reporter)
+    logger.info("[%s] propagate START", ticker)
     try:
         with pool.acquire() as ta:
             final_state, signal = ta.propagate(
@@ -233,7 +248,7 @@ def _get_or_create_pool(config: dict) -> GraphPool:
     with _pool_mutex:
         pool = _graph_pool.get(key)
         if pool is None:
-            pool = GraphPool(max_size=GRAPH_POOL_MAX_PER_KEY, builder=_builder)
+            pool = GraphPool(max_size=Config.MAX_CONCURRENT_ANALYSES, builder=_builder)
             _graph_pool[key] = pool
             while len(_graph_pool) > GRAPH_CACHE_MAX:
                 evicted_key, _ = _graph_pool.popitem(last=False)

@@ -1,10 +1,12 @@
 """Application wiring: handler registration and process entry point."""
 
+import asyncio
 import logging
 import time
 
 from telegram import BotCommand, Update
 from telegram.ext import (
+    AIORateLimiter,
     Application,
     CallbackQueryHandler,
     CommandHandler,
@@ -56,6 +58,33 @@ async def _post_init(application: Application) -> None:
     await application.bot.set_my_commands(BOT_COMMANDS)
 
 
+async def _post_stop(application: Application) -> None:
+    """On SIGTERM/SIGINT: signal every in-flight analysis to abort, then
+    give them ~2s to render their "❌ Cancelled" caption before the
+    process exits. Without this, `docker compose up -d --build` rollouts
+    mid-run can leave half-written JSON and stranded "Analyzing…" captions
+    that no longer have a backing process.
+    """
+    cancelled = 0
+    try:
+        for _chat_id, cd in application.chat_data.items():
+            registry = cd.get("analysis_cancels") or {}
+            for entry in registry.values():
+                entry["event"].set()
+                async_event = entry.get("async_event")
+                if async_event is not None:
+                    async_event.set()
+                cancelled += 1
+    except Exception as e:
+        logger.warning("post_stop: failed to iterate chat_data: %s", e)
+    if cancelled:
+        logger.info(
+            "Graceful shutdown: signalled %d in-flight analyses; draining 2s",
+            cancelled,
+        )
+        await asyncio.sleep(2.0)
+
+
 def _build_application() -> Application:
     # concurrent_updates=True is load-bearing for cancellation. Without it
     # PTB processes updates with a single worker, so a Cancel-button tap
@@ -67,7 +96,21 @@ def _build_application() -> Application:
         Application.builder()
         .token(Config.TELEGRAM_BOT_TOKEN)
         .concurrent_updates(True)
+        # AIORateLimiter throttles outgoing Telegram calls under both the
+        # per-bot (~30/s) and per-chat (~1/s) limits. Without it, parallel
+        # send_photo / edit_message_caption bursts see RetryAfter exceptions
+        # that PTB doesn't auto-retry — analyses get silently dropped.
+        .rate_limiter(AIORateLimiter())
+        # Default HTTP timeouts in PTB are ~5s; sendPhoto with a finviz URL
+        # routinely exceeds that under burst load (Telegram fetches the
+        # photo server-side). Without this, parallel queue launches see
+        # multiple `TimedOut` errors and silently drop tickers.
+        .read_timeout(30)
+        .write_timeout(30)
+        .connect_timeout(15)
+        .pool_timeout(30)
         .post_init(_post_init)
+        .post_stop(_post_stop)
         .build()
     )
 

@@ -20,7 +20,6 @@ import sys
 import threading
 import time
 from types import SimpleNamespace
-from typing import Any
 
 # Match cap to ticker count so no runs are queued — we want all 5 to
 # enter the work phase simultaneously.
@@ -73,9 +72,7 @@ class FakeContext:
         self.bot_data: dict = {}
 
 
-def fake_busy_analysis(
-    ticker, user_id, user_config_storage, reporter=None, **kw
-):
+def fake_busy_analysis(ticker, user_id, user_config_storage, reporter=None, **kw):
     """Sleeps for RUN_DURATION (releases GIL), records window."""
     start = time.monotonic()
     time.sleep(RUN_DURATION)
@@ -132,13 +129,13 @@ async def run() -> None:
     # Allow ~50% overhead to be safe (GIL contention during builds, asyncio
     # scheduling jitter). Definitely should not be near N × RUN_DURATION.
     overhead_budget = RUN_DURATION * 1.5
-    print(f"\n=== Checks ===")
+    print("\n=== Checks ===")
     print(f"  total elapsed {total_elapsed:.2f}s vs budget {overhead_budget:.2f}s")
     assert total_elapsed < overhead_budget, (
         f"elapsed {total_elapsed:.2f}s suggests serial execution "
         f"(would be ~{len(tickers) * RUN_DURATION}s); expected ≤ {overhead_budget:.2f}s"
     )
-    print(f"  ✓ wall time consistent with parallel execution")
+    print("  ✓ wall time consistent with parallel execution")
 
     # ── Assertion 2: all 5 windows overlap ────────────────────────────────
     # A moment of true 5-way overlap exists iff max(start) < min(end).
