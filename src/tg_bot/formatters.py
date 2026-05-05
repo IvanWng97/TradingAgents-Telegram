@@ -28,21 +28,22 @@ def format_analysis_result_markdown(ticker: str, final_state: dict, signal: str)
     )
 
 
-def extract_summary(decision_text: str, max_len: int = 280) -> str:
-    """Pull the lead paragraph out of `final_trade_decision` for the caption.
+def extract_summary(decision_text: str, max_len: int = 200) -> str:
+    """Flat preview of the decision text — first `max_len` chars verbatim.
 
-    Agents reliably lead with the verdict-rationale paragraph; clipping the
-    first paragraph to ~280 chars captures the substance without bloating the
-    caption (Telegram caps photo captions at 1024 chars). Returns "" if the
-    input is empty.
+    Agents emit `final_trade_decision` in inconsistent formats (sometimes
+    leading with a markdown header, sometimes a field list, sometimes prose).
+    Heuristic-based extraction (skip-headers, find-first-sentence) produced
+    unpredictable output across runs. A flat slice is honest: caption shows
+    the LLM's actual opening text, user clicks through to the Telegraph link
+    for the full version.
     """
     if not decision_text:
         return ""
-    paragraphs = [p.strip() for p in decision_text.split("\n\n") if p.strip()]
-    first = paragraphs[0] if paragraphs else decision_text.strip()
-    if len(first) <= max_len:
-        return first
-    return first[:max_len].rstrip() + "…"
+    text = decision_text.strip()
+    if len(text) <= max_len:
+        return text
+    return text[:max_len].rstrip() + "…"
 
 
 def format_short_message(
