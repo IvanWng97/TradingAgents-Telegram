@@ -1,6 +1,10 @@
 services:
   bot:
-    build: .
+    # Prebuilt image published to Docker Hub by .github/workflows/docker-build.yml.
+    # To build locally instead (e.g. testing a code change), comment out the
+    # `image:` line and uncomment `build: .`.
+    image: ivanwng97/tradingagents-telegram:latest
+    # build: .
     container_name: tradingagents-telegram
     env_file:
       - .env
