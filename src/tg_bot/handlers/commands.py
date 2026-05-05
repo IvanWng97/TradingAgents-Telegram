@@ -191,17 +191,27 @@ def build_del_keyboard(tickers: list[str]) -> list[list[InlineKeyboardButton]]:
     return rows
 
 
+WATCHLIST_PAGE_SIZE = 9
+
+
 def build_watchlist_response(
     user_id: int,
     selected: set[str] | None = None,
+    page: int = 0,
 ) -> tuple[str, InlineKeyboardMarkup | None]:
-    """Render the watchlist as MarkdownV2 + a select-mode keyboard.
+    """Render the watchlist as MarkdownV2 + a paginated select-mode keyboard.
 
-    Every ticker is a toggle button (callback `multi:<ticker>`); selected
-    ones get a ✅ prefix. Bottom row: "✅ Done (N)" runs the analyses,
-    "❌ Cancel" dismisses. Single vs parallel-queue is decided in the Done
-    handler based on len(selected) — 1 ticker uses the cached graph for
-    fast init, 2+ get dedicated graphs for true parallelism.
+    Every visible ticker is a toggle button (callback `multi:<ticker>`);
+    selected ones get a ✅ prefix. Selection persists across pages — the
+    Done counter shows the total selected, not just on this page.
+
+    Layout (multi-page):
+        [T1] [T2] [T3]
+        [T4] [T5] [T6]
+        [T7] [T8] [T9]
+        [← Prev]  [📄 1/2]  [Next →]
+        [✓ Select all]  [✗ Clear]
+        [✅ Done (3)]   [❌ Cancel]
 
     Returns (text, keyboard) — keyboard is None when the watchlist is empty.
     """
@@ -211,16 +221,44 @@ def build_watchlist_response(
 
     selected = selected or set()
 
+    total_pages = max(
+        1, (len(watchlist) + WATCHLIST_PAGE_SIZE - 1) // WATCHLIST_PAGE_SIZE
+    )
+    page = max(0, min(page, total_pages - 1))  # clamp into bounds
+    start = page * WATCHLIST_PAGE_SIZE
+    visible = watchlist[start : start + WATCHLIST_PAGE_SIZE]
+
     keyboard = [
         [
             InlineKeyboardButton(
                 f"✅ {t}" if t in selected else t,
                 callback_data=f"multi:{t}",
             )
-            for t in watchlist[i : i + 3]
+            for t in visible[i : i + 3]
         ]
-        for i in range(0, len(watchlist), 3)
+        for i in range(0, len(visible), 3)
     ]
+
+    # Pagination row — only when there's more than one page.
+    if total_pages > 1:
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton("← Prev", callback_data="wpage:prev"))
+        nav_row.append(
+            InlineKeyboardButton(
+                f"📄 {page + 1}/{total_pages}", callback_data="wpage:noop"
+            )
+        )
+        if page < total_pages - 1:
+            nav_row.append(InlineKeyboardButton("Next →", callback_data="wpage:next"))
+        keyboard.append(nav_row)
+
+    keyboard.append(
+        [
+            InlineKeyboardButton("✓ Select all", callback_data="wsel:all"),
+            InlineKeyboardButton("✗ Clear", callback_data="wsel:clear"),
+        ]
+    )
     keyboard.append(
         [
             InlineKeyboardButton(
@@ -240,10 +278,11 @@ def build_watchlist_response(
 
 async def list_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    # Fresh /watch always starts with no selection — clear any leftover from
-    # an abandoned previous render in this chat.
+    # Fresh /watch always starts on page 0 with no selection — clear any
+    # leftover state from an abandoned previous render in this chat.
     context.chat_data["watch_selection"] = set()
-    text, kb = build_watchlist_response(user_id, selected=set())
+    context.chat_data["watch_page"] = 0
+    text, kb = build_watchlist_response(user_id, selected=set(), page=0)
     if kb is None:
         await update.message.reply_text(text)
     else:

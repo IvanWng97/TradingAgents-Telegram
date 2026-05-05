@@ -472,7 +472,47 @@ async def _handle_select_toggle(
         selection.discard(ticker)
     else:
         selection.add(ticker)
-    text, kb = build_watchlist_response(user_id, selected=selection)
+    page = context.chat_data.get("watch_page", 0)
+    text, kb = build_watchlist_response(user_id, selected=selection, page=page)
+    if kb is None:
+        await query.edit_message_text(text)
+    else:
+        await query.edit_message_text(text, reply_markup=kb, parse_mode="MarkdownV2")
+
+
+async def _handle_select_bulk(
+    query, context: ContextTypes.DEFAULT_TYPE, user_id: int, action: str
+) -> None:
+    """Bulk-select action: `all` selects every ticker (across all pages),
+    `clear` empties."""
+    if action == "all":
+        selection = set(watchlist_storage.get_watchlist(user_id))
+    else:
+        selection = set()
+    context.chat_data["watch_selection"] = selection
+    page = context.chat_data.get("watch_page", 0)
+    text, kb = build_watchlist_response(user_id, selected=selection, page=page)
+    if kb is None:
+        await query.edit_message_text(text)
+    else:
+        await query.edit_message_text(text, reply_markup=kb, parse_mode="MarkdownV2")
+
+
+async def _handle_page_nav(
+    query, context: ContextTypes.DEFAULT_TYPE, user_id: int, action: str
+) -> None:
+    """Paginate the /watch keyboard. `prev` / `next` step the page index;
+    `noop` is the central indicator button (no-op)."""
+    if action == "noop":
+        return
+    page = context.chat_data.get("watch_page", 0)
+    if action == "next":
+        page += 1
+    elif action == "prev":
+        page = max(0, page - 1)
+    context.chat_data["watch_page"] = page
+    selection = context.chat_data.get("watch_selection") or set()
+    text, kb = build_watchlist_response(user_id, selected=selection, page=page)
     if kb is None:
         await query.edit_message_text(text)
     else:
@@ -715,6 +755,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _handle_info(query, context, user_id, data.split(":", 1)[1])
     elif data.startswith("multi:"):
         await _handle_select_toggle(query, context, user_id, data.split(":", 1)[1])
+    elif data.startswith("wsel:"):
+        await _handle_select_bulk(query, context, user_id, data.split(":", 1)[1])
+    elif data.startswith("wpage:"):
+        await _handle_page_nav(query, context, user_id, data.split(":", 1)[1])
     elif data.startswith("runall:"):
         await _handle_done(query, context, user_id)
     elif data.startswith("del:"):
