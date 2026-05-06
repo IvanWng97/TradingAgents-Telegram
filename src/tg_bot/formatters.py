@@ -29,7 +29,8 @@ def format_analysis_result_markdown(ticker: str, final_state: dict, signal: str)
 
 
 def extract_summary(decision_text: str, max_len: int = 200) -> str:
-    """Flat preview of the decision text — first `max_len` chars verbatim.
+    """Word-boundary preview of the decision text — first `max_len` chars,
+    clamped at the last space so the slice doesn't end mid-word.
 
     Agents emit `final_trade_decision` in inconsistent formats (sometimes
     leading with a markdown header, sometimes a field list, sometimes prose).
@@ -43,7 +44,10 @@ def extract_summary(decision_text: str, max_len: int = 200) -> str:
     text = decision_text.strip()
     if len(text) <= max_len:
         return text
-    return text[:max_len].rstrip() + "…"
+    # Back up to the last space so we don't end mid-word. `rsplit(" ", 1)`
+    # returns the whole slice when there's no space (single long token),
+    # which falls through cleanly to a verbatim cut + ellipsis.
+    return text[:max_len].rsplit(" ", 1)[0].rstrip() + "…"
 
 
 def format_short_message(
