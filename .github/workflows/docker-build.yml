@@ -29,7 +29,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Resolve upstream tradingagents SHA
         id: ta
@@ -40,7 +40,7 @@ jobs:
 
       - name: Look up previously built tradingagents SHA
         id: ta_cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .last-tradingagents-sha
           key: tradingagents-sha-${{ steps.ta.outputs.sha }}
@@ -58,7 +58,7 @@ jobs:
       - name: Set up QEMU
         # Required for cross-arch builds (linux/arm64 from an amd64 runner).
         if: steps.gate.outputs.skip != 'true'
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         if: steps.gate.outputs.skip != 'true'
