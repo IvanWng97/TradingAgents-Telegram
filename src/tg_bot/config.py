@@ -20,7 +20,6 @@ def _parse_int(raw: str, default: int) -> int:
 
 class Config:
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    ADMIN_USER_IDS = _parse_id_list(os.getenv("ADMIN_USER_IDS", ""))
     ALLOWED_USER_IDS = _parse_id_list(os.getenv("ALLOWED_USER_IDS", ""))
     # When True, TradingAgentsGraph runs in debug mode (streams every
     # langgraph chunk to stdout — fine for dev, noisy + slow in prod).

@@ -87,7 +87,6 @@ Top-level: `pyproject.toml` (deps), `Dockerfile`, `docker-compose.yml`, `.env`, 
 TELEGRAM_BOT_TOKEN=<required>
 TELEGRAPH_ACCESS_TOKEN=<required for Telegraph publishing>
 ALLOWED_USER_IDS=123,456              # empty = open (logged at WARNING)
-ADMIN_USER_IDS=123                    # currently parsed but unused
 TG_BOT_DATA_DIR=data                  # default
 TG_BOT_TA_DEBUG=                      # set "1"/"true" to enable TradingAgentsGraph(debug=True)
 TG_BOT_MAX_CONCURRENT_ANALYSES=3      # bot-wide concurrency cap; runs above this show "⏳ Queued" until a slot frees up. Also sizes the per-key graph instance pool.
