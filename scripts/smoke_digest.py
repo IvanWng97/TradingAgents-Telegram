@@ -668,14 +668,15 @@ async def test_fanout_forbidden_disables() -> None:
 
 
 async def test_fanout_summary_renders() -> None:
-    """Happy path: header sent, all tickers analyzed, header edited with summary."""
+    """Happy path: header sent in pending state, final edit shows the
+    signal-emoji summary with Telegraph links + failure tally."""
     from tg_bot.handlers import callbacks as cbmod
 
     class _W:
         def get_watchlist(self, _uid):
             return ["NVDA", "AAPL", "TSLA"]
 
-    canned: dict[str, dict] = {
+    canned: dict[str, dict | None] = {
         "NVDA": {
             "ticker": "NVDA",
             "signal": "BUY",
@@ -685,7 +686,11 @@ async def test_fanout_summary_renders() -> None:
         "TSLA": None,  # simulate one failure
     }
 
-    async def _fake_analyze(_uid, ticker):
+    async def _fake_analyze(_uid, ticker, reporter=None):
+        # Mimic the real analyze's per-step callback so the digest's
+        # progress view exercises the analyzing-state branch.
+        if reporter is not None:
+            await reporter.report("market analyst")
         return canned[ticker]
 
     orig_w = cbmod.watchlist_storage
@@ -695,15 +700,22 @@ async def test_fanout_summary_renders() -> None:
     try:
         app = _FakeFanOutApp()
         await cbmod.run_user_digest(app, 42, 999)
+
+        # Initial header lists every ticker as ⏳ pending.
         assert len(app.bot.sent) == 1
-        assert "Analyzing 3 tickers" in app.bot.sent[0]["text"]
-        assert len(app.bot.edits) == 1
-        body = app.bot.edits[0]["text"]
+        header_text = app.bot.sent[0]["text"]
+        assert "0/3" in header_text
+        assert "⏳" in header_text
+        assert all(t in header_text for t in ["NVDA", "AAPL", "TSLA"])
+
+        # Final summary edit (last edit overwrites any progress edits).
+        assert len(app.bot.edits) >= 1
+        body = app.bot.edits[-1]["text"]
         assert "🟢" in body and "NVDA" in body and "BUY" in body
         assert "🟡" in body and "AAPL" in body and "HOLD" in body
         assert "❓" in body and "TSLA" in body and "error" in body
         assert "1 of 3 failed" in body
-        # Telegraph link in NVDA row, no link in AAPL row.
+        # Telegraph link in NVDA row.
         assert "📄" in body
     finally:
         cbmod.watchlist_storage = orig_w

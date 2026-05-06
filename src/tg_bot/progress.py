@@ -39,7 +39,10 @@ _STEP_MAP: dict[str, tuple[str, int]] = {
     "portfolio manager": ("Portfolio Manager", 12),
     "risk judge": ("Portfolio Manager", 12),
 }
-_TOTAL_STEPS = 12
+# Derived from `_STEP_MAP` so adding/removing entries auto-updates the
+# "(N/M)" badge. Counts unique ordinals (some node names alias to the same
+# step — e.g. `risk judge` and `portfolio manager` both map to step 12).
+TOTAL_STEPS = max(ordinal for _name, ordinal in _STEP_MAP.values())
 
 
 # Per-thread reporter so the singleton callback on a cached graph can dispatch
@@ -47,7 +50,7 @@ _TOTAL_STEPS = 12
 _current_reporter = threading.local()
 
 
-def _resolve_step(raw_name: str) -> tuple[str, Optional[int]]:
+def resolve_step(raw_name: str) -> tuple[str, Optional[int]]:
     """Map a langgraph node name to (friendly_name, ordinal). Falls back to
     a Title-Cased version of the raw name with no ordinal when unknown."""
     key = raw_name.replace("_", " ").lower().strip()
@@ -105,13 +108,13 @@ class ProgressReporter:
             return
         self._last_step = raw_node_name
 
-        friendly, ordinal = _resolve_step(raw_node_name)
+        friendly, ordinal = resolve_step(raw_node_name)
         ticker_v2 = escape_markdown(self.ticker, version=2)
         friendly_v2 = escape_markdown(friendly, version=2)
         if ordinal is not None:
             caption = (
                 f"📊 Analyzing *{ticker_v2}* — running {friendly_v2} "
-                f"\\({ordinal}/{_TOTAL_STEPS}\\)…"
+                f"\\({ordinal}/{TOTAL_STEPS}\\)…"
             )
         else:
             caption = f"📊 Analyzing *{ticker_v2}* — running {friendly_v2}…"

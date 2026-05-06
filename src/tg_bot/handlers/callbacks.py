@@ -36,7 +36,12 @@ from tg_bot.handlers.commands import (
     build_history_tickers_response,
     build_watchlist_response,
 )
-from tg_bot.progress import CancelledByUserError, ProgressReporter
+from tg_bot.progress import (
+    TOTAL_STEPS,
+    CancelledByUserError,
+    ProgressReporter,
+    resolve_step,
+)
 from tg_bot.storage import user_config_storage, watchlist_storage
 from tg_bot.telegraph_client import publish_to_telegraph
 
@@ -798,7 +803,45 @@ async def _handle_digest(
 # ─── digest fan-out + JobQueue plumbing ─────────────────────────────────
 
 
-async def _analyze_one_for_digest(user_id: int, ticker: str) -> dict | None:
+class _DigestProgressReporter:
+    """Per-ticker reporter for the digest fan-out. Conforms to the
+    `ProgressReporter` interface that `_DelegatingProgressCallback`
+    consumes (`report` coroutine, `loop`, `cancel_event`) but instead of
+    editing its own Telegram message it calls `on_step` so the parent
+    `run_user_digest` can repaint the shared digest message.
+
+    Coalesces consecutive duplicate node names so a node that fires
+    multiple LLM calls only updates the status once.
+    """
+
+    def __init__(
+        self,
+        ticker: str,
+        loop: asyncio.AbstractEventLoop,
+        on_step,  # async (ticker, friendly: str, ordinal: int|None) -> None
+    ) -> None:
+        self.ticker = ticker
+        self.loop = loop
+        self.on_step = on_step
+        # No cancel button on digest runs; reporter still needs the attr
+        # since _DelegatingProgressCallback._dispatch reads it.
+        self.cancel_event: threading.Event | None = None
+        self._last_step: str | None = None
+
+    async def report(self, raw_node_name: str) -> None:
+        if raw_node_name == self._last_step:
+            return
+        self._last_step = raw_node_name
+        friendly, ordinal = resolve_step(raw_node_name)
+        try:
+            await self.on_step(self.ticker, friendly, ordinal)
+        except Exception as e:
+            logger.debug("digest progress callback failed: %s", e)
+
+
+async def _analyze_one_for_digest(
+    user_id: int, ticker: str, reporter: _DigestProgressReporter | None = None
+) -> dict | None:
     """Headless analysis for one ticker. Returns
     {ticker, signal, telegraph_url} or None on failure.
 
@@ -806,6 +849,9 @@ async def _analyze_one_for_digest(user_id: int, ticker: str) -> dict | None:
     fan-out interleaves with manual /watch runs through the same FIFO
     queue — a 50-ticker watchlist serializes naturally into batches of
     `MAX_CONCURRENT_ANALYSES` instead of hammering the LLM provider.
+
+    `reporter`, when supplied, drives the per-ticker step display in the
+    shared digest message — same LangChain hook as the manual flow.
     """
     sem = _get_run_semaphore()
     await sem.acquire()
@@ -818,7 +864,7 @@ async def _analyze_one_for_digest(user_id: int, ticker: str) -> dict | None:
                 ticker,
                 user_id,
                 user_config_storage,
-                None,  # no progress reporter — digest is headless
+                reporter,
             )
         except Exception:
             logger.exception("digest: analysis failed for %s", ticker)
@@ -844,9 +890,92 @@ async def _analyze_one_for_digest(user_id: int, ticker: str) -> dict | None:
         sem.release()
 
 
+_DIGEST_PROGRESS_INTERVAL = 2.0  # min seconds between progressive edits
+
+
+def _format_digest_progress(
+    watchlist: list[str],
+    status: dict[str, object],
+    safe_date: str,
+) -> str:
+    """In-progress view. `status[ticker]` is one of:
+      - "pending"           → ⏳ TICKER
+      - ("analyzing", friendly, ordinal) → 📊 TICKER — Friendly (n/M)
+      - dict (result)       → ✅ TICKER — SIGNAL
+      - None                → ❌ TICKER — error
+    Watchlist order is preserved so the user can see exactly where the
+    fan-out is at any point.
+    """
+    done = sum(1 for s in status.values() if not (s == "pending" or _is_analyzing(s)))
+    n = len(watchlist)
+    lines = [f"🌙 *Daily Digest* — {safe_date}  \\({done}/{n}\\)\n"]
+    for ticker in watchlist:
+        s = status[ticker]
+        ticker_v2 = escape_markdown(ticker, version=2)
+        if s == "pending":
+            lines.append(f"⏳ {ticker_v2}")
+        elif _is_analyzing(s):
+            _, friendly, ordinal = s  # type: ignore[misc]
+            friendly_v2 = escape_markdown(friendly, version=2)
+            if ordinal is not None:
+                lines.append(
+                    f"📊 *{ticker_v2}* — {friendly_v2} \\({ordinal}/{TOTAL_STEPS}\\)"
+                )
+            else:
+                lines.append(f"📊 *{ticker_v2}* — {friendly_v2}")
+        elif s is None:
+            lines.append(f"❌ *{ticker_v2}* — error")
+        else:
+            signal = (s.get("signal") or "—").strip()  # type: ignore[union-attr]
+            signal_v2 = escape_markdown(signal, version=2)
+            lines.append(f"✅ *{ticker_v2}* — *{signal_v2}*")
+    return "\n".join(lines)
+
+
+def _is_analyzing(s: object) -> bool:
+    return isinstance(s, tuple) and len(s) == 3 and s[0] == "analyzing"
+
+
+def _format_digest_summary(
+    watchlist: list[str],
+    status: dict[str, object],
+    safe_date: str,
+) -> str:
+    """Final view: signal-emoji per row + Telegraph link, watchlist order."""
+    lines = [f"🌙 *Daily Digest* — {safe_date}\n"]
+    failed = 0
+    n = len(watchlist)
+    for ticker in watchlist:
+        s = status[ticker]
+        ticker_v2 = escape_markdown(ticker, version=2)
+        # Anything not a result-dict counts as failed in the final view —
+        # "pending" / "analyzing" only happen if the run was interrupted.
+        if not isinstance(s, dict):
+            lines.append(f"❓ *{ticker_v2}* — error")
+            failed += 1
+            continue
+        signal = s.get("signal") or "—"
+        emoji = DECISION_EMOJI.get(signal.strip().upper(), "📊")
+        signal_v2 = escape_markdown(signal, version=2)
+        if s.get("telegraph_url"):
+            # MarkdownV2 link URLs only need to escape ')' and '\\'.
+            url = s["telegraph_url"].replace("\\", "\\\\").replace(")", "\\)")
+            lines.append(f"{emoji} *{ticker_v2}* — *{signal_v2}* [📄]({url})")
+        else:
+            lines.append(f"{emoji} *{ticker_v2}* — *{signal_v2}*")
+    if failed:
+        lines.append(f"\n_{failed} of {n} failed_")
+    return "\n".join(lines)
+
+
 async def run_user_digest(application, user_id: int, chat_id: int) -> None:
-    """Fan-out for one user. Sends a header, walks the watchlist via
-    `asyncio.gather`, edits the header into a single summary message.
+    """Fan-out for one user.
+
+    Sends an initial header listing every watchlist ticker as `⏳`, then
+    edits the header progressively as each analysis finishes (using
+    `asyncio.as_completed`), throttled to one edit per
+    `_DIGEST_PROGRESS_INTERVAL` seconds. The final edit replaces the
+    progress view with the signal-emoji summary + Telegraph links.
 
     Auto-disables the digest on `Forbidden` (user blocked the bot) so
     the JobQueue doesn't keep retrying every day.
@@ -862,10 +991,15 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
     n = len(watchlist)
     logger.info("digest: launching for user %s (%d tickers)", user_id, n)
 
+    # status[ticker]: "pending" | ("analyzing", friendly, ordinal) |
+    #                 dict (completed result) | None (failed).
+    # Same dict feeds both progress and final-summary renders.
+    status: dict[str, object] = {t: "pending" for t in watchlist}
+
     try:
         header = await application.bot.send_message(
             chat_id=chat_id,
-            text=f"🌙 *Daily Digest* — {safe_date}\n\nAnalyzing {n} tickers…",
+            text=_format_digest_progress(watchlist, status, safe_date),
             parse_mode="MarkdownV2",
         )
     except Forbidden:
@@ -874,39 +1008,68 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
         cancel_digest_job(application, user_id)
         return
 
-    results = await asyncio.gather(
-        *(_analyze_one_for_digest(user_id, t) for t in watchlist),
-        return_exceptions=True,
-    )
+    # Shared throttled render — fired by both step events (during a
+    # ticker's analysis) and ticker-completion. asyncio.Lock serializes
+    # so two concurrent callers don't both pass the time check and
+    # double-edit. `blocked` short-circuits everything if the user
+    # blocks the bot mid-run.
+    last_edit_at = 0.0
+    edit_lock = asyncio.Lock()
+    blocked = False
 
-    lines = [f"🌙 *Daily Digest* — {safe_date}\n"]
-    completed = failed = 0
-    for ticker, r in zip(watchlist, results):
-        if isinstance(r, BaseException) or r is None:
-            ticker_v2 = escape_markdown(ticker, version=2)
-            lines.append(f"❓ *{ticker_v2}* — error")
-            failed += 1
-            continue
-        completed += 1
-        signal = r.get("signal") or "—"
-        emoji = DECISION_EMOJI.get(signal.strip().upper(), "📊")
-        ticker_v2 = escape_markdown(r["ticker"], version=2)
-        signal_v2 = escape_markdown(signal, version=2)
-        if r.get("telegraph_url"):
-            # MarkdownV2 link URLs only need to escape ')' and '\\'.
-            url = r["telegraph_url"].replace("\\", "\\\\").replace(")", "\\)")
-            lines.append(f"{emoji} *{ticker_v2}* — *{signal_v2}* [📄]({url})")
-        else:
-            lines.append(f"{emoji} *{ticker_v2}* — *{signal_v2}*")
-    if failed:
-        lines.append(f"\n_{failed} of {n} failed_")
+    async def _render() -> None:
+        nonlocal last_edit_at, blocked
+        if blocked:
+            return
+        async with edit_lock:
+            now = time.monotonic()
+            if now - last_edit_at < _DIGEST_PROGRESS_INTERVAL:
+                return
+            last_edit_at = now
+            text = _format_digest_progress(watchlist, status, safe_date)
+            try:
+                await application.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=header.message_id,
+                    text=text,
+                    parse_mode="MarkdownV2",
+                )
+            except Forbidden:
+                logger.warning(
+                    "digest: user %s blocked the bot mid-run, disabling", user_id
+                )
+                await user_config_storage.disable_digest(user_id)
+                cancel_digest_job(application, user_id)
+                blocked = True
+            except Exception as e:
+                # "message is not modified" or transient — keep going.
+                logger.debug("digest progress edit skipped: %s", e)
 
-    summary = "\n".join(lines)
+    async def _on_step(ticker: str, friendly: str, ordinal: int | None) -> None:
+        status[ticker] = ("analyzing", friendly, ordinal)
+        await _render()
+
+    loop = asyncio.get_running_loop()
+
+    async def _wrapped(ticker: str) -> tuple[str, dict | None]:
+        reporter = _DigestProgressReporter(ticker, loop, _on_step)
+        result = await _analyze_one_for_digest(user_id, ticker, reporter)
+        status[ticker] = result  # dict on success, None on failure
+        await _render()
+        return ticker, result
+
+    await asyncio.gather(*(_wrapped(t) for t in watchlist), return_exceptions=True)
+
+    if blocked:
+        return
+
+    # Final edit — bypass the throttle so the summary always lands even
+    # if the last step update fired <2s ago.
     try:
         await application.bot.edit_message_text(
             chat_id=chat_id,
             message_id=header.message_id,
-            text=summary,
+            text=_format_digest_summary(watchlist, status, safe_date),
             parse_mode="MarkdownV2",
         )
     except Forbidden:
