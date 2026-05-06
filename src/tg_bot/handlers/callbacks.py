@@ -143,9 +143,14 @@ async def _handle_deep(query, user_id: int, provider: str, model: str) -> None:
     )
 
 
-async def _handle_quick(query, user_id: int, provider: str, model: str) -> None:
+async def _handle_quick(
+    query, context: ContextTypes.DEFAULT_TYPE, user_id: int, provider: str, model: str
+) -> None:
     await user_config_storage.set_llm_model(user_id, "quick", model)
     deep = user_config_storage.get_llm_model(user_id, "deep")
+    # Quick is the last step of the /config flow — drop the rollback snapshot
+    # set by config_cmd so the next /config doesn't restore stale state.
+    context.user_data.pop("llm_snapshot", None)
     await query.edit_message_text(
         "LLM configuration saved\\.\n\n"
         f"Provider: `{provider}`\nDeep: `{deep}`\nQuick: `{model}`",
@@ -747,7 +752,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _handle_deep(query, user_id, provider, model)
     elif data.startswith("quick:"):
         _, provider, model = data.split(":", 2)
-        await _handle_quick(query, user_id, provider, model)
+        await _handle_quick(query, context, user_id, provider, model)
     elif data.startswith("info:"):
         # Back-compat: stale buttons in old chat history. New /watch renders
         # don't generate `info:` callbacks anymore — the unified Done flow
