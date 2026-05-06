@@ -838,6 +838,16 @@ class _DigestProgressReporter:
         except Exception as e:
             logger.debug("digest progress callback failed: %s", e)
 
+    async def report_starting(self) -> None:
+        """Flip status to 'Starting…' right after sem.acquire — bridges
+        the gap between slot acquisition and the first LLM-callback
+        event. Without it, a ticker can sit in ⏳ for 5-30s during the
+        graph cold-start phase even though it's already running."""
+        try:
+            await self.on_step(self.ticker, "Starting…", None)
+        except Exception as e:
+            logger.debug("digest progress callback failed: %s", e)
+
 
 async def _analyze_one_for_digest(
     user_id: int, ticker: str, reporter: _DigestProgressReporter | None = None
@@ -858,6 +868,11 @@ async def _analyze_one_for_digest(
     try:
         if not TRADINGAGENTS_AVAILABLE:
             return None
+        # Flip the digest status from ⏳ → "Starting…" the moment we have
+        # a slot. Without this, cold-start graph builds (5–30s) make the
+        # ticker look queued even though it's running.
+        if reporter is not None:
+            await reporter.report_starting()
         try:
             final_state, signal = await asyncio.to_thread(
                 run_trading_analysis,

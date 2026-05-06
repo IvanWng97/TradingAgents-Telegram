@@ -143,6 +143,11 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+# Editor swap files (vim/neovim leave .env.swp containing secrets;
+# GitHub push protection blocks them at push time — exclude up front)
+*.swp
+*.swo
+*~
 
 # Spyder project settings
 .spyderproject
