@@ -6,9 +6,20 @@ on:
   pull_request:
     branches: ["main"]
 
+# Cancel an in-flight run when a new commit lands on the same ref — saves
+# CI minutes when you push a fixup right after the previous push.
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege: lint reads code, writes nothing.
+permissions:
+  contents: read
+
 jobs:
   ruff:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
 

@@ -7,7 +7,13 @@ on:
     branches: ["main"]
   schedule:
     # Weekly catch-all in case main hasn't been pushed for a while.
-    - cron: "0 6 * * 1"
+    # Offset 30 min from the daily docker-build cron to avoid runner contention.
+    - cron: "30 6 * * 1"
+
+# Cancel an in-flight scan when a new commit lands on the same ref.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   analyze:

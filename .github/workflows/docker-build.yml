@@ -23,6 +23,9 @@ concurrency:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # Multi-arch + arm64 under QEMU runs ~10–15 min cold, ~3–5 min warm.
+    # Cap at 45 min so a stuck run can't burn ~6h of free-tier minutes.
+    timeout-minutes: 45
     permissions:
       contents: read
       security-events: write
@@ -82,6 +85,86 @@ jobs:
             type=sha,format=long
             type=raw,value=latest,enable={{is_default_branch}}
 
+      # ─────────────── Per-arch scan (amd64) ───────────────
+      # Single-arch local-load builds so Trivy has a concrete image to scan
+      # without going through the registry's multi-arch manifest list (which
+      # also contains provenance/SBOM attestation entries that older Trivy
+      # versions can't resolve). The same `type=gha` cache is reused by the
+      # multi-arch push below, so each arch is built only once.
+
+      - name: Build amd64 image locally for Trivy
+        if: steps.gate.outputs.skip != 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          platforms: linux/amd64
+          tags: ${{ env.IMAGE_NAME }}:scan-amd64
+          cache-from: ${{ github.event_name == 'push' && 'type=gha' || '' }}
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max' || '' }}
+          no-cache: ${{ github.event_name != 'push' }}
+
+      - name: Scan amd64 image with Trivy
+        if: steps.gate.outputs.skip != 'true'
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:scan-amd64
+          format: sarif
+          output: trivy-results-amd64.sarif
+          severity: CRITICAL,HIGH
+          # Informational only: don't block the build on findings. Results
+          # still upload to the GitHub Security tab so you see them.
+          exit-code: "0"
+          ignore-unfixed: true
+
+      - name: Upload amd64 Trivy results
+        # `category` keeps amd64 and arm64 results distinct in the Code
+        # Scanning UI.
+        if: steps.gate.outputs.skip != 'true' && !cancelled() && hashFiles('trivy-results-amd64.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results-amd64.sarif
+          category: trivy-amd64
+
+      # ─────────────── Per-arch scan (arm64) ───────────────
+      # arm64 is built under QEMU emulation (~3× slower than native) but the
+      # cached pip layer dominates so wall-clock cost is small. Worth it to
+      # catch arm64-only base-image CVEs before publishing the manifest list.
+
+      - name: Build arm64 image locally for Trivy
+        if: steps.gate.outputs.skip != 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          platforms: linux/arm64
+          tags: ${{ env.IMAGE_NAME }}:scan-arm64
+          cache-from: ${{ github.event_name == 'push' && 'type=gha' || '' }}
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max' || '' }}
+          no-cache: ${{ github.event_name != 'push' }}
+
+      - name: Scan arm64 image with Trivy
+        if: steps.gate.outputs.skip != 'true'
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:scan-arm64
+          format: sarif
+          output: trivy-results-arm64.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+          ignore-unfixed: true
+
+      - name: Upload arm64 Trivy results
+        if: steps.gate.outputs.skip != 'true' && !cancelled() && hashFiles('trivy-results-arm64.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results-arm64.sarif
+          category: trivy-arm64
+
+      # ─────────────── Multi-arch push ───────────────
+      # Cache-hot from both per-arch builds above, so this is mostly manifest
+      # assembly + push.
+
       - name: Build and push
         if: steps.gate.outputs.skip != 'true'
         uses: docker/build-push-action@v7
@@ -111,19 +194,3 @@ jobs:
         # and actions/cache's post-job save is a harmless no-op.
         if: steps.gate.outputs.skip != 'true'
         run: echo "${{ steps.ta.outputs.sha }}" > .last-tradingagents-sha
-
-      - name: Scan image with Trivy
-        if: steps.gate.outputs.skip != 'true'
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ${{ env.IMAGE_NAME }}:latest
-          format: sarif
-          output: trivy-results.sarif
-          severity: CRITICAL,HIGH
-          exit-code: "0"
-
-      - name: Upload Trivy results to GitHub Security tab
-        if: steps.gate.outputs.skip != 'true' && always()
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy-results.sarif
