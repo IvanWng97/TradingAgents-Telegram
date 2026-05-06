@@ -501,6 +501,7 @@ class _FakeFanOutBot:
     def __init__(self, forbidden: bool = False) -> None:
         self.sent: list[dict] = []
         self.edits: list[dict] = []
+        self.markup_edits: list[dict] = []
         self._next_id = 5000
         self._forbidden = forbidden
 
@@ -526,11 +527,26 @@ class _FakeFanOutBot:
             {"chat_id": chat_id, "message_id": message_id, "text": text, **kw}
         )
 
+    async def edit_message_reply_markup(self, chat_id, message_id, **kw):
+        self.markup_edits.append({"chat_id": chat_id, "message_id": message_id, **kw})
+
 
 class _FakeFanOutApp:
     def __init__(self, forbidden: bool = False) -> None:
         self.bot = _FakeFanOutBot(forbidden=forbidden)
         self.job_queue = _FakeJobQueue()
+        # PTB's Application.chat_data is a defaultdict-like mapping per
+        # chat. The fake just hands back a regular dict per-chat.
+        self.chat_data: dict[int, dict] = _ChatDataDict()
+
+
+class _ChatDataDict(dict):
+    """Minimal stand-in for PTB's chat_data — auto-creates {} on access."""
+
+    def __getitem__(self, key):  # type: ignore[override]
+        if key not in self:
+            self[key] = {}
+        return super().__getitem__(key)
 
 
 async def test_register_adds_job() -> None:
@@ -714,9 +730,163 @@ async def test_fanout_summary_renders() -> None:
         assert "🟢" in body and "NVDA" in body and "BUY" in body
         assert "🟡" in body and "AAPL" in body and "HOLD" in body
         assert "❓" in body and "TSLA" in body and "error" in body
-        assert "1 of 3 failed" in body
+        # New tally format: "{cancelled, failed} of N"
+        assert "1 failed" in body and "of 3" in body
         # Telegraph link in NVDA row.
         assert "📄" in body
+    finally:
+        cbmod.watchlist_storage = orig_w
+        cbmod._analyze_one_for_digest = orig_a
+
+
+async def test_progress_renders_cancelled() -> None:
+    """`_format_digest_progress` renders the ⛔ cancelled state."""
+    from tg_bot.handlers.callbacks import _format_digest_progress
+
+    status = {"NVDA": "cancelled", "AAPL": "pending"}
+    out = _format_digest_progress(["NVDA", "AAPL"], status, "2026-05-06")
+    assert "⛔" in out and "NVDA" in out and "cancelled" in out
+    assert "⏳" in out and "AAPL" in out
+
+
+async def test_summary_tally_includes_cancelled() -> None:
+    """`_format_digest_summary` shows a 'X cancelled, Y failed of N' tally."""
+    from tg_bot.handlers.callbacks import _format_digest_summary
+
+    status = {
+        "NVDA": {"ticker": "NVDA", "signal": "BUY", "telegraph_url": None},
+        "AAPL": "cancelled",
+        "TSLA": None,
+    }
+    out = _format_digest_summary(["NVDA", "AAPL", "TSLA"], status, "2026-05-06")
+    assert "⛔" in out and "AAPL" in out
+    assert "❓" in out and "TSLA" in out
+    assert "1 cancelled" in out and "1 failed" in out and "of 3" in out
+
+
+async def test_handle_digest_cancel_signals_event_and_tasks() -> None:
+    """Cancel handler must set the threading event AND cancel each task."""
+    import threading
+
+    from tg_bot.handlers import callbacks as cbmod
+
+    cancel_event = threading.Event()
+
+    # Build two never-finishing tasks so .cancel() actually has work to do.
+    async def _hang():
+        await asyncio.Event().wait()
+
+    t1 = asyncio.create_task(_hang())
+    t2 = asyncio.create_task(_hang())
+    # Yield once so they're actually running.
+    await asyncio.sleep(0)
+
+    chat_data = {
+        "digest_cancels": {
+            42: {"cancel_event": cancel_event, "tasks": [t1, t2]},
+        }
+    }
+
+    class _Ctx:
+        def __init__(self, cd):
+            self.chat_data = cd
+
+    class _Q:
+        pass
+
+    await cbmod._handle_digest_cancel(_Ctx(chat_data), _Q(), "42")
+
+    assert cancel_event.is_set()
+    assert t1.cancelled() or t1.cancelling()
+    assert t2.cancelled() or t2.cancelling()
+    # Drain so pytest doesn't complain.
+    for t in (t1, t2):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+
+
+async def test_handle_digest_cancel_unknown_message_id() -> None:
+    """Stale / unknown message_id is a no-op."""
+    from tg_bot.handlers import callbacks as cbmod
+
+    class _Ctx:
+        chat_data = {"digest_cancels": {}}
+
+    class _Q:
+        pass
+
+    # No exception should be raised; nothing to assert beyond that.
+    await cbmod._handle_digest_cancel(_Ctx(), _Q(), "999")
+    await cbmod._handle_digest_cancel(_Ctx(), _Q(), "not-an-int")
+
+
+async def test_fanout_cancel_mid_run() -> None:
+    """End-to-end cancel: tap the button mid fan-out → in-flight tickers
+    get marked cancelled, the final summary tally reflects it."""
+    import threading
+
+    from tg_bot.handlers import callbacks as cbmod
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class _W:
+        def get_watchlist(self, _uid):
+            return ["NVDA", "AAPL", "TSLA"]
+
+    async def _slow_analyze(_uid, _ticker, reporter=None):
+        # Signal that at least one analysis has reached the running phase.
+        started.set()
+        # Mimic running until the cancel signal lands.
+        while not (
+            reporter and reporter.cancel_event and reporter.cancel_event.is_set()
+        ):
+            await asyncio.sleep(0.05)
+            if release.is_set():
+                break
+        # Raise the canonical "user-cancelled" exception so _wrapped's
+        # except branch fires.
+        from tg_bot.progress import CancelledByUserError
+
+        raise CancelledByUserError("cancelled in test")
+
+    orig_w = cbmod.watchlist_storage
+    orig_a = cbmod._analyze_one_for_digest
+    cbmod.watchlist_storage = _W()
+    cbmod._analyze_one_for_digest = _slow_analyze
+    try:
+        app = _FakeFanOutApp()
+        run_task = asyncio.create_task(cbmod.run_user_digest(app, 42, 999))
+
+        # Wait for the fan-out to be in flight.
+        for _ in range(50):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.02)
+        assert started.is_set(), "analysis never started"
+
+        # Find the registered cancel entry and tap it.
+        digest_cancels = app.chat_data[999]["digest_cancels"]
+        msg_id = next(iter(digest_cancels.keys()))
+
+        class _Ctx:
+            def __init__(self, cd):
+                self.chat_data = cd
+
+        await cbmod._handle_digest_cancel(
+            _Ctx(app.chat_data[999]), object(), str(msg_id)
+        )
+
+        # Let the gather observe the cancels and unwind.
+        release.set()
+        await run_task
+
+        # Final summary edit (last in edits) shows "3 cancelled".
+        body = app.bot.edits[-1]["text"]
+        assert "⛔" in body
+        assert "3 cancelled" in body and "of 3" in body
     finally:
         cbmod.watchlist_storage = orig_w
         cbmod._analyze_one_for_digest = orig_a
@@ -754,6 +924,17 @@ SCENARIOS = [
     ("fanout silent on empty watchlist", test_fanout_empty_watchlist_silent),
     ("fanout Forbidden auto-disables digest", test_fanout_forbidden_disables),
     ("fanout summary message renders", test_fanout_summary_renders),
+    ("progress render handles cancelled state", test_progress_renders_cancelled),
+    ("summary tally includes cancelled count", test_summary_tally_includes_cancelled),
+    (
+        "digest_cancel sets event + cancels tasks",
+        test_handle_digest_cancel_signals_event_and_tasks,
+    ),
+    (
+        "digest_cancel on unknown message_id is no-op",
+        test_handle_digest_cancel_unknown_message_id,
+    ),
+    ("fanout cancel mid-run renders cancelled", test_fanout_cancel_mid_run),
 ]
 
 
