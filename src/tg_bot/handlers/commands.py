@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
 from tg_bot.analysis import pool_stats
-from tg_bot.digest import build_digest_response
+from tg_bot.digest import build_digest_response, humanize_delta, next_fire, tz_short
 from tg_bot.formatters import format_analysis_result_markdown
 from tg_bot.history import (
     list_available_dates,
@@ -494,13 +494,35 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     deep = user_config_storage.get_llm_model(user_id, "deep") or "default"
     quick = user_config_storage.get_llm_model(user_id, "quick") or "default"
 
+    # Digest line: only shown when fully configured + enabled. Surfaces the
+    # next-firing instant + human-readable delta so users can sanity-check
+    # their UTC↔local arithmetic without leaving /status.
+    digest_line = ""
+    digest = user_config_storage.get_digest(user_id)
+    if (
+        digest
+        and digest.get("enabled")
+        and digest.get("hour_local") is not None
+        and digest.get("tz")
+    ):
+        try:
+            fire = next_fire(int(digest["hour_local"]), digest["tz"])
+            time_label = f"{int(digest['hour_local']):02d}:00 {tz_short(digest['tz'])}"
+            digest_line = (
+                f"• Next digest: `{escape_markdown(time_label, version=2)}` "
+                f"\\({escape_markdown(humanize_delta(fire), version=2)}\\)\n"
+            )
+        except Exception:
+            pass
+
     # Numbers + simple ASCII labels are MarkdownV2-safe; user-facing values
     # go inside `…` code spans (no escape needed).
     message = (
         "*Bot status*\n"
         f"• Uptime: `{escape_markdown(uptime_str, version=2)}`\n"
         f"• Analyses since boot: `{analyses_run}`\n"
-        f"• Graph pool: `{pool_keys}` keys, `{pool_instances}` instances\n\n"
+        f"• Graph pool: `{pool_keys}` keys, `{pool_instances}` instances\n"
+        f"{digest_line}\n"
         "*Your LLM config*\n"
         f"• Provider: `{provider}`\n"
         f"• Deep: `{deep}`\n"

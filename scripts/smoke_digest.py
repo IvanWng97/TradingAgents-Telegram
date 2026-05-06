@@ -34,6 +34,16 @@ Callback dispatch scenarios (storage-only — no Telegram side effects asserted)
   - `digest:off` flips enabled to False without losing hour/tz.
   - Bad inputs (non-int hour, garbage tz) are no-ops.
 
+JobQueue + fan-out scenarios:
+  - register_digest_job adds a job under the canonical name.
+  - Re-registering replaces (doesn't duplicate) — name unique.
+  - cancel_digest_job removes all jobs for the user.
+  - Disabled / partial digests are no-ops (no job scheduled).
+  - run_user_digest with an empty watchlist sends nothing.
+  - Forbidden on header send → digest auto-disables, job cancels.
+  - Successful run: header sent, fanned-out tickers analyzed via the
+    semaphore, summary message edits the header in place.
+
 Run with: .venv/bin/python3 scripts/smoke_digest.py
 """
 
@@ -336,11 +346,14 @@ class _FakeBot:
 
 
 class _FakeContext:
-    """Minimal stand-in for ContextTypes.DEFAULT_TYPE — _handle_digest only
-    reads `context.bot` for the run-now stub message."""
+    """Minimal stand-in for ContextTypes.DEFAULT_TYPE. `_handle_digest`
+    reads `context.bot` and `context.application.job_queue` (via
+    register_digest_job / cancel_digest_job)."""
 
     def __init__(self) -> None:
         self.bot = _FakeBot()
+        # _FakeFanOutApp gives us a job_queue with the right interface.
+        self.application = _FakeFanOutApp()
 
 
 async def _make_dispatch_env(chat_id: int = 999) -> tuple[Any, Any, Any, Any]:
@@ -453,6 +466,250 @@ async def test_next_fire_wrap() -> None:
     assert humanize_delta(fire3, now=now3) == "in 4h"
 
 
+# --- JobQueue + fan-out scenarios -----------------------------------------
+
+
+class _FakeJob:
+    def __init__(self, name: str, callback, time_, data: dict) -> None:
+        self.name = name
+        self.callback = callback
+        self.time = time_
+        self.data = data
+        self.removed = False
+
+    def schedule_removal(self) -> None:
+        self.removed = True
+
+
+class _FakeJobQueue:
+    def __init__(self) -> None:
+        self._jobs: list[_FakeJob] = []
+
+    def run_daily(self, callback, time, name, data) -> _FakeJob:
+        job = _FakeJob(name, callback, time, data)
+        self._jobs.append(job)
+        return job
+
+    def get_jobs_by_name(self, name: str):
+        # PTB's API returns active jobs; filter out scheduled-for-removal.
+        return [j for j in self._jobs if j.name == name and not j.removed]
+
+
+class _FakeFanOutBot:
+    """Records send/edit calls. Optionally raises Forbidden on send_message."""
+
+    def __init__(self, forbidden: bool = False) -> None:
+        self.sent: list[dict] = []
+        self.edits: list[dict] = []
+        self._next_id = 5000
+        self._forbidden = forbidden
+
+    async def send_message(self, chat_id, text, **kw):
+        if self._forbidden:
+            from telegram.error import Forbidden
+
+            raise Forbidden("user blocked the bot")
+        mid = self._next_id
+        self._next_id += 1
+        self.sent.append({"chat_id": chat_id, "text": text, "message_id": mid, **kw})
+
+        # Return an object with .message_id (matches Telegram's Message).
+        class _M:
+            pass
+
+        m = _M()
+        m.message_id = mid
+        return m
+
+    async def edit_message_text(self, chat_id, message_id, text, **kw):
+        self.edits.append(
+            {"chat_id": chat_id, "message_id": message_id, "text": text, **kw}
+        )
+
+
+class _FakeFanOutApp:
+    def __init__(self, forbidden: bool = False) -> None:
+        self.bot = _FakeFanOutBot(forbidden=forbidden)
+        self.job_queue = _FakeJobQueue()
+
+
+async def test_register_adds_job() -> None:
+    from tg_bot.handlers.callbacks import register_digest_job
+
+    app = _FakeFanOutApp()
+    digest = {
+        "enabled": True,
+        "hour_local": 10,
+        "tz": "America/Los_Angeles",
+        "chat_id": 999,
+    }
+    register_digest_job(app, 42, digest)
+    jobs = app.job_queue.get_jobs_by_name("digest:42")
+    assert len(jobs) == 1
+    assert jobs[0].time.hour == 10
+    assert str(jobs[0].time.tzinfo) == "America/Los_Angeles"
+    assert jobs[0].data == {"user_id": 42, "chat_id": 999}
+
+
+async def test_register_replaces_existing() -> None:
+    from tg_bot.handlers.callbacks import register_digest_job
+
+    app = _FakeFanOutApp()
+    digest = {
+        "enabled": True,
+        "hour_local": 10,
+        "tz": "America/Los_Angeles",
+        "chat_id": 999,
+    }
+    register_digest_job(app, 42, digest)
+    register_digest_job(app, 42, {**digest, "hour_local": 14})
+    jobs = app.job_queue.get_jobs_by_name("digest:42")
+    assert len(jobs) == 1, "must not duplicate"
+    assert jobs[0].time.hour == 14
+
+
+async def test_cancel_removes_jobs() -> None:
+    from tg_bot.handlers.callbacks import cancel_digest_job, register_digest_job
+
+    app = _FakeFanOutApp()
+    digest = {
+        "enabled": True,
+        "hour_local": 10,
+        "tz": "America/Los_Angeles",
+        "chat_id": 999,
+    }
+    register_digest_job(app, 42, digest)
+    n = cancel_digest_job(app, 42)
+    assert n == 1
+    assert app.job_queue.get_jobs_by_name("digest:42") == []
+
+
+async def test_register_noop_on_incomplete() -> None:
+    from tg_bot.handlers.callbacks import register_digest_job
+
+    app = _FakeFanOutApp()
+    # Disabled.
+    register_digest_job(
+        app,
+        42,
+        {
+            "enabled": False,
+            "hour_local": 10,
+            "tz": "America/Los_Angeles",
+            "chat_id": 999,
+        },
+    )
+    assert app.job_queue.get_jobs_by_name("digest:42") == []
+    # Partial — no chat_id.
+    register_digest_job(
+        app,
+        42,
+        {
+            "enabled": True,
+            "hour_local": 10,
+            "tz": "America/Los_Angeles",
+            "chat_id": None,
+        },
+    )
+    assert app.job_queue.get_jobs_by_name("digest:42") == []
+
+
+async def test_fanout_empty_watchlist_silent() -> None:
+    """User with empty watchlist: no header sent, no edits, returns cleanly."""
+    from tg_bot.handlers import callbacks as cbmod
+
+    # Patch in an empty watchlist storage.
+    class _W:
+        def get_watchlist(self, _uid):
+            return []
+
+    original = cbmod.watchlist_storage
+    cbmod.watchlist_storage = _W()
+    try:
+        app = _FakeFanOutApp()
+        await cbmod.run_user_digest(app, 42, 999)
+        assert app.bot.sent == [] and app.bot.edits == []
+    finally:
+        cbmod.watchlist_storage = original
+
+
+async def test_fanout_forbidden_disables() -> None:
+    """Header send fails with Forbidden → digest disabled + job cancelled."""
+    from tg_bot.handlers import callbacks as cbmod
+
+    s, _ = fresh_storage()
+    await s.set_digest_tz("42", "America/Los_Angeles")
+    await s.set_digest_hour("42", 10, 999)
+
+    class _W:
+        def get_watchlist(self, _uid):
+            return ["NVDA"]
+
+    orig_w = cbmod.watchlist_storage
+    orig_uc = cbmod.user_config_storage
+    cbmod.watchlist_storage = _W()
+    cbmod.user_config_storage = s
+    try:
+        app = _FakeFanOutApp(forbidden=True)
+        # Pre-register a job to verify it gets cancelled.
+        cbmod.register_digest_job(app, 42, s.get_digest("42"))
+        assert len(app.job_queue.get_jobs_by_name("digest:42")) == 1
+
+        await cbmod.run_user_digest(app, 42, 999)
+
+        d = s.get_digest("42")
+        assert d["enabled"] is False, "digest should auto-disable on Forbidden"
+        assert app.job_queue.get_jobs_by_name("digest:42") == [], (
+            "job should be cancelled"
+        )
+    finally:
+        cbmod.watchlist_storage = orig_w
+        cbmod.user_config_storage = orig_uc
+
+
+async def test_fanout_summary_renders() -> None:
+    """Happy path: header sent, all tickers analyzed, header edited with summary."""
+    from tg_bot.handlers import callbacks as cbmod
+
+    class _W:
+        def get_watchlist(self, _uid):
+            return ["NVDA", "AAPL", "TSLA"]
+
+    canned: dict[str, dict] = {
+        "NVDA": {
+            "ticker": "NVDA",
+            "signal": "BUY",
+            "telegraph_url": "https://telegra.ph/NVDA",
+        },
+        "AAPL": {"ticker": "AAPL", "signal": "HOLD", "telegraph_url": None},
+        "TSLA": None,  # simulate one failure
+    }
+
+    async def _fake_analyze(_uid, ticker):
+        return canned[ticker]
+
+    orig_w = cbmod.watchlist_storage
+    orig_a = cbmod._analyze_one_for_digest
+    cbmod.watchlist_storage = _W()
+    cbmod._analyze_one_for_digest = _fake_analyze
+    try:
+        app = _FakeFanOutApp()
+        await cbmod.run_user_digest(app, 42, 999)
+        assert len(app.bot.sent) == 1
+        assert "Analyzing 3 tickers" in app.bot.sent[0]["text"]
+        assert len(app.bot.edits) == 1
+        body = app.bot.edits[0]["text"]
+        assert "🟢" in body and "NVDA" in body and "BUY" in body
+        assert "🟡" in body and "AAPL" in body and "HOLD" in body
+        assert "❓" in body and "TSLA" in body and "error" in body
+        assert "1 of 3 failed" in body
+        # Telegraph link in NVDA row, no link in AAPL row.
+        assert "📄" in body
+    finally:
+        cbmod.watchlist_storage = orig_w
+        cbmod._analyze_one_for_digest = orig_a
+
+
 # --- Runner ----------------------------------------------------------------
 
 
@@ -478,6 +735,13 @@ SCENARIOS = [
     ("callback tzpick/hourpick = pure mode swap", test_callback_pure_mode_swap),
     ("callback digest:off preserves hour+tz", test_callback_off_preserves),
     ("callback bad inputs are no-ops", test_callback_bad_inputs_noop),
+    ("register_digest_job adds a job", test_register_adds_job),
+    ("register replaces (no duplicate)", test_register_replaces_existing),
+    ("cancel_digest_job removes jobs", test_cancel_removes_jobs),
+    ("register no-op on disabled / partial", test_register_noop_on_incomplete),
+    ("fanout silent on empty watchlist", test_fanout_empty_watchlist_silent),
+    ("fanout Forbidden auto-disables digest", test_fanout_forbidden_disables),
+    ("fanout summary message renders", test_fanout_summary_renders),
 ]
 
 

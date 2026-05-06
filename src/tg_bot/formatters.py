@@ -5,8 +5,9 @@ from datetime import datetime, timezone
 from telegram.helpers import escape_markdown
 
 
-# MarkdownV2-aware emoji prefix per decision verb.
-_DECISION_EMOJI = {
+# MarkdownV2-aware emoji prefix per decision verb. Public — reused by the
+# digest summary so the per-ticker rows match the manual-analysis caption.
+DECISION_EMOJI = {
     "BUY": "🟢",
     "OVERWEIGHT": "🟩",
     "HOLD": "🟡",
@@ -61,7 +62,7 @@ def format_short_message(
     All user-supplied text is escaped via `telegram.helpers.escape_markdown`
     so a stray `.` `-` `!` `(` doesn't break parsing.
     """
-    emoji = _DECISION_EMOJI.get(signal.strip().upper(), "📊")
+    emoji = DECISION_EMOJI.get(signal.strip().upper(), "📊")
     safe_ticker = escape_markdown(ticker, version=2)
     safe_signal = escape_markdown(signal, version=2)
     timestamp = escape_markdown(

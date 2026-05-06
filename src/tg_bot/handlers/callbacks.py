@@ -5,9 +5,12 @@ import logging
 import threading
 import time
 import uuid
+from datetime import date, time as dt_time
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import markdown
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import Forbidden
 from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
@@ -21,6 +24,7 @@ from tg_bot.config import Config
 from tg_bot.chart import finviz_chart_url
 from tg_bot.digest import build_digest_response
 from tg_bot.formatters import (
+    DECISION_EMOJI,
     extract_summary,
     format_analysis_result_markdown,
     format_short_message,
@@ -760,13 +764,20 @@ async def _handle_digest(
             hour = int(arg) if arg is not None else -1
         except ValueError:
             return
-        await user_config_storage.set_digest_hour(user_id, hour, chat_id)
+        if await user_config_storage.set_digest_hour(user_id, hour, chat_id):
+            register_digest_job(
+                context.application, user_id, user_config_storage.get_digest(user_id)
+            )
         await _redraw_digest(query, user_id, mode="hours")
     elif action == "tz":
         if arg and await user_config_storage.set_digest_tz(user_id, arg):
             # Tz pick lands you back on the hour grid — natural next step
             # for first-time setup; for a tz change it confirms by returning
-            # to the screen showing the active digest.
+            # to the screen showing the active digest. If the digest is
+            # active, also re-register so the new tz takes effect.
+            digest = user_config_storage.get_digest(user_id)
+            if digest and digest.get("enabled"):
+                register_digest_job(context.application, user_id, digest)
             await _redraw_digest(query, user_id, mode="hours")
     elif action == "tzpick":
         await _redraw_digest(query, user_id, mode="tz")
@@ -774,14 +785,203 @@ async def _handle_digest(
         await _redraw_digest(query, user_id, mode="hours")
     elif action == "off":
         await user_config_storage.disable_digest(user_id)
+        cancel_digest_job(context.application, user_id)
         await _redraw_digest(query, user_id, mode="hours")
     elif action == "run":
-        # Stub — wire to fan-out in the next commit. Sends a fresh message
-        # so the picker stays interactable.
-        await context.bot.send_message(
-            chat_id,
-            "🌙 Run-now fan-out is wired in the next commit.",
+        # Fire-and-forget so the callback returns immediately; the digest
+        # may take minutes if the watchlist is long. The fan-out itself
+        # serializes through the existing _run_semaphore so manual
+        # /watch runs aren't starved.
+        asyncio.create_task(run_user_digest(context.application, user_id, chat_id))
+
+
+# ─── digest fan-out + JobQueue plumbing ─────────────────────────────────
+
+
+async def _analyze_one_for_digest(user_id: int, ticker: str) -> dict | None:
+    """Headless analysis for one ticker. Returns
+    {ticker, signal, telegraph_url} or None on failure.
+
+    Holds the global `_run_semaphore` for the duration so the digest
+    fan-out interleaves with manual /watch runs through the same FIFO
+    queue — a 50-ticker watchlist serializes naturally into batches of
+    `MAX_CONCURRENT_ANALYSES` instead of hammering the LLM provider.
+    """
+    sem = _get_run_semaphore()
+    await sem.acquire()
+    try:
+        if not TRADINGAGENTS_AVAILABLE:
+            return None
+        try:
+            final_state, signal = await asyncio.to_thread(
+                run_trading_analysis,
+                ticker,
+                user_id,
+                user_config_storage,
+                None,  # no progress reporter — digest is headless
+            )
+        except Exception:
+            logger.exception("digest: analysis failed for %s", ticker)
+            return None
+        if final_state is None:
+            return None
+
+        # Publish the per-ticker Telegraph page so the digest summary can
+        # link to a full report per row. Skip silently on failure — the
+        # row just renders without a link.
+        chart_url = finviz_chart_url(ticker)
+        try:
+            md = format_analysis_result_markdown(ticker, final_state, signal)
+            html = markdown.markdown(md, extensions=["tables"])
+            html = f'<img src="{chart_url}"/>{html}'
+            telegraph_url = await publish_to_telegraph(f"{ticker} Analysis", html)
+        except Exception as e:
+            logger.warning("digest: telegraph publish failed for %s: %s", ticker, e)
+            telegraph_url = None
+
+        return {"ticker": ticker, "signal": signal, "telegraph_url": telegraph_url}
+    finally:
+        sem.release()
+
+
+async def run_user_digest(application, user_id: int, chat_id: int) -> None:
+    """Fan-out for one user. Sends a header, walks the watchlist via
+    `asyncio.gather`, edits the header into a single summary message.
+
+    Auto-disables the digest on `Forbidden` (user blocked the bot) so
+    the JobQueue doesn't keep retrying every day.
+    """
+    watchlist = watchlist_storage.get_watchlist(user_id)
+    today = date.today().isoformat()
+    safe_date = escape_markdown(today, version=2)
+
+    if not watchlist:
+        logger.info("digest: skipping user %s — empty watchlist", user_id)
+        return
+
+    n = len(watchlist)
+    logger.info("digest: launching for user %s (%d tickers)", user_id, n)
+
+    try:
+        header = await application.bot.send_message(
+            chat_id=chat_id,
+            text=f"🌙 *Daily Digest* — {safe_date}\n\nAnalyzing {n} tickers…",
+            parse_mode="MarkdownV2",
         )
+    except Forbidden:
+        logger.warning("digest: user %s blocked the bot, disabling", user_id)
+        await user_config_storage.disable_digest(user_id)
+        cancel_digest_job(application, user_id)
+        return
+
+    results = await asyncio.gather(
+        *(_analyze_one_for_digest(user_id, t) for t in watchlist),
+        return_exceptions=True,
+    )
+
+    lines = [f"🌙 *Daily Digest* — {safe_date}\n"]
+    completed = failed = 0
+    for ticker, r in zip(watchlist, results):
+        if isinstance(r, BaseException) or r is None:
+            ticker_v2 = escape_markdown(ticker, version=2)
+            lines.append(f"❓ *{ticker_v2}* — error")
+            failed += 1
+            continue
+        completed += 1
+        signal = r.get("signal") or "—"
+        emoji = DECISION_EMOJI.get(signal.strip().upper(), "📊")
+        ticker_v2 = escape_markdown(r["ticker"], version=2)
+        signal_v2 = escape_markdown(signal, version=2)
+        if r.get("telegraph_url"):
+            # MarkdownV2 link URLs only need to escape ')' and '\\'.
+            url = r["telegraph_url"].replace("\\", "\\\\").replace(")", "\\)")
+            lines.append(f"{emoji} *{ticker_v2}* — *{signal_v2}* [📄]({url})")
+        else:
+            lines.append(f"{emoji} *{ticker_v2}* — *{signal_v2}*")
+    if failed:
+        lines.append(f"\n_{failed} of {n} failed_")
+
+    summary = "\n".join(lines)
+    try:
+        await application.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=header.message_id,
+            text=summary,
+            parse_mode="MarkdownV2",
+        )
+    except Forbidden:
+        logger.warning("digest: user %s blocked the bot mid-run, disabling", user_id)
+        await user_config_storage.disable_digest(user_id)
+        cancel_digest_job(application, user_id)
+    except Exception as e:
+        logger.exception("digest: failed to edit summary for user %s: %s", user_id, e)
+
+
+async def _digest_job_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """JobQueue callback — `context.job.data` carries {user_id, chat_id}."""
+    job = context.job
+    if job is None or not job.data:
+        return
+    await run_user_digest(
+        context.application,
+        int(job.data["user_id"]),
+        int(job.data["chat_id"]),
+    )
+
+
+def _digest_job_name(user_id: int) -> str:
+    return f"digest:{user_id}"
+
+
+def register_digest_job(application, user_id: int, digest: dict | None) -> None:
+    """(Re-)schedule the daily run for `user_id`.
+
+    Cancels any existing job under the same name first so an hour or tz
+    change replaces (not duplicates) the previous schedule. No-ops if
+    JobQueue isn't available, the digest is incomplete, or the digest
+    is disabled — caller's responsibility to call cancel_digest_job
+    explicitly when disabling.
+    """
+    if not application.job_queue:
+        logger.warning("register_digest_job: JobQueue not configured")
+        return
+    cancel_digest_job(application, user_id)
+    if not digest or not digest.get("enabled"):
+        return
+    hour = digest.get("hour_local")
+    tz_str = digest.get("tz")
+    chat_id = digest.get("chat_id")
+    if hour is None or not tz_str or not chat_id:
+        logger.warning(
+            "register_digest_job: incomplete digest for user %s: %s", user_id, digest
+        )
+        return
+    try:
+        fire_time = dt_time(hour=int(hour), minute=0, tzinfo=ZoneInfo(tz_str))
+    except (ZoneInfoNotFoundError, ValueError) as e:
+        logger.warning("register_digest_job: bad tz/hour for user %s: %s", user_id, e)
+        return
+    application.job_queue.run_daily(
+        _digest_job_callback,
+        time=fire_time,
+        name=_digest_job_name(user_id),
+        data={"user_id": user_id, "chat_id": chat_id},
+    )
+    logger.info(
+        "digest: registered for user %s at %02d:00 %s", user_id, int(hour), tz_str
+    )
+
+
+def cancel_digest_job(application, user_id: int) -> int:
+    """Remove any scheduled digest job for `user_id`. Returns count cancelled."""
+    if not application.job_queue:
+        return 0
+    jobs = application.job_queue.get_jobs_by_name(_digest_job_name(user_id))
+    for j in jobs:
+        j.schedule_removal()
+    if jobs:
+        logger.info("digest: cancelled %d job(s) for user %s", len(jobs), user_id)
+    return len(jobs)
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
