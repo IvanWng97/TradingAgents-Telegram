@@ -10,6 +10,7 @@ from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
 from tg_bot.analysis import pool_stats
+from tg_bot.digest import build_digest_response
 from tg_bot.formatters import format_analysis_result_markdown
 from tg_bot.history import (
     list_available_dates,
@@ -463,6 +464,19 @@ def _format_uptime(seconds: int) -> str:
     if not parts:
         parts.append(f"{secs}s")
     return " ".join(parts)
+
+
+async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Open the daily-digest picker.
+
+    First-time users land on the tz picker (must pick a zone before an hour
+    makes sense). Returning users see the hour grid with their current tz +
+    hour reflected in the status line and ✅ prefix.
+    """
+    user_id = update.effective_user.id
+    digest = user_config_storage.get_digest(user_id)
+    text, kb = build_digest_response(digest)
+    await update.message.reply_text(text, reply_markup=kb, parse_mode="MarkdownV2")
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

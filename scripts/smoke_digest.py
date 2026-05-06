@@ -18,6 +18,15 @@ Storage scenarios:
   - clear() drops the user entry only when nothing else is left.
   - Persistence round-trip: data survives a re-instantiation.
 
+Picker rendering scenarios:
+  - First-time render → tz picker (no Back button, has all 10 zones).
+  - After tz only → hour picker, all hours unmarked, no 🔕 Off button.
+  - After hour set → hour picker with ✅ on the chosen hour, 🔕 Off shown.
+  - Mode override "tz" on a fully-configured user shows tz picker with
+    ✅ on the active zone and a Back button.
+  - Status line variants: pre-tz, post-tz pre-hour, OFF, ON.
+  - Time math: next_fire wraps to tomorrow when target already passed today.
+
 Run with: .venv/bin/python3 scripts/smoke_digest.py
 """
 
@@ -28,10 +37,18 @@ import json
 import os
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tg_bot.digest import (  # noqa: E402
+    TZ_OPTIONS,
+    build_digest_response,
+    humanize_delta,
+    next_fire,
+)
 from tg_bot.storage.user_config import UserConfigStorage  # noqa: E402
 
 
@@ -182,6 +199,121 @@ async def test_persistence_round_trip() -> None:
     assert raw["42"]["digest"]["tz"] == "America/Los_Angeles"
 
 
+# --- Picker rendering scenarios -------------------------------------------
+
+
+def _flatten(kb) -> list[tuple[str, str]]:
+    """Flatten an InlineKeyboardMarkup to [(text, callback_data), ...]."""
+    return [(b.text, b.callback_data) for row in kb.inline_keyboard for b in row]
+
+
+def _has_callback(kb, prefix: str) -> bool:
+    return any(cb.startswith(prefix) for _, cb in _flatten(kb))
+
+
+async def test_picker_first_time() -> None:
+    """No tz set → tz picker. No Back button (nowhere to go back). All 10 zones."""
+    text, kb = build_digest_response(None)
+    assert "pick a time zone" in text or "Tap a zone" in text, text
+    cbs = [cb for _, cb in _flatten(kb)]
+    assert sum(cb.startswith("digest:tz:") for cb in cbs) == len(TZ_OPTIONS)
+    assert "digest:hourpick" not in cbs, "Back button shouldn't appear pre-hour"
+    assert "cancel:digest" in cbs
+
+
+async def test_picker_after_tz_only() -> None:
+    """Tz set, no hour yet → hour picker, no ✅ on hours, no 🔕 Off."""
+    digest = {
+        "enabled": False,
+        "hour_local": None,
+        "tz": "America/Los_Angeles",
+        "chat_id": None,
+    }
+    text, kb = build_digest_response(digest)
+    assert "OFF" in text, text
+    flat = _flatten(kb)
+    hour_btns = [(t, c) for t, c in flat if c.startswith("digest:hour:")]
+    assert len(hour_btns) == 24
+    assert all("✅" not in t for t, _ in hour_btns), "no hour selected yet"
+    assert not _has_callback(kb, "digest:off"), "🔕 Off must be hidden when disabled"
+    assert _has_callback(kb, "digest:tzpick")
+    assert _has_callback(kb, "digest:run")
+
+
+async def test_picker_active() -> None:
+    """Active digest → ✅ on chosen hour, 🔕 Off shown, ON status line."""
+    digest = {
+        "enabled": True,
+        "hour_local": 10,
+        "tz": "America/Los_Angeles",
+        "chat_id": 999,
+    }
+    text, kb = build_digest_response(digest)
+    assert "ON" in text and "10:00 PT" in text, text
+    flat = _flatten(kb)
+    h10 = next(t for t, c in flat if c == "digest:hour:10")
+    assert "✅" in h10, f"hour 10 should be marked: {h10}"
+    # Other hours unmarked.
+    h11 = next(t for t, c in flat if c == "digest:hour:11")
+    assert "✅" not in h11
+    assert _has_callback(kb, "digest:off")
+
+
+async def test_picker_tz_override() -> None:
+    """mode='tz' on a fully-configured user shows tz picker + Back button."""
+    digest = {
+        "enabled": True,
+        "hour_local": 10,
+        "tz": "America/Los_Angeles",
+        "chat_id": 999,
+    }
+    text, kb = build_digest_response(digest, mode="tz")
+    flat = _flatten(kb)
+    # Active tz marked.
+    pt = next(t for t, c in flat if c == "digest:tz:America/Los_Angeles")
+    assert "✅" in pt
+    # Back button present (hour was set, so there's somewhere to return to).
+    assert _has_callback(kb, "digest:hourpick")
+
+
+async def test_status_line_variants() -> None:
+    pre_tz, _ = build_digest_response(None)
+    assert "pick a time zone" in pre_tz
+
+    post_tz_no_hour, _ = build_digest_response(
+        {"enabled": False, "hour_local": None, "tz": "Etc/UTC", "chat_id": None}
+    )
+    assert "OFF" in post_tz_no_hour and "UTC" in post_tz_no_hour
+
+    off_after_setup, _ = build_digest_response(
+        {"enabled": False, "hour_local": 10, "tz": "Etc/UTC", "chat_id": 999}
+    )
+    assert "OFF" in off_after_setup and "last set" in off_after_setup
+
+    on, _ = build_digest_response(
+        {"enabled": True, "hour_local": 10, "tz": "Etc/UTC", "chat_id": 999}
+    )
+    assert "ON" in on
+
+
+async def test_next_fire_wrap() -> None:
+    """If now is already past today's target hour, fire wraps to tomorrow."""
+    pt = ZoneInfo("America/Los_Angeles")
+    # 11:00 PT now, target 10:00 → tomorrow 10:00.
+    now = datetime(2026, 5, 6, 11, 0, tzinfo=pt)
+    fire = next_fire(10, "America/Los_Angeles", now=now)
+    assert fire.day == 7, fire
+    assert fire.hour == 10
+    # 09:00 PT now, target 10:00 → today 10:00.
+    now2 = datetime(2026, 5, 6, 9, 0, tzinfo=pt)
+    fire2 = next_fire(10, "America/Los_Angeles", now=now2)
+    assert fire2.day == 6 and fire2.hour == 10
+    # humanize: 4h delta from 06:00 to 10:00.
+    now3 = datetime(2026, 5, 6, 6, 0, tzinfo=pt)
+    fire3 = next_fire(10, "America/Los_Angeles", now=now3)
+    assert humanize_delta(fire3, now=now3) == "in 4h"
+
+
 # --- Runner ----------------------------------------------------------------
 
 
@@ -196,6 +328,12 @@ SCENARIOS = [
     ("clear() preserves digest", test_clear_preserves_digest),
     ("clear() drops empty user", test_clear_drops_empty_user),
     ("persistence round-trip", test_persistence_round_trip),
+    ("picker first-time = tz screen", test_picker_first_time),
+    ("picker after tz only = hour screen, no ✅", test_picker_after_tz_only),
+    ("picker active = hour screen, ✅ + 🔕 Off", test_picker_active),
+    ("picker mode='tz' override + Back button", test_picker_tz_override),
+    ("status line variants", test_status_line_variants),
+    ("next_fire / humanize_delta math", test_next_fire_wrap),
 ]
 
 

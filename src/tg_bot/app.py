@@ -23,6 +23,7 @@ from tg_bot.handlers import (
     button_callback,
     config_cmd,
     del_ticker,
+    digest_cmd,
     help_cmd,
     history_cmd,
     list_watchlist,
@@ -46,6 +47,7 @@ BOT_COMMANDS = [
     BotCommand("watch", "Show your watchlist"),
     BotCommand("list", "Show your watchlist (alias)"),
     BotCommand("config", "Configure LLM provider and models"),
+    BotCommand("digest", "Schedule a daily summary of your watchlist"),
     BotCommand("history", "Look up a past analysis"),
     BotCommand("status", "Show bot uptime, pool, and your LLM config"),
 ]
@@ -133,6 +135,7 @@ def _build_application() -> Application:
     application.add_handler(CommandHandler("watch", list_watchlist))
     application.add_handler(CommandHandler("list", list_watchlist))
     application.add_handler(CommandHandler("config", config_cmd))
+    application.add_handler(CommandHandler("digest", digest_cmd))
     application.add_handler(CommandHandler("history", history_cmd))
     application.add_handler(CommandHandler("status", status_cmd))
     application.add_handler(CallbackQueryHandler(button_callback))
