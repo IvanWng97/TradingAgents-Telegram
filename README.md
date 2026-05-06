@@ -174,5 +174,6 @@ python scripts/smoke_parallel.py     # parallelism wall-time check
 ## TODO
 
 - **Daily digest scheduler** — cron-like `JobQueue` job that walks each user's watchlist nightly and posts a single summary message with all signals, so users get a passive daily read without tapping anything.
+- **Same-day result cache + `/refresh`** — `_run_analysis_for_ticker` re-runs the full graph even if the same `(ticker, date, provider, deep, quick)` was analyzed minutes ago. Reusing tradingagents' on-disk `full_states_log_<date>.json` would make the second tap free + instant; `/refresh NVDA` opts back into a fresh run.
 
 See [`CLAUDE.md`](./CLAUDE.md) for architecture notes, key contracts, and current limitations.
