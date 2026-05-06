@@ -13,6 +13,13 @@ on:
 env:
   IMAGE_NAME: ivanwng97/tradingagents-telegram
 
+# A second push to the same ref while a build is in flight cancels the older
+# run — saves CI minutes when fixing a typo immediately after pushing. Cron +
+# manual dispatch each have their own ref, so they don't cancel each other.
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
@@ -48,6 +55,11 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Set up QEMU
+        # Required for cross-arch builds (linux/arm64 from an amd64 runner).
+        if: steps.gate.outputs.skip != 'true'
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         if: steps.gate.outputs.skip != 'true'
         uses: docker/setup-buildx-action@v4
@@ -76,8 +88,16 @@ jobs:
         with:
           context: .
           push: true
+          # Multi-arch: amd64 covers most VPSes, arm64 unlocks Oracle Cloud
+          # Ampere A1 (free tier), Raspberry Pi, and Apple Silicon dev hosts.
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Supply-chain metadata published alongside the image: provenance
+          # attests "this image was built by this repo at this commit"; SBOM
+          # lists every package in the image. Both visible on Docker Hub.
+          provenance: true
+          sbom: true
           # Push events (code changes) reuse the layer cache for fast iteration.
           # Schedule + manual dispatch bypass the cache so the `pip install`
           # layer re-resolves tradingagents@HEAD from GitHub.
