@@ -1094,18 +1094,30 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
     }
 
     last_edit_at = 0.0
-    edit_lock = asyncio.Lock()
+    edit_in_flight = False
     blocked = False
 
     async def _render() -> None:
-        nonlocal last_edit_at, blocked
-        if blocked:
+        """Single-flight, throttle-deferring render.
+
+        If two state changes fire within the throttle window (common at
+        fan-out start when N tickers acquire the sem simultaneously),
+        only the first one schedules an edit — the rest bail. The
+        scheduled edit waits out the remaining cooldown and then reads
+        the *current* status dict, so the second ticker's transition
+        from ⏳ → 📊 isn't lost just because it raced with the first.
+        """
+        nonlocal last_edit_at, edit_in_flight, blocked
+        if blocked or edit_in_flight:
             return
-        async with edit_lock:
-            now = time.monotonic()
-            if now - last_edit_at < _DIGEST_PROGRESS_INTERVAL:
+        edit_in_flight = True
+        try:
+            wait = _DIGEST_PROGRESS_INTERVAL - (time.monotonic() - last_edit_at)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            if blocked:
                 return
-            last_edit_at = now
+            last_edit_at = time.monotonic()
             text = _format_digest_progress(watchlist, status, safe_date)
             try:
                 # Re-attach the cancel button on every edit — Telegram
@@ -1127,6 +1139,8 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
             except Exception as e:
                 # "message is not modified" or transient — keep going.
                 logger.debug("digest progress edit skipped: %s", e)
+        finally:
+            edit_in_flight = False
 
     async def _on_step(ticker: str, friendly: str, ordinal: int | None) -> None:
         # Don't overwrite a "cancelled" status with a late step event

@@ -739,6 +739,61 @@ async def test_fanout_summary_renders() -> None:
         cbmod._analyze_one_for_digest = orig_a
 
 
+async def test_render_deferred_captures_latest_state() -> None:
+    """When two tickers fire status changes within the throttle window,
+    the second one mustn't get silently dropped — the deferred render
+    must paint the latest state once the throttle expires. Patches
+    _DIGEST_PROGRESS_INTERVAL down so the test runs in <1s instead of
+    >2s."""
+    from tg_bot.handlers import callbacks as cbmod
+
+    class _W:
+        def get_watchlist(self, _u):
+            return ["NVDA", "AAPL"]
+
+    started = {"NVDA": False, "AAPL": False}
+
+    async def _fake(_uid, ticker, reporter=None):
+        # Fire `report_starting` on both nearly simultaneously — this is
+        # the exact race the deferred render is meant to handle.
+        if reporter is not None:
+            await reporter.report_starting()
+        started[ticker] = True
+        # Hold long enough for the deferred render to land.
+        await asyncio.sleep(0.6)
+        return {"ticker": ticker, "signal": "BUY", "telegraph_url": None}
+
+    orig_w = cbmod.watchlist_storage
+    orig_a = cbmod._analyze_one_for_digest
+    orig_iv = cbmod._DIGEST_PROGRESS_INTERVAL
+    cbmod.watchlist_storage = _W()
+    cbmod._analyze_one_for_digest = _fake
+    cbmod._DIGEST_PROGRESS_INTERVAL = 0.3
+    try:
+        app = _FakeFanOutApp()
+        await cbmod.run_user_digest(app, 42, 999)
+        # At least one progress edit must contain BOTH tickers in the
+        # 📊 state simultaneously — without the deferred-render fix,
+        # only the first ticker's transition would ever appear in any
+        # progress edit; the second one would race past Starting and
+        # only show up in the final summary.
+        progress_edits = [e["text"] for e in app.bot.edits if "📊" in e["text"]]
+        assert progress_edits, "no progress edit ever rendered 📊"
+        both_visible = [
+            t
+            for t in progress_edits
+            if "NVDA" in t and "AAPL" in t and t.count("📊") >= 2
+        ]
+        assert both_visible, (
+            "no progress edit showed both tickers as 📊 simultaneously — "
+            "deferred render didn't capture the second state change"
+        )
+    finally:
+        cbmod.watchlist_storage = orig_w
+        cbmod._analyze_one_for_digest = orig_a
+        cbmod._DIGEST_PROGRESS_INTERVAL = orig_iv
+
+
 async def test_progress_completed_row_matches_summary() -> None:
     """A completed ticker should render identically in the progress
     view and the final summary — same signal emoji + Telegraph link, no
@@ -950,6 +1005,10 @@ SCENARIOS = [
     ("fanout silent on empty watchlist", test_fanout_empty_watchlist_silent),
     ("fanout Forbidden auto-disables digest", test_fanout_forbidden_disables),
     ("fanout summary message renders", test_fanout_summary_renders),
+    (
+        "deferred render captures latest state",
+        test_render_deferred_captures_latest_state,
+    ),
     (
         "progress completed row matches summary",
         test_progress_completed_row_matches_summary,
