@@ -19,6 +19,7 @@ from tg_bot.analysis import (
 )
 from tg_bot.config import Config
 from tg_bot.chart import finviz_chart_url
+from tg_bot.digest import build_digest_response
 from tg_bot.formatters import (
     extract_summary,
     format_analysis_result_markdown,
@@ -715,13 +716,72 @@ async def _handle_cancel(
         )
     elif what == "del":
         await query.edit_message_text("✅ Done\\.", parse_mode="MarkdownV2")
-    elif what in ("watch", "hist"):
+    elif what in ("watch", "hist", "digest"):
         try:
             await query.delete_message()
         except Exception:
             await query.edit_message_text("✅ Done\\.", parse_mode="MarkdownV2")
     else:
         await query.edit_message_text("Cancelled.")
+
+
+async def _redraw_digest(query, user_id: int, mode: str) -> None:
+    """Re-render the digest picker in `mode` (auto/hours/tz). Swallows the
+    'message is not modified' BadRequest that fires when the user taps the
+    same hour/tz they already had selected — there's nothing to update."""
+    digest = user_config_storage.get_digest(user_id)
+    text, kb = build_digest_response(digest, mode=mode)
+    try:
+        await query.edit_message_text(text, parse_mode="MarkdownV2", reply_markup=kb)
+    except Exception as e:
+        logger.debug("digest redraw skipped: %s", e)
+
+
+async def _handle_digest(
+    query, context: ContextTypes.DEFAULT_TYPE, user_id: int, data: str
+) -> None:
+    """Dispatch `digest:*` callbacks emitted by the picker.
+
+    Sub-actions:
+      - `digest:hour:HH`    — set hour, enable, capture chat_id, redraw hours
+      - `digest:tz:<IANA>`  — set tz; if active, stays active. Returns to hour grid.
+      - `digest:tzpick`     — swap to the tz picker
+      - `digest:hourpick`   — back-to-hours (← Back from tz screen)
+      - `digest:off`        — disable (preserves hour + tz), redraw hours
+      - `digest:run`        — fire fan-out now (stub until step 4 wires it)
+    """
+    chat_id = query.message.chat_id
+    parts = data.split(":", 2)
+    action = parts[1] if len(parts) > 1 else ""
+    arg = parts[2] if len(parts) > 2 else None
+
+    if action == "hour":
+        try:
+            hour = int(arg) if arg is not None else -1
+        except ValueError:
+            return
+        await user_config_storage.set_digest_hour(user_id, hour, chat_id)
+        await _redraw_digest(query, user_id, mode="hours")
+    elif action == "tz":
+        if arg and await user_config_storage.set_digest_tz(user_id, arg):
+            # Tz pick lands you back on the hour grid — natural next step
+            # for first-time setup; for a tz change it confirms by returning
+            # to the screen showing the active digest.
+            await _redraw_digest(query, user_id, mode="hours")
+    elif action == "tzpick":
+        await _redraw_digest(query, user_id, mode="tz")
+    elif action == "hourpick":
+        await _redraw_digest(query, user_id, mode="hours")
+    elif action == "off":
+        await user_config_storage.disable_digest(user_id)
+        await _redraw_digest(query, user_id, mode="hours")
+    elif action == "run":
+        # Stub — wire to fan-out in the next commit. Sends a fresh message
+        # so the picker stays interactable.
+        await context.bot.send_message(
+            chat_id,
+            "🌙 Run-now fan-out is wired in the next commit.",
+        )
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -747,6 +807,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _handle_page_nav(query, context, user_id, data.split(":", 1)[1])
     elif data.startswith("runall:"):
         await _handle_done(query, context, user_id)
+    elif data.startswith("digest:"):
+        await _handle_digest(query, context, user_id, data)
     elif data.startswith("del:"):
         await _handle_del(query, user_id, data.split(":", 1)[1])
     elif data.startswith("cancel_analysis:"):

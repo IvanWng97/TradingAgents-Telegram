@@ -27,6 +27,13 @@ Picker rendering scenarios:
   - Status line variants: pre-tz, post-tz pre-hour, OFF, ON.
   - Time math: next_fire wraps to tomorrow when target already passed today.
 
+Callback dispatch scenarios (storage-only — no Telegram side effects asserted):
+  - `digest:hour:10` enables digest, captures chat_id.
+  - `digest:tz:<IANA>` sets tz; doesn't touch enabled.
+  - `digest:tzpick` / `digest:hourpick` are pure mode swaps (no storage write).
+  - `digest:off` flips enabled to False without losing hour/tz.
+  - Bad inputs (non-int hour, garbage tz) are no-ops.
+
 Run with: .venv/bin/python3 scripts/smoke_digest.py
 """
 
@@ -39,6 +46,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -296,6 +304,137 @@ async def test_status_line_variants() -> None:
     assert "ON" in on
 
 
+# --- Callback dispatch scenarios ------------------------------------------
+
+
+class _FakeMessage:
+    def __init__(self, chat_id: int) -> None:
+        self.chat_id = chat_id
+
+
+class _FakeQuery:
+    """Minimal stand-in for telegram.CallbackQuery — only what _handle_digest reads."""
+
+    def __init__(self, chat_id: int) -> None:
+        self.message = _FakeMessage(chat_id)
+        self.last_text: str | None = None
+        self.last_kb = None
+
+    async def edit_message_text(
+        self, text: str, parse_mode: str | None = None, reply_markup=None
+    ) -> None:
+        self.last_text = text
+        self.last_kb = reply_markup
+
+
+class _FakeBot:
+    def __init__(self) -> None:
+        self.sent: list[tuple[int, str]] = []
+
+    async def send_message(self, chat_id: int, text: str, **_: object) -> None:
+        self.sent.append((chat_id, text))
+
+
+class _FakeContext:
+    """Minimal stand-in for ContextTypes.DEFAULT_TYPE — _handle_digest only
+    reads `context.bot` for the run-now stub message."""
+
+    def __init__(self) -> None:
+        self.bot = _FakeBot()
+
+
+async def _make_dispatch_env(chat_id: int = 999) -> tuple[Any, Any, Any, Any]:
+    """Patches the storage singleton in callbacks to a temp-file UCS so
+    dispatch tests don't bleed into the on-disk data dir. Returns
+    (storage, query, context, restore_fn)."""
+    s, _ = fresh_storage()
+    # callbacks reads `user_config_storage` directly — swap it.
+    from tg_bot.handlers import callbacks as cbmod
+
+    original = cbmod.user_config_storage
+    cbmod.user_config_storage = s
+    return (
+        s,
+        _FakeQuery(chat_id),
+        _FakeContext(),
+        lambda: setattr(cbmod, "user_config_storage", original),
+    )
+
+
+async def test_callback_hour_enables() -> None:
+    s, q, ctx, restore = await _make_dispatch_env()
+    try:
+        from tg_bot.handlers.callbacks import _handle_digest
+
+        await _handle_digest(q, ctx, user_id=42, data="digest:hour:10")
+        d = s.get_digest("42")
+        assert d["enabled"] and d["hour_local"] == 10 and d["chat_id"] == 999
+        assert q.last_text is not None  # picker re-rendered
+    finally:
+        restore()
+
+
+async def test_callback_tz_no_enable() -> None:
+    s, q, ctx, restore = await _make_dispatch_env()
+    try:
+        from tg_bot.handlers.callbacks import _handle_digest
+
+        await _handle_digest(q, ctx, user_id=42, data="digest:tz:America/Los_Angeles")
+        d = s.get_digest("42")
+        assert d["tz"] == "America/Los_Angeles"
+        assert d["enabled"] is False  # tz alone doesn't enable
+    finally:
+        restore()
+
+
+async def test_callback_pure_mode_swap() -> None:
+    """tzpick / hourpick must NOT write to storage — they only redraw."""
+    s, q, ctx, restore = await _make_dispatch_env()
+    try:
+        from tg_bot.handlers.callbacks import _handle_digest
+
+        # Pre-existing state.
+        await s.set_digest_tz("42", "America/Los_Angeles")
+        await s.set_digest_hour("42", 10, 999)
+        snapshot = json.dumps(s.get_digest("42"), sort_keys=True)
+        await _handle_digest(q, ctx, user_id=42, data="digest:tzpick")
+        await _handle_digest(q, ctx, user_id=42, data="digest:hourpick")
+        assert json.dumps(s.get_digest("42"), sort_keys=True) == snapshot
+    finally:
+        restore()
+
+
+async def test_callback_off_preserves() -> None:
+    s, q, ctx, restore = await _make_dispatch_env()
+    try:
+        from tg_bot.handlers.callbacks import _handle_digest
+
+        await s.set_digest_tz("42", "America/Los_Angeles")
+        await s.set_digest_hour("42", 10, 999)
+        await _handle_digest(q, ctx, user_id=42, data="digest:off")
+        d = s.get_digest("42")
+        assert d["enabled"] is False
+        assert d["hour_local"] == 10  # preserved
+        assert d["tz"] == "America/Los_Angeles"  # preserved
+    finally:
+        restore()
+
+
+async def test_callback_bad_inputs_noop() -> None:
+    s, q, ctx, restore = await _make_dispatch_env()
+    try:
+        from tg_bot.handlers.callbacks import _handle_digest
+
+        # Non-int hour — should not write.
+        await _handle_digest(q, ctx, user_id=42, data="digest:hour:abc")
+        assert s.get_digest("42") is None
+        # Garbage tz — should not write.
+        await _handle_digest(q, ctx, user_id=42, data="digest:tz:Mars/Phobos")
+        assert s.get_digest("42") is None
+    finally:
+        restore()
+
+
 async def test_next_fire_wrap() -> None:
     """If now is already past today's target hour, fire wraps to tomorrow."""
     pt = ZoneInfo("America/Los_Angeles")
@@ -334,6 +473,11 @@ SCENARIOS = [
     ("picker mode='tz' override + Back button", test_picker_tz_override),
     ("status line variants", test_status_line_variants),
     ("next_fire / humanize_delta math", test_next_fire_wrap),
+    ("callback digest:hour enables", test_callback_hour_enables),
+    ("callback digest:tz keeps disabled", test_callback_tz_no_enable),
+    ("callback tzpick/hourpick = pure mode swap", test_callback_pure_mode_swap),
+    ("callback digest:off preserves hour+tz", test_callback_off_preserves),
+    ("callback bad inputs are no-ops", test_callback_bad_inputs_noop),
 ]
 
 
