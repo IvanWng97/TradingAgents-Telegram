@@ -219,7 +219,7 @@ async def _run_analysis_for_ticker(
     # themselves "Analyzing" even though only N can actually run.
     sem = _get_run_semaphore()
     acquired = _try_acquire_nonblocking(sem)
-    logger.info(
+    logger.debug(
         "[%s] sem state after sync-acquire: acquired=%s, _value=%d, _waiters=%d",
         ticker,
         acquired,
@@ -232,7 +232,7 @@ async def _run_analysis_for_ticker(
         if acquired
         else f"⏳ *{escape_markdown(ticker, version=2)}* queued — waiting for slot…"
     )
-    logger.info(
+    logger.debug(
         "[%s] send_photo START caption=%s",
         ticker,
         "Analyzing" if acquired else "Queued",
@@ -277,10 +277,10 @@ async def _run_analysis_for_ticker(
         )
         if acquired:
             sem.release()
-            logger.info("[%s] released slot after send_photo failure", ticker)
+            logger.debug("[%s] released slot after send_photo failure", ticker)
         cancel_registry.pop(run_id, None)
         return "completed"  # not "cancelled" — counts toward 'failed' tally
-    logger.info("[%s] send_photo OK message_id=%s", ticker, progress_msg.message_id)
+    logger.debug("[%s] send_photo OK message_id=%s", ticker, progress_msg.message_id)
     cancel_registry[run_id]["message_id"] = progress_msg.message_id
 
     if not TRADINGAGENTS_AVAILABLE:
@@ -318,7 +318,7 @@ async def _run_analysis_for_ticker(
     # waiter list.
     try:
         if not acquired:
-            logger.info("[%s] entering wait-for-slot", ticker)
+            logger.debug("[%s] entering wait-for-slot", ticker)
             acquire_task = asyncio.create_task(sem.acquire())
             cancel_task = asyncio.create_task(cancel_async.wait())
             try:
@@ -333,7 +333,7 @@ async def _run_analysis_for_ticker(
 
             if acquire_task in done and not acquire_task.cancelled():
                 acquired = True
-                logger.info("[%s] queued slot acquired", ticker)
+                logger.debug("[%s] queued slot acquired", ticker)
             else:
                 # Cancel won the race. If acquire ALSO completed before we
                 # got to inspect (rare race), give the slot back.
@@ -341,7 +341,7 @@ async def _run_analysis_for_ticker(
                     try:
                         acquire_task.result()
                         sem.release()
-                        logger.info(
+                        logger.debug(
                             "[%s] released raced-acquire slot during cancel", ticker
                         )
                     except Exception:
@@ -353,7 +353,7 @@ async def _run_analysis_for_ticker(
         # If we showed "Queued" initially, flip the caption to "Analyzing"
         # now that we have the slot. Best-effort — drop on rate-limit.
         if initial_caption.startswith("⏳"):
-            logger.info("[%s] flipping caption Queued → Analyzing", ticker)
+            logger.debug("[%s] flipping caption Queued → Analyzing", ticker)
             try:
                 await context.bot.edit_message_caption(
                     chat_id=chat_id,
@@ -365,7 +365,7 @@ async def _run_analysis_for_ticker(
             except Exception as e:
                 logger.warning("[%s] caption flip failed: %s", ticker, e)
 
-        logger.info("[%s] entering to_thread(run_trading_analysis)", ticker)
+        logger.debug("[%s] entering to_thread(run_trading_analysis)", ticker)
         final_state, signal = await asyncio.to_thread(
             run_trading_analysis,
             ticker,
@@ -373,7 +373,7 @@ async def _run_analysis_for_ticker(
             user_config_storage,
             reporter,
         )
-        logger.info(
+        logger.debug(
             "[%s] to_thread returned signal=%s final_state=%s",
             ticker,
             signal,
@@ -439,14 +439,14 @@ async def _run_analysis_for_ticker(
     finally:
         if acquired:
             sem.release()
-            logger.info(
+            logger.debug(
                 "[%s] sem released, _value=%d, _waiters=%d",
                 ticker,
                 sem._value,
                 len(sem._waiters) if sem._waiters else 0,
             )
         cancel_registry.pop(run_id, None)
-        logger.info(
+        logger.debug(
             "[%s] run_id=%s exiting; registry size=%d",
             ticker,
             run_id,
@@ -567,12 +567,12 @@ async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) 
         ),
         return_exceptions=True,
     )
-    logger.info("queue: gather returned %d results", len(results))
+    logger.debug("queue: gather returned %d results", len(results))
     for ticker, r in zip(selection, results):
         if isinstance(r, BaseException):
             logger.error("[%s] task raised: %s (type=%s)", ticker, r, type(r).__name__)
         else:
-            logger.info("[%s] task result: %s", ticker, r)
+            logger.debug("[%s] task result: %s", ticker, r)
 
     completed = sum(1 for r in results if r == "completed")
     cancelled = sum(1 for r in results if r == "cancelled")
@@ -665,7 +665,7 @@ async def _handle_cancel_analysis(
     """
     cancel_registry = context.chat_data.get("analysis_cancels") or {}
     entry = cancel_registry.get(run_id)
-    logger.info(
+    logger.debug(
         "cancel_analysis tapped: run_id=%s registry_keys=%s",
         run_id,
         list(cancel_registry.keys()),
@@ -679,7 +679,7 @@ async def _handle_cancel_analysis(
     async_event = entry.get("async_event")
     if async_event is not None:
         async_event.set()
-    logger.info("cancel_analysis: events set for run_id=%s", run_id)
+    logger.debug("cancel_analysis: events set for run_id=%s", run_id)
 
     message_id = entry.get("message_id")
     if message_id is None:

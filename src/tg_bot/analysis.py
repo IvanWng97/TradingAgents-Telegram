@@ -57,7 +57,7 @@ class GraphPool:
         graph = None
         try:
             graph = self._q.get_nowait()
-            logger.info(
+            logger.debug(
                 "pool.acquire: reused cached instance (size=%d, free=%d)",
                 self._size,
                 self._q.qsize(),
@@ -74,7 +74,7 @@ class GraphPool:
             if should_build:
                 # Build OUTSIDE the mutex — graph init is slow and other
                 # concurrent acquires shouldn't be blocked on it.
-                logger.info(
+                logger.debug(
                     "pool.acquire: no free instance, building (now size=%d/%d)",
                     self._size,
                     self._max,
@@ -86,16 +86,24 @@ class GraphPool:
                         self._size -= 1
                     raise
             else:
-                # Pool already at max; block until one is returned.
-                logger.info("pool.acquire: at max=%d, blocking on queue.get", self._max)
+                # Pool already at max; block until one is returned. Per design
+                # the asyncio semaphore upstream caps concurrency to the same
+                # number, so this branch is unreachable — if it fires, the
+                # invariant has broken and runs are silently serializing
+                # without checking the cancel flag.
+                logger.warning(
+                    "pool.acquire: at max=%d, blocking on queue.get — "
+                    "semaphore/pool sizing invariant broken",
+                    self._max,
+                )
                 graph = self._q.get()
-                logger.info("pool.acquire: woke from blocking get")
+                logger.debug("pool.acquire: woke from blocking get")
 
         try:
             yield graph
         finally:
             self._q.put(graph)
-            logger.info(
+            logger.debug(
                 "pool.release: returned to pool (size=%d, free=%d)",
                 self._size,
                 self._q.qsize(),
@@ -209,7 +217,7 @@ def run_trading_analysis(
 
     pool = _get_or_create_pool(config)
     set_reporter(reporter)
-    logger.info("[%s] propagate START", ticker)
+    logger.debug("[%s] propagate START", ticker)
     try:
         with pool.acquire() as ta:
             final_state, signal = ta.propagate(
