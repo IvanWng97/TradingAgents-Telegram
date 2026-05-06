@@ -2,10 +2,15 @@
 
 import asyncio
 import json
+import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 
 class JsonStorage:
@@ -22,7 +27,34 @@ class JsonStorage:
         try:
             with open(self.file_path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError:
+            # File exists but is malformed JSON — could be disk corruption,
+            # an external edit, or a pre-fsync save from an old version.
+            # Move it aside so the next _save doesn't overwrite the only
+            # copy of (potentially recoverable) user data with `{}`.
+            backup = self.file_path.with_name(
+                f"{self.file_path.name}.corrupt-{int(time.time())}"
+            )
+            try:
+                os.rename(self.file_path, backup)
+                logger.warning(
+                    "Corrupt JSON at %s — preserved as %s; starting empty",
+                    self.file_path,
+                    backup,
+                )
+            except OSError as e:
+                logger.error(
+                    "Corrupt JSON at %s and rename to backup failed (%s); "
+                    "next save WILL overwrite the corrupt file",
+                    self.file_path,
+                    e,
+                )
+            return {}
+        except OSError as e:
+            # Read failed (permissions, transient disk error). Preserve
+            # existing degraded behavior — log and start empty rather than
+            # crash on bot startup.
+            logger.error("Failed to read %s (%s); starting empty", self.file_path, e)
             return {}
 
     def _save(self) -> None:
