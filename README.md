@@ -91,6 +91,7 @@ python -m tg_bot
 | `/del` (no args) | Inline-button picker — tap ❌ on each ticker, `✅ Done` to close |
 | `/watch`, `/list` | Paginated select-mode keyboard (9 per page). Tap any ticker to toggle (✅ prefix), use `✓ Select all` / `✗ Clear` for bulk, then `✅ Done (N)` runs the selected ones. Single ticker uses the cached graph; 2+ run in parallel up to `TG_BOT_MAX_CONCURRENT_ANALYSES`. Each in-flight analysis has its own ❌ Cancel button. |
 | `/config` | Three-step picker: provider → deep model → quick model. `❌ Cancel` at any step rolls back to your prior settings |
+| `/digest` | Schedule a daily run of every ticker in your watchlist. Single-screen picker: 24-hour grid + 10 IANA time zones (Pacific, Eastern, UTC, GMT/BST, JST, …). One summary message per day, one Telegraph link per ticker. `▶ Run now` triggers an ad-hoc fan-out; `🔕 Off` disables. Auto-disables itself if you block the bot. |
 | `/history` (no args) | Inline-button picker of all tickers with saved analyses |
 | `/history NVDA` | Inline-button picker of recent analysis dates. `← Back` returns to the ticker picker. |
 | `/history NVDA 2026-04-15` | Direct lookup — publishes that day's saved analysis to Telegraph |
@@ -173,7 +174,6 @@ python scripts/smoke_parallel.py     # parallelism wall-time check
 
 ## TODO
 
-- **Daily digest scheduler** — cron-like `JobQueue` job that walks each user's watchlist nightly and posts a single summary message with all signals, so users get a passive daily read without tapping anything.
 - **Same-day result cache + `/refresh`** — `_run_analysis_for_ticker` re-runs the full graph even if the same `(ticker, date, provider, deep, quick)` was analyzed minutes ago. Reusing tradingagents' on-disk `full_states_log_<date>.json` would make the second tap free + instant; `/refresh NVDA` opts back into a fresh run.
 
 See [`CLAUDE.md`](./CLAUDE.md) for architecture notes, key contracts, and current limitations.
