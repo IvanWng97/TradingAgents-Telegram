@@ -910,6 +910,21 @@ async def _analyze_one_for_digest(
 _DIGEST_PROGRESS_INTERVAL = 2.0  # min seconds between progressive edits
 
 
+def _completed_digest_row(ticker_v2: str, result: dict) -> str:
+    """One MarkdownV2-safe row for a completed ticker. Used by both the
+    progress view and the final summary so a row's appearance is stable
+    once analysis lands — no jump from generic ✅ to a signal-coloured
+    emoji at the final-edit boundary."""
+    signal = (result.get("signal") or "—").strip()
+    emoji = DECISION_EMOJI.get(signal.upper(), "📊")
+    signal_v2 = escape_markdown(signal, version=2)
+    if result.get("telegraph_url"):
+        # MarkdownV2 link URLs only need to escape ')' and '\\'.
+        url = result["telegraph_url"].replace("\\", "\\\\").replace(")", "\\)")
+        return f"{emoji} *{ticker_v2}* — *{signal_v2}* [📄]({url})"
+    return f"{emoji} *{ticker_v2}* — *{signal_v2}*"
+
+
 def _format_digest_progress(
     watchlist: list[str],
     status: dict[str, object],
@@ -946,9 +961,7 @@ def _format_digest_progress(
         elif s is None:
             lines.append(f"❌ *{ticker_v2}* — error")
         else:
-            signal = (s.get("signal") or "—").strip()  # type: ignore[union-attr]
-            signal_v2 = escape_markdown(signal, version=2)
-            lines.append(f"✅ *{ticker_v2}* — *{signal_v2}*")
+            lines.append(_completed_digest_row(ticker_v2, s))  # type: ignore[arg-type]
     return "\n".join(lines)
 
 
@@ -979,15 +992,7 @@ def _format_digest_summary(
             lines.append(f"❓ *{ticker_v2}* — error")
             failed += 1
             continue
-        signal = s.get("signal") or "—"
-        emoji = DECISION_EMOJI.get(signal.strip().upper(), "📊")
-        signal_v2 = escape_markdown(signal, version=2)
-        if s.get("telegraph_url"):
-            # MarkdownV2 link URLs only need to escape ')' and '\\'.
-            url = s["telegraph_url"].replace("\\", "\\\\").replace(")", "\\)")
-            lines.append(f"{emoji} *{ticker_v2}* — *{signal_v2}* [📄]({url})")
-        else:
-            lines.append(f"{emoji} *{ticker_v2}* — *{signal_v2}*")
+        lines.append(_completed_digest_row(ticker_v2, s))
     tally_parts: list[str] = []
     if cancelled:
         tally_parts.append(f"{cancelled} cancelled")

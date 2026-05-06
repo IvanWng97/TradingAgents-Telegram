@@ -739,6 +739,32 @@ async def test_fanout_summary_renders() -> None:
         cbmod._analyze_one_for_digest = orig_a
 
 
+async def test_progress_completed_row_matches_summary() -> None:
+    """A completed ticker should render identically in the progress
+    view and the final summary — same signal emoji + Telegraph link, no
+    flash from generic ✅ to coloured 🟢 at the final-edit boundary."""
+    from tg_bot.handlers.callbacks import (
+        _format_digest_progress,
+        _format_digest_summary,
+    )
+
+    result = {
+        "ticker": "NVDA",
+        "signal": "BUY",
+        "telegraph_url": "https://telegra.ph/NVDA",
+    }
+    status = {"NVDA": result}
+    progress = _format_digest_progress(["NVDA"], status, "2026-05-06")
+    summary = _format_digest_summary(["NVDA"], status, "2026-05-06")
+    # Both must contain: the signal emoji, the BUY label, and the link.
+    for body in (progress, summary):
+        assert "🟢" in body, f"missing emoji in: {body!r}"
+        assert "BUY" in body
+        assert "📄" in body and "telegra.ph/NVDA" in body
+    # Generic ✅ must NOT appear once the row is rendered as completed.
+    assert "✅ *NVDA*" not in progress
+
+
 async def test_progress_renders_cancelled() -> None:
     """`_format_digest_progress` renders the ⛔ cancelled state."""
     from tg_bot.handlers.callbacks import _format_digest_progress
@@ -924,6 +950,10 @@ SCENARIOS = [
     ("fanout silent on empty watchlist", test_fanout_empty_watchlist_silent),
     ("fanout Forbidden auto-disables digest", test_fanout_forbidden_disables),
     ("fanout summary message renders", test_fanout_summary_renders),
+    (
+        "progress completed row matches summary",
+        test_progress_completed_row_matches_summary,
+    ),
     ("progress render handles cancelled state", test_progress_renders_cancelled),
     ("summary tally includes cancelled count", test_summary_tally_includes_cancelled),
     (
