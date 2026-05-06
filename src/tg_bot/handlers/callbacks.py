@@ -866,8 +866,15 @@ async def _analyze_one_for_digest(
     shared digest message — same LangChain hook as the manual flow.
     """
     sem = _get_run_semaphore()
-    await sem.acquire()
+    # Defensive: track whether acquire actually completed before releasing.
+    # CPython 3.11+ asyncio.Semaphore.acquire handles cancel-during-await
+    # correctly (re-releases if the slot was given), but the `acquired`
+    # flag mirrors the manual flow's pattern and survives any future
+    # behavior change in CPython's primitive.
+    acquired = False
     try:
+        await sem.acquire()
+        acquired = True
         if not TRADINGAGENTS_AVAILABLE:
             return None
         # Flip the digest status from ⏳ → "Starting…" the moment we have
@@ -904,7 +911,8 @@ async def _analyze_one_for_digest(
 
         return {"ticker": ticker, "signal": signal, "telegraph_url": telegraph_url}
     finally:
-        sem.release()
+        if acquired:
+            sem.release()
 
 
 _DIGEST_PROGRESS_INTERVAL = 2.0  # min seconds between progressive edits
@@ -1136,6 +1144,15 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
                 await user_config_storage.disable_digest(user_id)
                 cancel_digest_job(application, user_id)
                 blocked = True
+                # User can't receive the output anyway — abort the
+                # remaining fan-out so we stop spending LLM tokens on
+                # a chat we'll never deliver to. Mirrors the user-tap
+                # cancel path: threading event for in-flight tickers,
+                # asyncio.cancel for pending ones.
+                cancel_event.set()
+                for t in tasks_holder:
+                    if not t.done():
+                        t.cancel()
             except Exception as e:
                 # "message is not modified" or transient — keep going.
                 logger.debug("digest progress edit skipped: %s", e)

@@ -145,11 +145,32 @@ class UserConfigStorage(JsonStorage):
 
         Skips entries missing any of: enabled flag, hour_local, tz, chat_id —
         these are partial states from an in-progress picker session.
+
+        Defensive: a corrupted JSON file or hand-edit could leave the
+        bucket or its digest block as something other than a dict. Skip
+        and log rather than crashing the whole _post_init walk for one
+        bad row.
         """
         result: list[tuple[str, dict[str, Any]]] = []
         for user_id, bucket in self._data.items():
+            if not isinstance(bucket, dict):
+                logger.warning(
+                    "iter_enabled_digests: skipping user %s — bucket is %s",
+                    user_id,
+                    type(bucket).__name__,
+                )
+                continue
             digest = bucket.get(self.DIGEST_KEY)
-            if not digest or not digest.get("enabled"):
+            if not isinstance(digest, dict):
+                # None / never-set → silently skip; non-dict → log loud.
+                if digest is not None:
+                    logger.warning(
+                        "iter_enabled_digests: skipping user %s — digest is %s",
+                        user_id,
+                        type(digest).__name__,
+                    )
+                continue
+            if not digest.get("enabled"):
                 continue
             if (
                 digest.get("hour_local") is None

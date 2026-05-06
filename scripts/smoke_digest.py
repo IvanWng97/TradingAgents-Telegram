@@ -820,6 +820,177 @@ async def test_progress_completed_row_matches_summary() -> None:
     assert "✅ *NVDA*" not in progress
 
 
+async def test_iter_enabled_skips_malformed_entries() -> None:
+    """A corrupt `digest` block (or non-dict bucket) must skip and
+    continue, not tank the whole _post_init walk for everyone."""
+    s, _ = fresh_storage()
+    # Inject malformed shapes directly into _data — bypassing the
+    # async setters (which would have rejected them).
+    s._data["good"] = {
+        "digest": {
+            "enabled": True,
+            "hour_local": 10,
+            "tz": "America/Los_Angeles",
+            "chat_id": 999,
+        }
+    }
+    s._data["bad-digest-shape"] = {"digest": "not-a-dict"}
+    s._data["bad-bucket-shape"] = ["this isn't even a dict"]
+    s._data["empty"] = {}
+
+    enabled = s.iter_enabled_digests()
+    user_ids = [uid for uid, _ in enabled]
+    assert user_ids == ["good"], f"only 'good' should survive; got {user_ids}"
+
+
+async def test_fanout_cancel_pending_via_task_cancel() -> None:
+    """Cancel while tickers haven't yet acquired the semaphore exercises
+    the `Task.cancel()` path (asyncio.CancelledError), not the
+    threading.Event path. Cap=1 so only one ticker enters the analyzing
+    state; the rest sit in `await sem.acquire()` and unwind via
+    Task.cancel."""
+    import threading
+
+    from tg_bot.handlers import callbacks as cbmod
+
+    class _W:
+        def get_watchlist(self, _u):
+            return ["A", "B", "C"]
+
+    started = threading.Event()
+    release = threading.Event()
+    a_b_c_calls: list[str] = []
+
+    # Force a fresh sem with cap=1 so only one ticker can be analyzing.
+    orig_sem = cbmod._run_semaphore
+    cbmod._run_semaphore = asyncio.Semaphore(1)
+
+    async def _slow(_uid, ticker, reporter=None):
+        # Mimic _analyze_one_for_digest's sem.acquire so the test
+        # actually exercises the pending → cancelled path.
+        sem = cbmod._get_run_semaphore()
+        await sem.acquire()
+        try:
+            a_b_c_calls.append(ticker)
+            started.set()
+            while not release.is_set():
+                await asyncio.sleep(0.02)
+            from tg_bot.progress import CancelledByUserError
+
+            raise CancelledByUserError("simulated mid-flight cancel")
+        finally:
+            sem.release()
+    orig_w = cbmod.watchlist_storage
+    orig_a = cbmod._analyze_one_for_digest
+    cbmod.watchlist_storage = _W()
+    cbmod._analyze_one_for_digest = _slow
+    try:
+        app = _FakeFanOutApp()
+        run_task = asyncio.create_task(cbmod.run_user_digest(app, 42, 999))
+
+        # Wait for ticker A to be in flight.
+        for _ in range(100):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.02)
+        assert started.is_set(), "first ticker never started"
+
+        # Tap cancel — A is in flight (cancel_event path), B and C are
+        # awaiting sem.acquire (Task.cancel path).
+        digest_cancels = app.chat_data[999]["digest_cancels"]
+        msg_id = next(iter(digest_cancels.keys()))
+
+        class _Ctx:
+            def __init__(self, cd):
+                self.chat_data = cd
+
+        await cbmod._handle_digest_cancel(
+            _Ctx(app.chat_data[999]), object(), str(msg_id)
+        )
+        release.set()
+        await run_task
+
+        # B and C never got a chance to call their fake analyzer — they
+        # were cancelled while waiting on the semaphore.
+        assert a_b_c_calls == ["A"], f"only A should have run; saw {a_b_c_calls}"
+        # Final summary must show all three as cancelled.
+        body = app.bot.edits[-1]["text"]
+        assert "3 cancelled" in body and "of 3" in body
+    finally:
+        cbmod.watchlist_storage = orig_w
+        cbmod._analyze_one_for_digest = orig_a
+        cbmod._run_semaphore = orig_sem
+
+
+async def test_fanout_forbidden_during_progress_edit() -> None:
+    """Initial header send succeeds, then the FIRST progress edit fails
+    with Forbidden. Digest must auto-disable, JobQueue job must cancel,
+    and the in-flight fan-out must abort (cancel_event set + tasks
+    cancelled) instead of grinding through every ticker silently."""
+    from tg_bot.handlers import callbacks as cbmod
+
+    class _ForbiddenOnFirstEdit(_FakeFanOutBot):
+        def __init__(self):
+            super().__init__()
+            self._edits_seen = 0
+
+        async def edit_message_text(self, chat_id, message_id, text, **kw):
+            self._edits_seen += 1
+            if self._edits_seen == 1:
+                from telegram.error import Forbidden
+
+                raise Forbidden("user blocked the bot mid-run")
+            return await super().edit_message_text(chat_id, message_id, text, **kw)
+
+    s, _ = fresh_storage()
+    await s.set_digest_tz("42", "America/Los_Angeles")
+    await s.set_digest_hour("42", 10, 999)
+
+    class _W:
+        def get_watchlist(self, _u):
+            return ["A", "B", "C"]
+
+    async def _slow(_uid, _t, reporter=None):
+        # Trigger an edit by reporting a step.
+        if reporter is not None:
+            await reporter.report_starting()
+        # Then sleep so cancel can interrupt.
+        for _ in range(50):
+            await asyncio.sleep(0.05)
+            if reporter and reporter.cancel_event and reporter.cancel_event.is_set():
+                from tg_bot.progress import CancelledByUserError
+
+                raise CancelledByUserError("forbidden auto-cancel")
+        return {"ticker": _t, "signal": "BUY", "telegraph_url": None}
+
+    orig_w = cbmod.watchlist_storage
+    orig_a = cbmod._analyze_one_for_digest
+    orig_uc = cbmod.user_config_storage
+    orig_iv = cbmod._DIGEST_PROGRESS_INTERVAL
+    cbmod.watchlist_storage = _W()
+    cbmod._analyze_one_for_digest = _slow
+    cbmod.user_config_storage = s
+    cbmod._DIGEST_PROGRESS_INTERVAL = 0.1
+    try:
+        app = _FakeFanOutApp()
+        app.bot = _ForbiddenOnFirstEdit()
+        # Pre-register a JobQueue entry so cancel_digest_job has work to do.
+        cbmod.register_digest_job(app, 42, s.get_digest("42"))
+        assert len(app.job_queue.get_jobs_by_name("digest:42")) == 1
+
+        await cbmod.run_user_digest(app, 42, 999)
+
+        # Auto-disabled.
+        assert s.get_digest("42")["enabled"] is False
+        # JobQueue job cancelled.
+        assert app.job_queue.get_jobs_by_name("digest:42") == []
+    finally:
+        cbmod.watchlist_storage = orig_w
+        cbmod._analyze_one_for_digest = orig_a
+        cbmod.user_config_storage = orig_uc
+        cbmod._DIGEST_PROGRESS_INTERVAL = orig_iv
+
+
 async def test_progress_renders_cancelled() -> None:
     """`_format_digest_progress` renders the ⛔ cancelled state."""
     from tg_bot.handlers.callbacks import _format_digest_progress
@@ -1005,6 +1176,18 @@ SCENARIOS = [
     ("fanout silent on empty watchlist", test_fanout_empty_watchlist_silent),
     ("fanout Forbidden auto-disables digest", test_fanout_forbidden_disables),
     ("fanout summary message renders", test_fanout_summary_renders),
+    (
+        "iter_enabled skips malformed entries",
+        test_iter_enabled_skips_malformed_entries,
+    ),
+    (
+        "fanout cancel pending via Task.cancel",
+        test_fanout_cancel_pending_via_task_cancel,
+    ),
+    (
+        "fanout Forbidden mid-progress-edit",
+        test_fanout_forbidden_during_progress_edit,
+    ),
     (
         "deferred render captures latest state",
         test_render_deferred_captures_latest_state,
