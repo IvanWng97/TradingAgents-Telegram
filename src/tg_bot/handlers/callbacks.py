@@ -454,20 +454,6 @@ async def _run_analysis_for_ticker(
         )
 
 
-async def _handle_info(
-    query, context: ContextTypes.DEFAULT_TYPE, user_id: int, ticker: str
-) -> None:
-    """Single-tap analysis from the watchlist menu."""
-    chat_id = query.message.chat_id
-    # Replace the watchlist menu with the analysis flow. send_photo can't
-    # replace a text message in place, so we delete the original here.
-    try:
-        await query.delete_message()
-    except Exception:
-        pass
-    await _run_analysis_for_ticker(context, chat_id, user_id, ticker)
-
-
 async def _handle_select_toggle(
     query, context: ContextTypes.DEFAULT_TYPE, user_id: int, ticker: str
 ) -> None:
@@ -753,11 +739,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data.startswith("quick:"):
         _, provider, model = data.split(":", 2)
         await _handle_quick(query, context, user_id, provider, model)
-    elif data.startswith("info:"):
-        # Back-compat: stale buttons in old chat history. New /watch renders
-        # don't generate `info:` callbacks anymore — the unified Done flow
-        # handles single + multi via `runall:`.
-        await _handle_info(query, context, user_id, data.split(":", 1)[1])
     elif data.startswith("multi:"):
         await _handle_select_toggle(query, context, user_id, data.split(":", 1)[1])
     elif data.startswith("wsel:"):
