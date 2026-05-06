@@ -23,12 +23,15 @@ from tg_bot.handlers import (
     button_callback,
     config_cmd,
     del_ticker,
+    digest_cmd,
     help_cmd,
     history_cmd,
     list_watchlist,
     start,
     status_cmd,
 )
+from tg_bot.handlers.callbacks import register_digest_job
+from tg_bot.storage import user_config_storage
 
 
 logging.basicConfig(
@@ -46,16 +49,35 @@ BOT_COMMANDS = [
     BotCommand("watch", "Show your watchlist"),
     BotCommand("list", "Show your watchlist (alias)"),
     BotCommand("config", "Configure LLM provider and models"),
+    BotCommand("digest", "Schedule a daily summary of your watchlist"),
     BotCommand("history", "Look up a past analysis"),
     BotCommand("status", "Show bot uptime, pool, and your LLM config"),
 ]
 
 
 async def _post_init(application: Application) -> None:
-    """Populate the Telegram client's Menu button + autocomplete and stamp
-    a process start time used by /status."""
+    """Populate the Telegram client's Menu button + autocomplete, stamp the
+    process start time used by /status, and re-register every enabled
+    user's daily digest with the in-memory JobQueue.
+
+    Storage is the source of truth; JobQueue holds in-memory schedules.
+    On every restart we walk `user_config_storage` and reconstruct the
+    schedule — partial / disabled rows are filtered by `iter_enabled_digests`.
+    """
     application.bot_data["start_time"] = time.time()
     await application.bot.set_my_commands(BOT_COMMANDS)
+    enabled = user_config_storage.iter_enabled_digests()
+    for user_id_str, digest in enabled:
+        try:
+            register_digest_job(application, int(user_id_str), digest)
+        except Exception as e:
+            logger.warning(
+                "post_init: failed to register digest for user %s: %s",
+                user_id_str,
+                e,
+            )
+    if enabled:
+        logger.info("digest: registered %d user(s) on startup", len(enabled))
 
 
 async def _post_stop(application: Application) -> None:
@@ -133,6 +155,7 @@ def _build_application() -> Application:
     application.add_handler(CommandHandler("watch", list_watchlist))
     application.add_handler(CommandHandler("list", list_watchlist))
     application.add_handler(CommandHandler("config", config_cmd))
+    application.add_handler(CommandHandler("digest", digest_cmd))
     application.add_handler(CommandHandler("history", history_cmd))
     application.add_handler(CommandHandler("status", status_cmd))
     application.add_handler(CallbackQueryHandler(button_callback))

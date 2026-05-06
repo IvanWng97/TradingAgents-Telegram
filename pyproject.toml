@@ -10,13 +10,20 @@ requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
-    # [rate-limiter] extra pulls in `aiolimiter` so AIORateLimiter can
-    # throttle outgoing Telegram requests under per-chat / per-bot caps.
-    "python-telegram-bot[rate-limiter]>=22.7",
+    # [rate-limiter] pulls in `aiolimiter` so AIORateLimiter can throttle
+    # outgoing Telegram requests under per-chat / per-bot caps.
+    # [job-queue] pulls in `apscheduler` so /digest can run_daily — without
+    # this extra, application.job_queue is None and digest scheduling
+    # silently no-ops.
+    "python-telegram-bot[rate-limiter,job-queue]>=22.7",
     "python-dotenv>=1.2.2",
     "telegraph>=2.2.0",
     "markdown>=3.10.2",
     "beautifulsoup4>=4.14.3",
+    # IANA tz database for `zoneinfo` — the python:3.14-slim base image
+    # doesn't ship system tzdata, so ZoneInfo("America/Los_Angeles") would
+    # raise ZoneInfoNotFoundError without this. Pure-Python wheel, ~700 KB.
+    "tzdata>=2025.2",
     "tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git",
 ]
 

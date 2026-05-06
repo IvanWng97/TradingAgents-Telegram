@@ -5,9 +5,12 @@ import logging
 import threading
 import time
 import uuid
+from datetime import date, time as dt_time
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import markdown
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import Forbidden
 from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
@@ -19,7 +22,9 @@ from tg_bot.analysis import (
 )
 from tg_bot.config import Config
 from tg_bot.chart import finviz_chart_url
+from tg_bot.digest import build_digest_response
 from tg_bot.formatters import (
+    DECISION_EMOJI,
     extract_summary,
     format_analysis_result_markdown,
     format_short_message,
@@ -31,7 +36,12 @@ from tg_bot.handlers.commands import (
     build_history_tickers_response,
     build_watchlist_response,
 )
-from tg_bot.progress import CancelledByUserError, ProgressReporter
+from tg_bot.progress import (
+    TOTAL_STEPS,
+    CancelledByUserError,
+    ProgressReporter,
+    resolve_step,
+)
 from tg_bot.storage import user_config_storage, watchlist_storage
 from tg_bot.telegraph_client import publish_to_telegraph
 
@@ -715,13 +725,596 @@ async def _handle_cancel(
         )
     elif what == "del":
         await query.edit_message_text("✅ Done\\.", parse_mode="MarkdownV2")
-    elif what in ("watch", "hist"):
+    elif what in ("watch", "hist", "digest"):
         try:
             await query.delete_message()
         except Exception:
             await query.edit_message_text("✅ Done\\.", parse_mode="MarkdownV2")
     else:
         await query.edit_message_text("Cancelled.")
+
+
+async def _redraw_digest(query, user_id: int, mode: str) -> None:
+    """Re-render the digest picker in `mode` (auto/hours/tz). Swallows the
+    'message is not modified' BadRequest that fires when the user taps the
+    same hour/tz they already had selected — there's nothing to update."""
+    digest = user_config_storage.get_digest(user_id)
+    text, kb = build_digest_response(digest, mode=mode)
+    try:
+        await query.edit_message_text(text, parse_mode="MarkdownV2", reply_markup=kb)
+    except Exception as e:
+        logger.debug("digest redraw skipped: %s", e)
+
+
+async def _handle_digest(
+    query, context: ContextTypes.DEFAULT_TYPE, user_id: int, data: str
+) -> None:
+    """Dispatch `digest:*` callbacks emitted by the picker.
+
+    Sub-actions:
+      - `digest:hour:HH`    — set hour, enable, capture chat_id, redraw hours
+      - `digest:tz:<IANA>`  — set tz; if active, stays active. Returns to hour grid.
+      - `digest:tzpick`     — swap to the tz picker
+      - `digest:hourpick`   — back-to-hours (← Back from tz screen)
+      - `digest:off`        — disable (preserves hour + tz), redraw hours
+      - `digest:run`        — fire fan-out now (stub until step 4 wires it)
+    """
+    chat_id = query.message.chat_id
+    parts = data.split(":", 2)
+    action = parts[1] if len(parts) > 1 else ""
+    arg = parts[2] if len(parts) > 2 else None
+
+    if action == "hour":
+        try:
+            hour = int(arg) if arg is not None else -1
+        except ValueError:
+            return
+        if await user_config_storage.set_digest_hour(user_id, hour, chat_id):
+            register_digest_job(
+                context.application, user_id, user_config_storage.get_digest(user_id)
+            )
+        await _redraw_digest(query, user_id, mode="hours")
+    elif action == "tz":
+        if arg and await user_config_storage.set_digest_tz(user_id, arg):
+            # Tz pick lands you back on the hour grid — natural next step
+            # for first-time setup; for a tz change it confirms by returning
+            # to the screen showing the active digest. If the digest is
+            # active, also re-register so the new tz takes effect.
+            digest = user_config_storage.get_digest(user_id)
+            if digest and digest.get("enabled"):
+                register_digest_job(context.application, user_id, digest)
+            await _redraw_digest(query, user_id, mode="hours")
+    elif action == "tzpick":
+        await _redraw_digest(query, user_id, mode="tz")
+    elif action == "hourpick":
+        await _redraw_digest(query, user_id, mode="hours")
+    elif action == "off":
+        await user_config_storage.disable_digest(user_id)
+        cancel_digest_job(context.application, user_id)
+        await _redraw_digest(query, user_id, mode="hours")
+    elif action == "run":
+        # Fire-and-forget so the callback returns immediately; the digest
+        # may take minutes if the watchlist is long. The fan-out itself
+        # serializes through the existing _run_semaphore so manual
+        # /watch runs aren't starved.
+        asyncio.create_task(run_user_digest(context.application, user_id, chat_id))
+
+
+# ─── digest fan-out + JobQueue plumbing ─────────────────────────────────
+
+
+class _DigestProgressReporter:
+    """Per-ticker reporter for the digest fan-out. Conforms to the
+    `ProgressReporter` interface that `_DelegatingProgressCallback`
+    consumes (`report` coroutine, `loop`, `cancel_event`) but instead of
+    editing its own Telegram message it calls `on_step` so the parent
+    `run_user_digest` can repaint the shared digest message.
+
+    Coalesces consecutive duplicate node names so a node that fires
+    multiple LLM calls only updates the status once.
+    """
+
+    def __init__(
+        self,
+        ticker: str,
+        loop: asyncio.AbstractEventLoop,
+        on_step,  # async (ticker, friendly: str, ordinal: int|None) -> None
+        cancel_event: threading.Event | None = None,
+    ) -> None:
+        self.ticker = ticker
+        self.loop = loop
+        self.on_step = on_step
+        # _DelegatingProgressCallback._dispatch reads cancel_event before
+        # every LLM-call boundary; a non-None event lets digest_cancel
+        # raise CancelledByUserError into in-flight tickers.
+        self.cancel_event = cancel_event
+        self._last_step: str | None = None
+
+    async def report(self, raw_node_name: str) -> None:
+        if raw_node_name == self._last_step:
+            return
+        self._last_step = raw_node_name
+        friendly, ordinal = resolve_step(raw_node_name)
+        try:
+            await self.on_step(self.ticker, friendly, ordinal)
+        except Exception as e:
+            logger.debug("digest progress callback failed: %s", e)
+
+    async def report_starting(self) -> None:
+        """Flip status to 'Starting…' right after sem.acquire — bridges
+        the gap between slot acquisition and the first LLM-callback
+        event. Without it, a ticker can sit in ⏳ for 5-30s during the
+        graph cold-start phase even though it's already running."""
+        try:
+            await self.on_step(self.ticker, "Starting…", None)
+        except Exception as e:
+            logger.debug("digest progress callback failed: %s", e)
+
+
+async def _analyze_one_for_digest(
+    user_id: int, ticker: str, reporter: _DigestProgressReporter | None = None
+) -> dict | None:
+    """Headless analysis for one ticker. Returns
+    {ticker, signal, telegraph_url} or None on failure.
+
+    Holds the global `_run_semaphore` for the duration so the digest
+    fan-out interleaves with manual /watch runs through the same FIFO
+    queue — a 50-ticker watchlist serializes naturally into batches of
+    `MAX_CONCURRENT_ANALYSES` instead of hammering the LLM provider.
+
+    `reporter`, when supplied, drives the per-ticker step display in the
+    shared digest message — same LangChain hook as the manual flow.
+    """
+    sem = _get_run_semaphore()
+    # Defensive: track whether acquire actually completed before releasing.
+    # CPython 3.11+ asyncio.Semaphore.acquire handles cancel-during-await
+    # correctly (re-releases if the slot was given), but the `acquired`
+    # flag mirrors the manual flow's pattern and survives any future
+    # behavior change in CPython's primitive.
+    acquired = False
+    try:
+        await sem.acquire()
+        acquired = True
+        if not TRADINGAGENTS_AVAILABLE:
+            return None
+        # Flip the digest status from ⏳ → "Starting…" the moment we have
+        # a slot. Without this, cold-start graph builds (5–30s) make the
+        # ticker look queued even though it's running.
+        if reporter is not None:
+            await reporter.report_starting()
+        try:
+            final_state, signal = await asyncio.to_thread(
+                run_trading_analysis,
+                ticker,
+                user_id,
+                user_config_storage,
+                reporter,
+            )
+        except Exception:
+            logger.exception("digest: analysis failed for %s", ticker)
+            return None
+        if final_state is None:
+            return None
+
+        # Publish the per-ticker Telegraph page so the digest summary can
+        # link to a full report per row. Skip silently on failure — the
+        # row just renders without a link.
+        chart_url = finviz_chart_url(ticker)
+        try:
+            md = format_analysis_result_markdown(ticker, final_state, signal)
+            html = markdown.markdown(md, extensions=["tables"])
+            html = f'<img src="{chart_url}"/>{html}'
+            telegraph_url = await publish_to_telegraph(f"{ticker} Analysis", html)
+        except Exception as e:
+            logger.warning("digest: telegraph publish failed for %s: %s", ticker, e)
+            telegraph_url = None
+
+        return {"ticker": ticker, "signal": signal, "telegraph_url": telegraph_url}
+    finally:
+        if acquired:
+            sem.release()
+
+
+_DIGEST_PROGRESS_INTERVAL = 2.0  # min seconds between progressive edits
+
+
+def _completed_digest_row(ticker_v2: str, result: dict) -> str:
+    """One MarkdownV2-safe row for a completed ticker. Used by both the
+    progress view and the final summary so a row's appearance is stable
+    once analysis lands — no jump from generic ✅ to a signal-coloured
+    emoji at the final-edit boundary."""
+    signal = (result.get("signal") or "—").strip()
+    emoji = DECISION_EMOJI.get(signal.upper(), "📊")
+    signal_v2 = escape_markdown(signal, version=2)
+    if result.get("telegraph_url"):
+        # MarkdownV2 link URLs only need to escape ')' and '\\'.
+        url = result["telegraph_url"].replace("\\", "\\\\").replace(")", "\\)")
+        return f"{emoji} *{ticker_v2}* — *{signal_v2}* [📄]({url})"
+    return f"{emoji} *{ticker_v2}* — *{signal_v2}*"
+
+
+def _format_digest_progress(
+    watchlist: list[str],
+    status: dict[str, object],
+    safe_date: str,
+) -> str:
+    """In-progress view. `status[ticker]` is one of:
+      - "pending"           → ⏳ TICKER
+      - ("analyzing", friendly, ordinal) → 📊 TICKER — Friendly (n/M)
+      - "cancelled"         → ⛔ TICKER — cancelled
+      - dict (result)       → ✅ TICKER — SIGNAL
+      - None                → ❌ TICKER — error
+    Watchlist order is preserved so the user can see exactly where the
+    fan-out is at any point.
+    """
+    done = sum(1 for s in status.values() if not (s == "pending" or _is_analyzing(s)))
+    n = len(watchlist)
+    lines = [f"🌙 *Daily Digest* — {safe_date}  \\({done}/{n}\\)\n"]
+    for ticker in watchlist:
+        s = status[ticker]
+        ticker_v2 = escape_markdown(ticker, version=2)
+        if s == "pending":
+            lines.append(f"⏳ {ticker_v2}")
+        elif _is_analyzing(s):
+            _, friendly, ordinal = s  # type: ignore[misc]
+            friendly_v2 = escape_markdown(friendly, version=2)
+            if ordinal is not None:
+                lines.append(
+                    f"📊 *{ticker_v2}* — {friendly_v2} \\({ordinal}/{TOTAL_STEPS}\\)"
+                )
+            else:
+                lines.append(f"📊 *{ticker_v2}* — {friendly_v2}")
+        elif s == "cancelled":
+            lines.append(f"⛔ *{ticker_v2}* — cancelled")
+        elif s is None:
+            lines.append(f"❌ *{ticker_v2}* — error")
+        else:
+            lines.append(_completed_digest_row(ticker_v2, s))  # type: ignore[arg-type]
+    return "\n".join(lines)
+
+
+def _is_analyzing(s: object) -> bool:
+    return isinstance(s, tuple) and len(s) == 3 and s[0] == "analyzing"
+
+
+def _format_digest_summary(
+    watchlist: list[str],
+    status: dict[str, object],
+    safe_date: str,
+) -> str:
+    """Final view: signal-emoji per row + Telegraph link, watchlist order."""
+    lines = [f"🌙 *Daily Digest* — {safe_date}\n"]
+    failed = cancelled = 0
+    n = len(watchlist)
+    for ticker in watchlist:
+        s = status[ticker]
+        ticker_v2 = escape_markdown(ticker, version=2)
+        if s == "cancelled":
+            lines.append(f"⛔ *{ticker_v2}* — cancelled")
+            cancelled += 1
+            continue
+        # Anything else that isn't a result-dict counts as failed —
+        # "pending" / "analyzing" only happen if the run was interrupted
+        # without going through the cancel path.
+        if not isinstance(s, dict):
+            lines.append(f"❓ *{ticker_v2}* — error")
+            failed += 1
+            continue
+        lines.append(_completed_digest_row(ticker_v2, s))
+    tally_parts: list[str] = []
+    if cancelled:
+        tally_parts.append(f"{cancelled} cancelled")
+    if failed:
+        tally_parts.append(f"{failed} failed")
+    if tally_parts:
+        lines.append(f"\n_{', '.join(tally_parts)} of {n}_")
+    return "\n".join(lines)
+
+
+def _digest_cancel_keyboard(message_id: int) -> InlineKeyboardMarkup:
+    """Cancel button attached to the digest header. callback_data carries
+    the message_id so the handler can find the right cancel-registry
+    entry — chat_data is keyed by chat, not by message."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "❌ Cancel digest",
+                    callback_data=f"digest_cancel:{message_id}",
+                )
+            ]
+        ]
+    )
+
+
+async def run_user_digest(application, user_id: int, chat_id: int) -> None:
+    """Fan-out for one user.
+
+    Sends a header listing every watchlist ticker as `⏳` plus a
+    "❌ Cancel digest" button, edits the header progressively as
+    analyses finish (throttled to `_DIGEST_PROGRESS_INTERVAL`), and
+    drops the button + replaces with the final signal-emoji summary
+    when done.
+
+    Cancellation: the button sets a shared `cancel_event` (threading)
+    so in-flight tickers' LangChain callback raises
+    `CancelledByUserError` at the next step boundary, and cancels
+    each pending ticker's asyncio.Task so they unwind without
+    acquiring a semaphore slot. Cancelled tickers render as `⛔`.
+
+    Auto-disables the digest on `Forbidden` (user blocked the bot) so
+    the JobQueue doesn't keep retrying every day.
+    """
+    watchlist = watchlist_storage.get_watchlist(user_id)
+    today = date.today().isoformat()
+    safe_date = escape_markdown(today, version=2)
+
+    if not watchlist:
+        logger.info("digest: skipping user %s — empty watchlist", user_id)
+        return
+
+    n = len(watchlist)
+    logger.info("digest: launching for user %s (%d tickers)", user_id, n)
+
+    # status[ticker]: "pending" | ("analyzing", friendly, ordinal) |
+    #                 "cancelled" | dict (completed result) | None (failed).
+    status: dict[str, object] = {t: "pending" for t in watchlist}
+
+    cancel_event = threading.Event()
+    # Populated below once the per-ticker tasks exist; the cancel handler
+    # iterates this list to .cancel() each. Mutable so the registry entry
+    # references the same list we mutate.
+    tasks_holder: list[asyncio.Task] = []
+
+    try:
+        header = await application.bot.send_message(
+            chat_id=chat_id,
+            text=_format_digest_progress(watchlist, status, safe_date),
+            parse_mode="MarkdownV2",
+        )
+    except Forbidden:
+        logger.warning("digest: user %s blocked the bot, disabling", user_id)
+        await user_config_storage.disable_digest(user_id)
+        cancel_digest_job(application, user_id)
+        return
+
+    cancel_kb = _digest_cancel_keyboard(header.message_id)
+    # Attach the cancel button now that the header has a message_id —
+    # send_message can't carry the callback_data because it doesn't
+    # know the id at send time. Cheap second call; the AIORateLimiter
+    # paces it.
+    try:
+        await application.bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=header.message_id,
+            reply_markup=cancel_kb,
+        )
+    except Exception as e:
+        logger.debug("digest: cancel-button attach skipped: %s", e)
+
+    # Register the cancel handle so the digest_cancel:<msg_id> callback
+    # can find it. Same per-chat pattern as analysis_cancels.
+    chat_data = application.chat_data[chat_id]
+    digest_cancels = chat_data.setdefault("digest_cancels", {})
+    digest_cancels[header.message_id] = {
+        "cancel_event": cancel_event,
+        "tasks": tasks_holder,
+    }
+
+    last_edit_at = 0.0
+    edit_in_flight = False
+    blocked = False
+
+    async def _render() -> None:
+        """Single-flight, throttle-deferring render.
+
+        If two state changes fire within the throttle window (common at
+        fan-out start when N tickers acquire the sem simultaneously),
+        only the first one schedules an edit — the rest bail. The
+        scheduled edit waits out the remaining cooldown and then reads
+        the *current* status dict, so the second ticker's transition
+        from ⏳ → 📊 isn't lost just because it raced with the first.
+        """
+        nonlocal last_edit_at, edit_in_flight, blocked
+        if blocked or edit_in_flight:
+            return
+        edit_in_flight = True
+        try:
+            wait = _DIGEST_PROGRESS_INTERVAL - (time.monotonic() - last_edit_at)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            if blocked:
+                return
+            last_edit_at = time.monotonic()
+            text = _format_digest_progress(watchlist, status, safe_date)
+            try:
+                # Re-attach the cancel button on every edit — Telegram
+                # drops reply_markup unless re-sent with each edit.
+                await application.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=header.message_id,
+                    text=text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=cancel_kb,
+                )
+            except Forbidden:
+                logger.warning(
+                    "digest: user %s blocked the bot mid-run, disabling", user_id
+                )
+                await user_config_storage.disable_digest(user_id)
+                cancel_digest_job(application, user_id)
+                blocked = True
+                # User can't receive the output anyway — abort the
+                # remaining fan-out so we stop spending LLM tokens on
+                # a chat we'll never deliver to. Mirrors the user-tap
+                # cancel path: threading event for in-flight tickers,
+                # asyncio.cancel for pending ones.
+                cancel_event.set()
+                for t in tasks_holder:
+                    if not t.done():
+                        t.cancel()
+            except Exception as e:
+                # "message is not modified" or transient — keep going.
+                logger.debug("digest progress edit skipped: %s", e)
+        finally:
+            edit_in_flight = False
+
+    async def _on_step(ticker: str, friendly: str, ordinal: int | None) -> None:
+        # Don't overwrite a "cancelled" status with a late step event
+        # that arrived after the cancel was processed but before the
+        # in-flight LLM call returned.
+        if status[ticker] == "cancelled":
+            return
+        status[ticker] = ("analyzing", friendly, ordinal)
+        await _render()
+
+    loop = asyncio.get_running_loop()
+
+    async def _wrapped(ticker: str) -> tuple[str, object]:
+        reporter = _DigestProgressReporter(
+            ticker, loop, _on_step, cancel_event=cancel_event
+        )
+        try:
+            result = await _analyze_one_for_digest(user_id, ticker, reporter)
+            # Race: cancel could have fired after analyze returned but
+            # before we record the result. Honour the flag — discard.
+            if cancel_event.is_set():
+                status[ticker] = "cancelled"
+            else:
+                status[ticker] = result
+        except (CancelledByUserError, asyncio.CancelledError):
+            status[ticker] = "cancelled"
+        except Exception:
+            logger.exception("digest: ticker %s failed unexpectedly", ticker)
+            status[ticker] = None
+        await _render()
+        return ticker, status[ticker]
+
+    try:
+        tasks = [asyncio.create_task(_wrapped(t)) for t in watchlist]
+        tasks_holder.extend(tasks)
+        await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        digest_cancels.pop(header.message_id, None)
+
+    if blocked:
+        return
+
+    # Final edit — drops the cancel button (run is over) and bypasses
+    # the throttle so the summary always lands.
+    try:
+        await application.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=header.message_id,
+            text=_format_digest_summary(watchlist, status, safe_date),
+            parse_mode="MarkdownV2",
+            reply_markup=None,
+        )
+    except Forbidden:
+        logger.warning("digest: user %s blocked the bot mid-run, disabling", user_id)
+        await user_config_storage.disable_digest(user_id)
+        cancel_digest_job(application, user_id)
+    except Exception as e:
+        logger.exception("digest: failed to edit summary for user %s: %s", user_id, e)
+
+
+async def _handle_digest_cancel(
+    context: ContextTypes.DEFAULT_TYPE, query, message_id_str: str
+) -> None:
+    """Cancel an in-progress digest run identified by its header
+    message_id. Sets the threading cancel_event (in-flight tickers
+    raise CancelledByUserError at the next LLM-call boundary) and
+    cancels each ticker's asyncio.Task (pending tickers unwind without
+    acquiring a slot).
+    """
+    try:
+        message_id = int(message_id_str)
+    except ValueError:
+        return
+    digest_cancels = context.chat_data.get("digest_cancels") or {}
+    entry = digest_cancels.get(message_id)
+    if entry is None:
+        # Already finished, or stale button from previous chat history.
+        logger.info("digest_cancel: no in-flight run for message_id=%s", message_id)
+        return
+    entry["cancel_event"].set()
+    cancelled = 0
+    for t in entry["tasks"]:
+        if not t.done():
+            t.cancel()
+            cancelled += 1
+    logger.info(
+        "digest_cancel: signalled message_id=%s — cancelled %d task(s)",
+        message_id,
+        cancelled,
+    )
+
+
+async def _digest_job_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """JobQueue callback — `context.job.data` carries {user_id, chat_id}."""
+    job = context.job
+    if job is None or not job.data:
+        return
+    await run_user_digest(
+        context.application,
+        int(job.data["user_id"]),
+        int(job.data["chat_id"]),
+    )
+
+
+def _digest_job_name(user_id: int) -> str:
+    return f"digest:{user_id}"
+
+
+def register_digest_job(application, user_id: int, digest: dict | None) -> None:
+    """(Re-)schedule the daily run for `user_id`.
+
+    Cancels any existing job under the same name first so an hour or tz
+    change replaces (not duplicates) the previous schedule. No-ops if
+    JobQueue isn't available, the digest is incomplete, or the digest
+    is disabled — caller's responsibility to call cancel_digest_job
+    explicitly when disabling.
+    """
+    if not application.job_queue:
+        logger.warning("register_digest_job: JobQueue not configured")
+        return
+    cancel_digest_job(application, user_id)
+    if not digest or not digest.get("enabled"):
+        return
+    hour = digest.get("hour_local")
+    tz_str = digest.get("tz")
+    chat_id = digest.get("chat_id")
+    if hour is None or not tz_str or not chat_id:
+        logger.warning(
+            "register_digest_job: incomplete digest for user %s: %s", user_id, digest
+        )
+        return
+    try:
+        fire_time = dt_time(hour=int(hour), minute=0, tzinfo=ZoneInfo(tz_str))
+    except (ZoneInfoNotFoundError, ValueError) as e:
+        logger.warning("register_digest_job: bad tz/hour for user %s: %s", user_id, e)
+        return
+    application.job_queue.run_daily(
+        _digest_job_callback,
+        time=fire_time,
+        name=_digest_job_name(user_id),
+        data={"user_id": user_id, "chat_id": chat_id},
+    )
+    logger.info(
+        "digest: registered for user %s at %02d:00 %s", user_id, int(hour), tz_str
+    )
+
+
+def cancel_digest_job(application, user_id: int) -> int:
+    """Remove any scheduled digest job for `user_id`. Returns count cancelled."""
+    if not application.job_queue:
+        return 0
+    jobs = application.job_queue.get_jobs_by_name(_digest_job_name(user_id))
+    for j in jobs:
+        j.schedule_removal()
+    if jobs:
+        logger.info("digest: cancelled %d job(s) for user %s", len(jobs), user_id)
+    return len(jobs)
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -747,6 +1340,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _handle_page_nav(query, context, user_id, data.split(":", 1)[1])
     elif data.startswith("runall:"):
         await _handle_done(query, context, user_id)
+    elif data.startswith("digest_cancel:"):
+        await _handle_digest_cancel(context, query, data.split(":", 1)[1])
+    elif data.startswith("digest:"):
+        await _handle_digest(query, context, user_id, data)
     elif data.startswith("del:"):
         await _handle_del(query, user_id, data.split(":", 1)[1])
     elif data.startswith("cancel_analysis:"):
