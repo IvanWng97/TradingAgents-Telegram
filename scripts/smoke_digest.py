@@ -880,6 +880,7 @@ async def test_fanout_cancel_pending_via_task_cancel() -> None:
             raise CancelledByUserError("simulated mid-flight cancel")
         finally:
             sem.release()
+
     orig_w = cbmod.watchlist_storage
     orig_a = cbmod._analyze_one_for_digest
     cbmod.watchlist_storage = _W()
