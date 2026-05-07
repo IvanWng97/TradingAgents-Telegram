@@ -20,19 +20,14 @@ Telegram bot wrapping the [TradingAgents](https://github.com/TauricResearch/Trad
 
 ## 🚀 Features
 
-- 🤖 **Multi-Agent Analysis**: Wraps [TradingAgents](https://github.com/TauricResearch/TradingAgents) — analyst → researcher → trader → risk-manager LLM agents collaborate on each ticker.
+- 🤖 **Multi-Agent Analysis**: Wraps [TradingAgents](https://github.com/TauricResearch/TradingAgents) — analyst → researcher → trader → risk-manager LLM agents collaborate on each ticker, output is a finviz chart + decision + Telegraph link.
 - 📋 **Watchlist Management**: Curate tickers via `/add`, `/del`, `/watch`. Each is yfinance-validated; class-share dot forms (`BRK.B`) auto-correct to dash form (`BRK-B`).
 - ⚡ **Parallel Execution**: Tap multiple tickers and they run in parallel, gated by `TG_BOT_MAX_CONCURRENT_ANALYSES`. Overflow shows `⏳ Queued` until a slot frees.
-- ⏳ **Live Progress Streaming**: Per-step pipeline progress streams back into the Telegram message caption while the analysis runs.
-- 🛑 **Cooperative Cancel**: Each in-flight analysis carries a ❌ Cancel button; cancellation is checked at every LLM-call boundary so the abort is near-instant.
+- ⏳ **Live Progress + Cancel**: Per-step pipeline progress streams back into the Telegram message caption. Each in-flight analysis carries a ❌ Cancel button — cancellation is checked at every LLM-call boundary so the abort is near-instant.
 - 🌅 **Daily Digest**: `/digest` schedules a recurring run of your full watchlist at any hour + IANA timezone, posting one summary message per day with a Telegraph link per ticker.
 - 📜 **Analysis History**: `/history` browses every saved analysis by ticker → date and republishes to Telegraph on demand, with `← Back` round-trip navigation.
 - 🤹 **Multi-LLM Provider**: OpenAI, DeepSeek, Anthropic, Google, xAI, Qwen, GLM, Ollama — per-user `/config` picks provider + deep-think + quick-think model independently.
-- 📈 **Finviz Charts + Telegraph Reports**: Each analysis posts a finviz daily chart inline, with a Telegraph link to the full multi-agent rationale.
-- 🔐 **Access Control**: `ALLOWED_USER_IDS` allowlist gates every update; rejection responds with the requesting user's Telegram ID for easy whitelisting.
-- 🐳 **Docker-Ready**: Multi-arch (`linux/amd64` + `linux/arm64`) prebuilt image on Docker Hub, daily-rebuilt to track upstream `tradingagents@HEAD`.
-- 💾 **Durable Storage**: JSON-backed per-user state with atomic + `fsync` writes — survives mid-write crashes and power loss.
-- 🛡 **Hardened CI**: Per-arch Trivy scanning, CodeQL `security-extended`, weekly Dependabot, provenance + SBOM attestations published with every image.
+- 🛡 **Production-grade**: `ALLOWED_USER_IDS` allowlist, atomic + `fsync` per-user JSON storage, multi-arch Docker image (`amd64` + `arm64`) daily-rebuilt to track upstream, CodeQL `security-extended` + Trivy scanning, provenance + SBOM attestations.
 
 ## Demo
 
@@ -78,27 +73,7 @@ Get a bot token from [@BotFather](https://t.me/BotFather) (`/newbot`); a Telegra
 >
 > 💰 **Cost expectations**: each analysis runs ~12 LLM calls across the agent pipeline. Per-ticker rough estimates: `deepseek-v4` ≈ $0.01, `gpt-4o` ≈ $0.20, `claude-sonnet-4` ≈ $0.40. Tapping `Run all` on a 10-ticker watchlist can easily hit single-digit dollars in minutes — pick your provider accordingly.
 
-## Run locally (Python venv)
-
-```bash
-git clone https://github.com/IvanWng97/TradingAgents-Telegram.git
-cd TradingAgents-Telegram
-
-# 1. Set up venv + install
-python3.14 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-
-# 2. Configure secrets — same .env contents as the Docker setup above
-$EDITOR .env
-
-# 3. (macOS only, once per fresh install) clear macOS UF_HIDDEN flag
-#    on the editable .pth so Python 3.14 stops skipping it
-chflags nohidden .venv/lib/python3.14/site-packages/*.pth
-
-# 4. Run
-python -m tg_bot
-```
+Want to run from source instead? See [`docs/DEVELOPMENT.md`](./docs/DEVELOPMENT.md).
 
 ## Commands
 
@@ -137,63 +112,12 @@ Set in `.env` (Docker loads via `env_file:`, local picks up via `python-dotenv`)
 
 Supported LLM providers (set via `/config`): `openai`, `google`, `anthropic`, `xai`, `deepseek`, `qwen`, `glm`, `ollama` (have built-in model catalogs); `openrouter`, `azure` (require manual model IDs — UI not yet wired).
 
-## Layout
-
-```
-src/tg_bot/
-├── __main__.py            # `python -m tg_bot`
-├── app.py                 # Application builder, BOT_COMMANDS, post_init / post_stop
-├── auth.py                # ALLOWED_USER_IDS gate (TypeHandler at group=-1)
-├── config.py              # env-driven Config
-├── analysis.py            # TradingAgents adapter, graph pool, model catalog
-├── chart.py               # finviz_chart_url
-├── formatters.py          # Telegram caption (signal emoji + summary) + Telegraph markdown
-├── progress.py            # ProgressReporter + cancel-aware LangChain BaseCallbackHandler
-├── history.py             # disk-readers for past analyses
-├── telegraph_client.py    # sanitize + publish (table → bullet rewrite)
-├── validation.py          # yfinance-backed ticker validation + class-share rewrite
-├── handlers/{commands,callbacks}.py
-└── storage/                # JSON-backed, atomic + fsync writes; per-user
-    ├── _base.py            # JsonStorage (async wrapper for mutations)
-    ├── watchlist.py
-    ├── user_config.py
-    └── __init__.py         # exports singletons
-data/                       # runtime state (watchlist.json, user_config.json)
-scripts/                    # smoke_concurrent.py, smoke_parallel.py
-.github/workflows/          # ruff lint, Docker build with SHA-check skip, CodeQL
-pyproject.toml              # deps + package metadata
-Dockerfile, docker-compose.yml
-```
-
 ## Troubleshooting
 
-| Symptom | Likely cause / fix |
-|---|---|
-| `TradingAgents not available: …` at startup | Upstream `tradingagents` install failed during the image build. Try `docker compose pull && docker compose up -d` — the daily-rebuilt image often resolves transient git/pip issues. For local dev, re-run `pip install -e ".[dev]"`. |
-| `Auth disabled — ALLOWED_USER_IDS empty…` (WARNING at startup) | The bot is open to the public. Set `ALLOWED_USER_IDS=<your_id>` in `.env` and restart. Use [@userinfobot](https://t.me/userinfobot) to find your numeric ID. |
-| Bot replies "🚫 Not authorized…" with a Telegram ID | That ID isn't in `ALLOWED_USER_IDS`. Add it (comma-separated for multiple users) and restart. |
-| Analysis caption stuck at "📊 Analyzing… please wait" with no progress | LLM authorization or rate-limit error. Check `docker compose logs -f` for the actual error from `tradingagents`. Common: provider key for the wrong service (e.g. `OPENAI_API_KEY` set but `/config` selected `deepseek`). |
-| `Analysis failed. TradingAgents module not available.` in chat | Server-side import error — check `docker compose logs`. Usually a stale image; `docker compose pull` to refresh. |
-| `/history` empty even after running analyses | `TRADINGAGENTS_RESULTS_DIR` defaults to a path inside the container that gets wiped on restart. Set it to `/app/data/ta-logs` (or similar under `/app/data`) so it persists via the bind mount. |
+Common startup / runtime issues and fixes: [`docs/TROUBLESHOOTING.md`](./docs/TROUBLESHOOTING.md).
 
-## Development
+## More
 
-Only needed if you'll be modifying code. Install the `[dev]` extra (adds `ruff` + `pre-commit`) and wire up the pre-commit hook so format/lint runs on every commit:
-
-```bash
-pip install -e ".[dev]"
-pre-commit install   # one-time: lints/formats on every git commit
-```
-
-Smoke tests live under `scripts/`:
-
-```bash
-python scripts/smoke_concurrent.py   # 11 orchestration scenarios
-python scripts/smoke_parallel.py     # parallelism wall-time check
-```
-
-## TODO
-
-- **Same-day result cache + `/refresh`** — `_run_analysis_for_ticker` re-runs the full graph even if the same `(ticker, date, provider, deep, quick)` was analyzed minutes ago. Reusing tradingagents' on-disk `full_states_log_<date>.json` would make the second tap free + instant; `/refresh NVDA` opts back into a fresh run.
-
-See [`CLAUDE.md`](./CLAUDE.md) for architecture notes, key contracts, and current limitations.
+- [`docs/DEVELOPMENT.md`](./docs/DEVELOPMENT.md) — local dev setup, pre-commit, smoke tests.
+- [`docs/TODO.md`](./docs/TODO.md) — roadmap items not yet started.
+- [`CLAUDE.md`](./CLAUDE.md) — architecture notes, key contracts, and current limitations.
