@@ -41,17 +41,13 @@ Sample published analysis: [BRK-B — 2026-05-05](https://telegra.ph/BRK-B-Analy
 
 </div>
 
-## Deploy on a VPS — Docker (recommended)
-
-A prebuilt image is published to Docker Hub at [`ivanwng97/tradingagents-telegram:latest`](https://hub.docker.com/r/ivanwng97/tradingagents-telegram), so you don't need to clone the repo or build locally.
-
-### One-line install
+## Install
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/IvanWng97/TradingAgents-Telegram/main/start.sh)
 ```
 
-The script asks for the four things you need (bot token, your Telegram user ID, Telegraph token — auto-creates one if you don't have it, and your LLM provider + key), drops a configured `.env` + `docker-compose.yml` into `./tradingagents-telegram`, pulls the image, and prints the `docker compose up -d` you run next.
+Prompts for your bot token, Telegram user ID, Telegraph token (auto-creates one if you skip), and an LLM provider + key. Drops a configured `.env` + [`docker-compose.yml`](./docker-compose.yml) into `./tradingagents-telegram`, pulls the [prebuilt image](https://hub.docker.com/r/ivanwng97/tradingagents-telegram), and prints the `docker compose up -d` to run next.
 
 Prefer to do it by hand? See [`docs/MANUAL_INSTALL.md`](./docs/MANUAL_INSTALL.md).
 
