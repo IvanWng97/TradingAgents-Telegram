@@ -33,45 +33,80 @@ Telegram bot wrapping the [TradingAgents](https://github.com/TauricResearch/Trad
 
 Sample published analysis: [BRK-B — 2026-05-05](https://telegra.ph/BRK-B-Analysis-05-05-2). Each `Run` from `/watch` produces a Telegraph page like this — chart + decision + multi-agent rationale.
 
-<!-- TODO: drop a screenshot/GIF of the bot in action here — e.g. the `/watch` paginated keyboard, or a completed analysis caption with cancel button. -->
+<div align="center">
+
+| `/add` + `/watch` analysis | `/digest` daily summary | Telegraph Instant View |
+|:---:|:---:|:---:|
+| <img src="assets/screenshots/watch.jpg" width="260" alt="Watchlist analysis with finviz chart, signal emoji, summary, and View Full Report link"> | <img src="assets/screenshots/digest.jpg" width="260" alt="Daily Digest message listing each ticker with signal emoji and a Telegraph instant-view preview"> | <img src="assets/screenshots/telegraph.jpg" width="260" alt="Telegraph page rendered in Telegram's Instant View — full multi-agent analysis with chart"> |
+
+</div>
 
 ## Deploy on a VPS — Docker (recommended)
 
-A prebuilt image is published to Docker Hub at [`ivanwng97/tradingagents-telegram:latest`](https://hub.docker.com/r/ivanwng97/tradingagents-telegram), so you don't need to clone the repo or build locally — just grab the compose file + `.env` and run.
+A prebuilt image is published to Docker Hub at [`ivanwng97/tradingagents-telegram:latest`](https://hub.docker.com/r/ivanwng97/tradingagents-telegram), so you don't need to clone the repo or build locally.
+
+### One-line install
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/IvanWng97/TradingAgents-Telegram/main/start.sh)
+```
+
+The script asks for the four things you need (bot token, your Telegram user ID, Telegraph token — auto-creates one if you don't have it, and your LLM provider + key), drops a configured `.env` + `docker-compose.yml` into `./tradingagents-telegram`, pulls the image, and prints the `docker compose up -d` you run next.
+
+Prefer to do it by hand? See [Manual install](#manual-install) below.
+
+### First-time setup in Telegram
+
+Once `docker compose logs -f` shows `Application started`, find your bot in Telegram (the handle BotFather gave you) and run through these:
+
+1. **`/start`** — confirms the bot is reachable.
+   - If you see *"Not authorized. Your user ID is `913259200`."* — the auth gate rejected you. Add that ID to `ALLOWED_USER_IDS` in `.env` (comma-separated for multiple users), then `docker compose up -d` to restart the bot. Retry `/start`.
+2. **`/config`** — pick your LLM provider, then a deep-think model, then a quick-think model. The deep model handles the heavy reasoning (researcher, risk-judge); the quick model runs the cheaper tool-calling steps. Without this step every analysis falls back to `DEFAULT_CONFIG` (currently `o4-mini`), which only works if you set `OPENAI_API_KEY`.
+3. **`/add NVDA AAPL`** — add a couple of tickers. Each is yfinance-validated; class-share dot forms (`BRK.B`) auto-correct to dash form (`BRK-B`).
+4. **`/watch`** — tap a ticker and `✅ Done` to run your first analysis. Per-step progress streams into the message caption; expect 1–3 min depending on provider.
+5. **(Optional) `/digest`** — schedule a daily auto-run. Pick a time zone, an hour, then tap `📋 Tickers` to opt-in which symbols should run each day (new users start with an empty filter — must opt in).
+
+> ⚠️ **Leaving `ALLOWED_USER_IDS` empty makes the bot open to anyone who finds your bot handle, and they will burn your LLM tokens.** Auth is the only thing standing between a stranger and your provider bill — set it.
+
+### Cost expectations
+
+Each analysis runs ~12 LLM calls across the agent pipeline. Per-ticker rough estimates: `deepseek-v4` ≈ $0.01, `gpt-4o` ≈ $0.20, `claude-sonnet-4` ≈ $0.40. Tapping `✅ Done` on a 10-ticker selection can easily hit single-digit dollars in minutes — pick your provider accordingly. The `/digest` filter exists partly so you can run cheap providers across a long watchlist daily without surprise bills.
+
+### Upgrade later
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+The image is rebuilt automatically by a daily GitHub Action whenever upstream [`tradingagents`](https://github.com/TauricResearch/TradingAgents) advances; the cron skips the build when the SHA hasn't changed, so you only pull a new image when there's actually new upstream code.
+
+### Manual install
+
+If you don't want to run `start.sh`, do it yourself:
+
+| Secret | Where to get it |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | DM [@BotFather](https://t.me/BotFather), send `/newbot`, follow the prompts. |
+| `TELEGRAPH_ACCESS_TOKEN` | `curl 'https://api.telegra.ph/createAccount?short_name=YourBot&author_name=YourBot'` — copy the `access_token` from the JSON response. |
+| Your Telegram user ID | DM [@userinfobot](https://t.me/userinfobot) any message — it replies with your numeric ID instantly. |
+| One LLM provider key | Pick whichever provider you'll use (DeepSeek, OpenAI, Anthropic, Google, xAI, Qwen, GLM, Ollama). You'll select the matching provider via `/config` after the bot is up. |
 
 ```bash
 mkdir tradingagents-telegram && cd tradingagents-telegram
 
-# 1. Grab the compose file (it points at the prebuilt image)
+# Compose file + env template (no build needed — points at the prebuilt image)
 curl -O https://raw.githubusercontent.com/IvanWng97/TradingAgents-Telegram/main/docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/IvanWng97/TradingAgents-Telegram/main/.env.example -o .env
 
-# 2. Configure secrets
-cat > .env <<'EOF'
-TELEGRAM_BOT_TOKEN=...
-TELEGRAPH_ACCESS_TOKEN=...
-ALLOWED_USER_IDS=12345678              # IMPORTANT: leave empty only if you trust the public
-DEEPSEEK_API_KEY=...                   # or OPENAI_API_KEY / ANTHROPIC_API_KEY / etc.
-TRADINGAGENTS_RESULTS_DIR=/app/data/ta-logs
-TRADINGAGENTS_CACHE_DIR=/app/data/ta-cache
-EOF
+# Open .env, fill in the four secrets above
+$EDITOR .env
 
-# 3. Pull + run
 docker compose pull
 docker compose up -d
 docker compose logs -f
 ```
 
 `docker-compose.yml` bind-mounts `./data` into the container so watchlists, LLM settings, and (with the env vars above) `/history` data and the yfinance cache survive restarts. `.env` is loaded via `env_file:` and is never baked into the image.
-
-**Upgrade later**: `docker compose pull && docker compose up -d`. The image is rebuilt automatically by a daily GitHub Action whenever upstream [`tradingagents`](https://github.com/TauricResearch/TradingAgents) advances; the cron skips the build when the SHA hasn't changed, so you only pull a new image when there's actually new upstream code.
-
-Get a bot token from [@BotFather](https://t.me/BotFather) (`/newbot`); a Telegraph access token from [Telegraph's API docs](https://telegra.ph/api).
-
-> ⚠️ Leaving `ALLOWED_USER_IDS` empty makes the bot open to anyone who finds your bot handle, and they will burn your LLM tokens. The bot replies with the requesting user's Telegram ID on rejection so you can whitelist them.
->
-> Don't know your Telegram user ID? Forward any message to [@userinfobot](https://t.me/userinfobot) — it replies with your numeric ID instantly.
->
-> 💰 **Cost expectations**: each analysis runs ~12 LLM calls across the agent pipeline. Per-ticker rough estimates: `deepseek-v4` ≈ $0.01, `gpt-4o` ≈ $0.20, `claude-sonnet-4` ≈ $0.40. Tapping `Run all` on a 10-ticker watchlist can easily hit single-digit dollars in minutes — pick your provider accordingly.
 
 Want to run from source instead? See [`docs/DEVELOPMENT.md`](./docs/DEVELOPMENT.md).
 
