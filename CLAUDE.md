@@ -37,8 +37,8 @@ Top-level: `pyproject.toml` (deps), `Dockerfile`, `docker-compose.yml`, `.env`, 
 |---|---|
 | Install dev | `pip install -e .` (then `chflags nohidden .venv/lib/python3.14/site-packages/*.pth` once on macOS — see "macOS .pth quirk" below) |
 | Run locally | `python -m tg_bot` (CWD must contain `.env` and `data/`) |
-| Build & deploy | `docker compose up -d --build` |
-| Update | `git pull && docker compose up -d --build` (data/ persists via bind mount) |
+| Build & deploy | `docker-compose up -d --build` |
+| Update | `git pull && docker-compose up -d --build` (data/ persists via bind mount) |
 
 `TG_BOT_DATA_DIR` env var overrides the default `data/` path.
 
@@ -148,7 +148,7 @@ Apply once after each fresh install. Docker (Linux) is unaffected.
 - **Watchlist pagination + bulk select.** `/watch` keyboard now paginates at 9 tickers/page (3×3) when the watchlist exceeds that size. New `wsel:all` / `wsel:clear` for bulk selection across all pages, `wpage:prev` / `wpage:next` for nav, central `📄 N/M` indicator (`wpage:noop`). Selection (`chat_data["watch_selection"]`) and page (`chat_data["watch_page"]`) persist together; both reset on each `/watch`.
 - **Concurrency rebuilt around `asyncio.Semaphore`.** `MAX_CONCURRENT_ANALYSES` (env: `TG_BOT_MAX_CONCURRENT_ANALYSES`) caps parallel runs at the coroutine level. The graph pool's per-key cap matches it, so the pool's blocking-queue branch is unreachable. Queue waits use `asyncio.wait([sem.acquire(), cancel_async.wait()])` racing both events — instant cancel response while queued, no polling churn. Cancel registry now stores both `event` (threading) and `async_event` (asyncio).
 - **Telegram resilience**: `AIORateLimiter` middleware throttles outgoing calls under per-bot/per-chat caps. HTTP timeouts raised to 30s read/write/pool, 15s connect (PTB defaults of ~5s were getting hit by Telegram's slow finviz URL fetches). `send_photo` retries once on `TimedOut` with 1s backoff. Cancel button attached via `send_photo(reply_markup=...)` directly — eliminates the second API call that was getting rate-limit-dropped.
-- **Graceful shutdown** via `Application.builder().post_stop(_post_stop)`. SIGTERM/SIGINT iterates every chat's `analysis_cancels` registry, sets both `event` and `async_event` for every entry, then sleeps 2s for handlers to render "❌ Cancelled" captions before exit. Matters for `docker compose up -d --build` rollouts.
+- **Graceful shutdown** via `Application.builder().post_stop(_post_stop)`. SIGTERM/SIGINT iterates every chat's `analysis_cancels` registry, sets both `event` and `async_event` for every entry, then sleeps 2s for handlers to render "❌ Cancelled" captions before exit. Matters for `docker-compose up -d --build` rollouts.
 - **`/status` command** + `analysis.pool_stats()` helper. Tracks uptime via `bot_data["start_time"]` (set in `_post_init`) and a global `bot_data["analysis_count"]` incremented at the top of every `_run_analysis_for_ticker` invocation. Surfaces graph pool stats (key count + total instances) for diagnosing pool exhaustion.
 - **Mid-analysis cancellation.** Each progress message now carries a ❌ Cancel button. Tapping it sets a `threading.Event` checked at every LLM-call boundary in `progress._dispatch`; raising `CancelledByUserError` aborts the pipeline. Required `concurrent_updates=True` on the PTB Application (otherwise the cancel update queues behind the in-flight handler) and `raise_error = True` on the callback handler (otherwise LangChain swallows the exception). Multiple race-close checks in the analysis flow ensure a late tap discards the result.
 - **Graph pool replaces single-instance cache.** `GraphPool` per `(provider, deep, quick)` allows N parallel runs to each hold their own instance (no lock contention) while still caching across runs. Builds happen outside the mutex so cold-start parallelism scales. Single-tap and queue paths both go through the pool.

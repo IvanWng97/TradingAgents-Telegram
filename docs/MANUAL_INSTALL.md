@@ -23,9 +23,9 @@ curl -fsSL https://raw.githubusercontent.com/IvanWng97/TradingAgents-Telegram/ma
 # Open .env, fill in the four secrets above
 $EDITOR .env
 
-docker compose pull
-docker compose up -d
-docker compose logs -f
+docker-compose pull
+docker-compose up -d
+docker-compose logs -f
 ```
 
 `docker-compose.yml` bind-mounts `./data` into the container so watchlists, LLM settings, and (with the env vars above) `/history` data and the yfinance cache survive restarts. `.env` is loaded via `env_file:` and is never baked into the image.

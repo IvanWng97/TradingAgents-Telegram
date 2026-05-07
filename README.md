@@ -47,16 +47,16 @@ Sample published analysis: [BRK-B — 2026-05-05](https://telegra.ph/BRK-B-Analy
 bash <(curl -fsSL https://raw.githubusercontent.com/IvanWng97/TradingAgents-Telegram/main/start.sh)
 ```
 
-Prompts for your bot token, Telegram user ID, Telegraph token (auto-creates one if you skip), and an LLM provider + key. Drops a configured `.env` + [`docker-compose.yml`](./docker-compose.yml) into `./tradingagents-telegram`, pulls the [prebuilt image](https://hub.docker.com/r/ivanwng97/tradingagents-telegram), and prints the `docker compose up -d` to run next.
+Prompts for your bot token, Telegram user ID, Telegraph token (auto-creates one if you skip), and an LLM provider + key. Drops a configured `.env` + [`docker-compose.yml`](./docker-compose.yml) into `./tradingagents-telegram`, pulls the [prebuilt image](https://hub.docker.com/r/ivanwng97/tradingagents-telegram), and prints the `docker-compose up -d` to run next.
 
 Prefer to do it by hand? See [`docs/MANUAL_INSTALL.md`](./docs/MANUAL_INSTALL.md).
 
 ### First-time setup in Telegram
 
-Once `docker compose logs -f` shows `Application started`, find your bot in Telegram (the handle BotFather gave you) and run through these:
+Once `docker-compose logs -f` shows `Application started`, find your bot in Telegram (the handle BotFather gave you) and run through these:
 
 1. **`/start`** — confirms the bot is reachable.
-   - If you see *"Not authorized. Your user ID is `913259200`."* — the auth gate rejected you. Add that ID to `ALLOWED_USER_IDS` in `.env` (comma-separated for multiple users), then `docker compose up -d` to restart the bot. Retry `/start`.
+   - If you see *"Not authorized. Your user ID is `913259200`."* — the auth gate rejected you. Add that ID to `ALLOWED_USER_IDS` in `.env` (comma-separated for multiple users), then `docker-compose up -d` to restart the bot. Retry `/start`.
 2. **`/config`** — pick your LLM provider, then a deep-think model, then a quick-think model. The deep model handles the heavy reasoning (researcher, risk-judge); the quick model runs the cheaper tool-calling steps. Without this step every analysis falls back to `DEFAULT_CONFIG` (currently `o4-mini`), which only works if you set `OPENAI_API_KEY`.
 3. **`/add NVDA AAPL`** — add a couple of tickers. Each is yfinance-validated; class-share dot forms (`BRK.B`) auto-correct to dash form (`BRK-B`).
 4. **`/watch`** — tap a ticker and `✅ Done` to run your first analysis. Per-step progress streams into the message caption; expect 1–3 min depending on provider.
@@ -71,7 +71,7 @@ Each analysis runs ~12 LLM calls across the agent pipeline. Per-ticker rough est
 ### Upgrade later
 
 ```bash
-docker compose pull && docker compose up -d
+docker-compose pull && docker-compose up -d
 ```
 
 The image is rebuilt automatically by a daily GitHub Action whenever upstream [`tradingagents`](https://github.com/TauricResearch/TradingAgents) advances; the cron skips the build when the SHA hasn't changed, so you only pull a new image when there's actually new upstream code.
