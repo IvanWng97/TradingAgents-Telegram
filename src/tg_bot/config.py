@@ -32,8 +32,12 @@ class Config:
     # Higher = more parallelism, more memory (each graph pins ~50-200 MB
     # of LLM clients + ChromaDB). Lower = memory-friendly, bigger queues
     # serialize.
-    MAX_CONCURRENT_ANALYSES = _parse_int(
-        os.getenv("TG_BOT_MAX_CONCURRENT_ANALYSES", ""), 3
+    # Clamp to ≥1 — a typo'd `TG_BOT_MAX_CONCURRENT_ANALYSES=0` would make
+    # asyncio.Semaphore(0) block every analysis forever; negatives raise
+    # ValueError on first acquire. Better to silently floor than to brick
+    # the bot with no log signal.
+    MAX_CONCURRENT_ANALYSES = max(
+        1, _parse_int(os.getenv("TG_BOT_MAX_CONCURRENT_ANALYSES", ""), 3)
     )
 
     @classmethod

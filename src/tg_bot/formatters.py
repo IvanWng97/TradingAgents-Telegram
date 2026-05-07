@@ -1,8 +1,19 @@
 """Pure formatting helpers — no I/O, no globals."""
 
+import re
 from datetime import datetime, timezone
 
 from telegram.helpers import escape_markdown
+
+
+_MD_V2_URL_ESCAPE = re.compile(r"([\\)])")
+
+
+def escape_md_v2_url(url: str) -> str:
+    """Escape `\\` and `)` for safe inclusion inside a MarkdownV2 link
+    target `[text](url)`. Other characters don't need escaping per
+    Telegram's spec, so we deliberately leave them alone."""
+    return _MD_V2_URL_ESCAPE.sub(r"\\\1", url)
 
 
 # MarkdownV2-aware emoji prefix per decision verb. Public — reused by the
@@ -29,7 +40,7 @@ def format_analysis_result_markdown(ticker: str, final_state: dict, signal: str)
     )
 
 
-def extract_summary(decision_text: str, max_len: int = 200) -> str:
+def extract_summary(decision_text: str, max_len: int = 280) -> str:
     """Word-boundary preview of the decision text — first `max_len` chars,
     clamped at the last space so the slice doesn't end mid-word.
 
@@ -80,10 +91,7 @@ def format_short_message(
     lines.append("")
 
     if telegraph_url:
-        # In MarkdownV2 link URLs only ')' and '\' need escaping; Telegraph
-        # paths are alphanumeric, so the replace is normally a no-op.
-        safe_url = telegraph_url.replace("\\", "\\\\").replace(")", "\\)")
-        lines.append(f"📄 [View Full Report]({safe_url})")
+        lines.append(f"📄 [View Full Report]({escape_md_v2_url(telegraph_url)})")
     else:
         lines.append(
             "⚠️ Full report unavailable "

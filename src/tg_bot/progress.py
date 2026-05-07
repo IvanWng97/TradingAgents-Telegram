@@ -56,9 +56,13 @@ def resolve_step(raw_name: str) -> tuple[str, Optional[int]]:
     key = raw_name.replace("_", " ").lower().strip()
     if key in _STEP_MAP:
         return _STEP_MAP[key]
-    # Best-effort fallback: drop common prefixes, title-case the rest.
-    cleaned = key.replace("tools ", "").strip().title()
-    return cleaned or raw_name, None
+    # Best-effort fallback: drop common "tools" suffix/prefix and re-look up
+    # before falling through to a title-case display. Lets a node like
+    # "news_analyst tools" still resolve to its ordinal.
+    cleaned_lower = key.replace("tools ", "").replace(" tools", "").strip()
+    if cleaned_lower in _STEP_MAP:
+        return _STEP_MAP[cleaned_lower]
+    return cleaned_lower.title() or raw_name, None
 
 
 class CancelledByUserError(RuntimeError):

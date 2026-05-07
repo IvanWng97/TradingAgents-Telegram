@@ -11,7 +11,7 @@ from telegram.helpers import escape_markdown
 
 from tg_bot.analysis import pool_stats
 from tg_bot.digest import build_digest_response, humanize_delta, next_fire, tz_short
-from tg_bot.formatters import format_analysis_result_markdown
+from tg_bot.formatters import escape_md_v2_url, format_analysis_result_markdown
 from tg_bot.history import (
     list_available_dates,
     list_available_tickers,
@@ -402,9 +402,7 @@ async def build_history_response(ticker: str, date_str: str) -> str:
 
     msg = f"📜 *{safe_ticker}* — {safe_date}\n\n"
     if telegraph_url:
-        # MarkdownV2 link URLs only need to escape ')' and '\'.
-        safe_url = telegraph_url.replace("\\", "\\\\").replace(")", "\\)")
-        msg += f"📄 [View Full Report]({safe_url})"
+        msg += f"📄 [View Full Report]({escape_md_v2_url(telegraph_url)})"
     else:
         msg += "⚠️ Full report unavailable " + escape_markdown(
             "(Telegraph publish failed).", version=2

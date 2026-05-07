@@ -329,12 +329,19 @@ class _FakeQuery:
         self.message = _FakeMessage(chat_id)
         self.last_text: str | None = None
         self.last_kb = None
+        # Captures `query.answer(toast, show_alert=...)` calls so tests can
+        # assert that an invalid-input branch surfaces a toast instead of
+        # silently no-op'ing.
+        self.answers: list[tuple[str, bool]] = []
 
     async def edit_message_text(
         self, text: str, parse_mode: str | None = None, reply_markup=None
     ) -> None:
         self.last_text = text
         self.last_kb = reply_markup
+
+    async def answer(self, text: str = "", show_alert: bool = False) -> None:
+        self.answers.append((text, show_alert))
 
 
 class _FakeBot:
@@ -438,12 +445,17 @@ async def test_callback_bad_inputs_noop() -> None:
     try:
         from tg_bot.handlers.callbacks import _handle_digest
 
-        # Non-int hour — should not write.
+        # Non-int hour — should not write, AND should surface a toast so
+        # the user knows the tap registered.
         await _handle_digest(q, ctx, user_id=42, data="digest:hour:abc")
         assert s.get_digest("42") is None
-        # Garbage tz — should not write.
+        assert q.answers, "expected a query.answer() toast on bad hour"
+        prior = len(q.answers)
+        # Garbage tz — same: no write, and a toast so the picker isn't
+        # frozen-looking.
         await _handle_digest(q, ctx, user_id=42, data="digest:tz:Mars/Phobos")
         assert s.get_digest("42") is None
+        assert len(q.answers) > prior, "expected a query.answer() toast on bad tz"
     finally:
         restore()
 

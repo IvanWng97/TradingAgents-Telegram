@@ -25,6 +25,7 @@ from tg_bot.chart import finviz_chart_url
 from tg_bot.digest import build_digest_response
 from tg_bot.formatters import (
     DECISION_EMOJI,
+    escape_md_v2_url,
     extract_summary,
     format_analysis_result_markdown,
     format_short_message,
@@ -532,6 +533,7 @@ async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) 
         return
     chat_id = query.message.chat_id
     context.chat_data.pop("watch_selection", None)
+    context.chat_data.pop("watch_page", None)
 
     if len(selection) == 1:
         # Single-ticker: replace the watchlist menu with the analysis flow.
@@ -627,7 +629,7 @@ async def _handle_history_back(query, target: str) -> None:
     elif target.startswith("dates:"):
         text, kb = build_history_dates_response(target.split(":", 1)[1])
     else:
-        await query.edit_message_text("Cancelled.")
+        await query.edit_message_text("Cancelled\\.", parse_mode="MarkdownV2")
         return
     if kb is None:
         await query.edit_message_text(text, parse_mode="MarkdownV2")
@@ -731,7 +733,7 @@ async def _handle_cancel(
         except Exception:
             await query.edit_message_text("✅ Done\\.", parse_mode="MarkdownV2")
     else:
-        await query.edit_message_text("Cancelled.")
+        await query.edit_message_text("Cancelled\\.", parse_mode="MarkdownV2")
 
 
 async def _redraw_digest(query, user_id: int, mode: str) -> None:
@@ -768,12 +770,15 @@ async def _handle_digest(
         try:
             hour = int(arg) if arg is not None else -1
         except ValueError:
+            await query.answer("Invalid hour.", show_alert=True)
             return
         if await user_config_storage.set_digest_hour(user_id, hour, chat_id):
             register_digest_job(
                 context.application, user_id, user_config_storage.get_digest(user_id)
             )
-        await _redraw_digest(query, user_id, mode="hours")
+            await _redraw_digest(query, user_id, mode="hours")
+        else:
+            await query.answer("Invalid hour.", show_alert=True)
     elif action == "tz":
         if arg and await user_config_storage.set_digest_tz(user_id, arg):
             # Tz pick lands you back on the hour grid — natural next step
@@ -784,6 +789,8 @@ async def _handle_digest(
             if digest and digest.get("enabled"):
                 register_digest_job(context.application, user_id, digest)
             await _redraw_digest(query, user_id, mode="hours")
+        else:
+            await query.answer("Invalid time zone.", show_alert=True)
     elif action == "tzpick":
         await _redraw_digest(query, user_id, mode="tz")
     elif action == "hourpick":
@@ -797,7 +804,31 @@ async def _handle_digest(
         # may take minutes if the watchlist is long. The fan-out itself
         # serializes through the existing _run_semaphore so manual
         # /watch runs aren't starved.
-        asyncio.create_task(run_user_digest(context.application, user_id, chat_id))
+        #
+        # Re-entry guard: the picker stays open while a digest is running,
+        # and a user mashing ▶ Run now would otherwise spawn N parallel
+        # fan-outs, each posting its own header. A simple bool in chat_data
+        # blocks repeats; cleared in the run_user_digest finally.
+        running_key = f"digest_running:{user_id}"
+        if context.chat_data.get(running_key):
+            await query.answer("A digest is already running.", show_alert=True)
+            return
+        context.chat_data[running_key] = True
+        asyncio.create_task(
+            _run_digest_with_guard(
+                context.chat_data, running_key, context.application, user_id, chat_id
+            )
+        )
+
+
+async def _run_digest_with_guard(
+    chat_data: dict, running_key: str, application, user_id: int, chat_id: int
+) -> None:
+    """Wrap run_user_digest so the re-entry guard clears even on exception."""
+    try:
+        await run_user_digest(application, user_id, chat_id)
+    finally:
+        chat_data.pop(running_key, None)
 
 
 # ─── digest fan-out + JobQueue plumbing ─────────────────────────────────
@@ -927,8 +958,7 @@ def _completed_digest_row(ticker_v2: str, result: dict) -> str:
     emoji = DECISION_EMOJI.get(signal.upper(), "📊")
     signal_v2 = escape_markdown(signal, version=2)
     if result.get("telegraph_url"):
-        # MarkdownV2 link URLs only need to escape ')' and '\\'.
-        url = result["telegraph_url"].replace("\\", "\\\\").replace(")", "\\)")
+        url = escape_md_v2_url(result["telegraph_url"])
         return f"{emoji} *{ticker_v2}* — *{signal_v2}* [📄]({url})"
     return f"{emoji} *{ticker_v2}* — *{signal_v2}*"
 
@@ -993,9 +1023,9 @@ def _format_digest_summary(
             lines.append(f"⛔ *{ticker_v2}* — cancelled")
             cancelled += 1
             continue
-        # Anything else that isn't a result-dict counts as failed —
-        # "pending" / "analyzing" only happen if the run was interrupted
-        # without going through the cancel path.
+        # Anything else (None from a real failure, or — much more rarely —
+        # leftover "pending"/"analyzing" from an interruption that didn't
+        # route through the cancel path) renders as ❓ and counts as failed.
         if not isinstance(s, dict):
             lines.append(f"❓ *{ticker_v2}* — error")
             failed += 1

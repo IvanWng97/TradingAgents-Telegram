@@ -39,8 +39,11 @@ _CLASS_SHARE_RE = re.compile(r"^([A-Z0-9]+)\.([A-Z])$")
 
 # {symbol: (is_valid, expires_at_unix)} — short TTL so corrections eventually
 # show through if the user re-tries. Keep it small; this is best-effort.
+# Bounded to _CACHE_MAX entries to neuter the trivial DoS where an open bot
+# is spammed with `/add JUNK1 JUNK2 …` to grow the dict unboundedly.
 _CACHE: dict[str, tuple[bool, float]] = {}
 _CACHE_TTL = 300.0  # 5 minutes
+_CACHE_MAX = 1024
 
 
 def _normalize(raw: str) -> Optional[str]:
@@ -68,6 +71,13 @@ def _yfinance_has_data(symbol: str) -> bool:
     except Exception as e:
         logger.debug("yfinance lookup failed for %s: %s", symbol, e)
         ok = False
+    # Bounded FIFO eviction: pop the oldest insertion when full. Python
+    # dicts preserve insertion order since 3.7, so iter() yields oldest first.
+    if len(_CACHE) >= _CACHE_MAX and symbol not in _CACHE:
+        try:
+            _CACHE.pop(next(iter(_CACHE)))
+        except StopIteration:
+            pass
     _CACHE[symbol] = (ok, now + _CACHE_TTL)
     return ok
 
