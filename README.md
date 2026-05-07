@@ -53,7 +53,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/IvanWng97/TradingAgents-Tele
 
 The script asks for the four things you need (bot token, your Telegram user ID, Telegraph token — auto-creates one if you don't have it, and your LLM provider + key), drops a configured `.env` + `docker-compose.yml` into `./tradingagents-telegram`, pulls the image, and prints the `docker compose up -d` you run next.
 
-Prefer to do it by hand? See [Manual install](#manual-install) below.
+Prefer to do it by hand? See [`docs/MANUAL_INSTALL.md`](./docs/MANUAL_INSTALL.md).
 
 ### First-time setup in Telegram
 
@@ -80,36 +80,6 @@ docker compose pull && docker compose up -d
 
 The image is rebuilt automatically by a daily GitHub Action whenever upstream [`tradingagents`](https://github.com/TauricResearch/TradingAgents) advances; the cron skips the build when the SHA hasn't changed, so you only pull a new image when there's actually new upstream code.
 
-### Manual install
-
-If you don't want to run `start.sh`, do it yourself:
-
-| Secret | Where to get it |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | DM [@BotFather](https://t.me/BotFather), send `/newbot`, follow the prompts. |
-| `TELEGRAPH_ACCESS_TOKEN` | `curl 'https://api.telegra.ph/createAccount?short_name=YourBot&author_name=YourBot'` — copy the `access_token` from the JSON response. |
-| Your Telegram user ID | DM [@userinfobot](https://t.me/userinfobot) any message — it replies with your numeric ID instantly. |
-| One LLM provider key | Pick whichever provider you'll use (DeepSeek, OpenAI, Anthropic, Google, xAI, Qwen, GLM, Ollama). You'll select the matching provider via `/config` after the bot is up. |
-
-```bash
-mkdir tradingagents-telegram && cd tradingagents-telegram
-
-# Compose file + env template (no build needed — points at the prebuilt image)
-curl -O https://raw.githubusercontent.com/IvanWng97/TradingAgents-Telegram/main/docker-compose.yml
-curl -fsSL https://raw.githubusercontent.com/IvanWng97/TradingAgents-Telegram/main/.env.example -o .env
-
-# Open .env, fill in the four secrets above
-$EDITOR .env
-
-docker compose pull
-docker compose up -d
-docker compose logs -f
-```
-
-`docker-compose.yml` bind-mounts `./data` into the container so watchlists, LLM settings, and (with the env vars above) `/history` data and the yfinance cache survive restarts. `.env` is loaded via `env_file:` and is never baked into the image.
-
-Want to run from source instead? See [`docs/DEVELOPMENT.md`](./docs/DEVELOPMENT.md).
-
 ## Commands
 
 | Command | Description |
@@ -131,21 +101,7 @@ The Telegram client also exposes a Menu button next to the input field with the 
 
 ## Configuration
 
-Set in `.env` (Docker loads via `env_file:`, local picks up via `python-dotenv`):
-
-| Variable | Required | Notes |
-|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | yes | from @BotFather |
-| `TELEGRAPH_ACCESS_TOKEN` | yes | for Telegraph publishing |
-| `ALLOWED_USER_IDS` | strongly recommended | comma-separated; empty = open to anyone (logged at WARNING). Bot replies with the user's Telegram ID on rejection so you can whitelist them. |
-| Provider keys | yes (one) | `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, etc. — must match the provider selected via `/config` |
-| `TG_BOT_MAX_CONCURRENT_ANALYSES` | no | Max simultaneous analyses across the bot. Default `3`. Acts as a FIFO queue — selections beyond this show "⏳ Queued" until a slot frees, cancellable while waiting. Also sizes the graph-instance pool. Higher = more parallelism, more memory (~50–200 MB per cached graph). |
-| `TG_BOT_TA_DEBUG` | no | `1`/`true` enables `TradingAgentsGraph(debug=True)` (verbose, dev only). Default off. |
-| `TG_BOT_DATA_DIR` | no | default `data` |
-| `TRADINGAGENTS_RESULTS_DIR` | recommended in Docker | `/history` reads from here. Defaults to `~/.tradingagents/logs` (ephemeral in containers). Set to `/app/data/ta-logs` to persist via the bind mount. |
-| `TRADINGAGENTS_CACHE_DIR` | recommended in Docker | yfinance cache. Defaults to `~/.tradingagents/cache` (ephemeral). Set to `/app/data/ta-cache` to skip re-downloads on every restart. |
-
-Supported LLM providers (set via `/config`): `openai`, `google`, `anthropic`, `xai`, `deepseek`, `qwen`, `glm`, `ollama` (have built-in model catalogs); `openrouter`, `azure` (require manual model IDs — UI not yet wired).
+All env vars — required secrets and tuning knobs — live in [`docs/CONFIGURATION.md`](./docs/CONFIGURATION.md). The four required secrets are pre-templated in [`.env.example`](./.env.example).
 
 ## Troubleshooting
 
@@ -153,6 +109,8 @@ Common startup / runtime issues and fixes: [`docs/TROUBLESHOOTING.md`](./docs/TR
 
 ## More
 
+- [`docs/MANUAL_INSTALL.md`](./docs/MANUAL_INSTALL.md) — manual Docker setup if you'd rather not run `start.sh`.
+- [`docs/CONFIGURATION.md`](./docs/CONFIGURATION.md) — env vars (required + tuning) and supported LLM providers.
 - [`docs/DEVELOPMENT.md`](./docs/DEVELOPMENT.md) — local dev setup, pre-commit, smoke tests.
 - [`docs/TODO.md`](./docs/TODO.md) — roadmap items not yet started.
 - [`CLAUDE.md`](./CLAUDE.md) — architecture notes, key contracts, and current limitations.
