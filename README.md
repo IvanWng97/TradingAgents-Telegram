@@ -53,16 +53,9 @@ Prefer to do it by hand? See [`docs/MANUAL_INSTALL.md`](./docs/MANUAL_INSTALL.md
 
 ### First-time setup in Telegram
 
-Once `docker-compose logs -f` shows `Application started`, find your bot in Telegram (the handle BotFather gave you) and run through these:
+After `docker-compose up -d`, message your bot — `/start` walks you through the in-Telegram setup (`/config` → `/add` → `/watch`). If `/start` replies *"Not authorized. Your user ID is …"* the auth gate rejected you: add that ID to `ALLOWED_USER_IDS` in `.env`, then `docker-compose up -d` to restart and retry.
 
-1. **`/start`** — confirms the bot is reachable.
-   - If you see *"Not authorized. Your user ID is `913259200`."* — the auth gate rejected you. Add that ID to `ALLOWED_USER_IDS` in `.env` (comma-separated for multiple users), then `docker-compose up -d` to restart the bot. Retry `/start`.
-2. **`/config`** — pick your LLM provider, then a deep-think model, then a quick-think model. The deep model handles the heavy reasoning (researcher, risk-judge); the quick model runs the cheaper tool-calling steps. Without this step every analysis falls back to `DEFAULT_CONFIG` (currently `o4-mini`), which only works if you set `OPENAI_API_KEY`.
-3. **`/add NVDA AAPL`** — add a couple of tickers. Each is yfinance-validated; class-share dot forms (`BRK.B`) auto-correct to dash form (`BRK-B`).
-4. **`/watch`** — tap a ticker and `✅ Done` to run your first analysis. Per-step progress streams into the message caption; expect 1–3 min depending on provider.
-5. **(Optional) `/digest`** — schedule a daily auto-run. Pick a time zone, an hour, then tap `📋 Tickers` to opt-in which symbols should run each day (new users start with an empty filter — must opt in).
-
-> ⚠️ **Leaving `ALLOWED_USER_IDS` empty makes the bot open to anyone who finds your bot handle, and they will burn your LLM tokens.** Auth is the only thing standing between a stranger and your provider bill — set it.
+> ⚠️ **Leaving `ALLOWED_USER_IDS` empty makes the bot open to anyone who finds your bot handle, and they will burn your LLM tokens.** Set it.
 
 ### Cost expectations
 
@@ -78,22 +71,7 @@ The image is rebuilt automatically by a daily GitHub Action whenever upstream [`
 
 ## Commands
 
-| Command | Description |
-|---|---|
-| `/start`, `/help` | Welcome / help text |
-| `/add NVDA AAPL TSLA` | Bulk-add tickers. Each is validated against yfinance — invalid symbols are rejected with a hint, US class-share dot forms (`BRK.B`) auto-correct to dash form (`BRK-B`). |
-| `/add` (no args) | Bot prompts; reply with the ticker(s) you want to add |
-| `/del NVDA AAPL` | Bulk-remove |
-| `/del` (no args) | Inline-button picker — tap ❌ on each ticker, `✅ Done` to close |
-| `/watch`, `/list` | Paginated select-mode keyboard (9 per page). Tap any ticker to toggle (✅ prefix), use `✓ Select all` / `✗ Clear` for bulk, then `✅ Done (N)` runs the selected ones. Single ticker uses the cached graph; 2+ run in parallel up to `TG_BOT_MAX_CONCURRENT_ANALYSES`. Each in-flight analysis has its own ❌ Cancel button. |
-| `/config` | Three-step picker: provider → deep model → quick model. `❌ Cancel` at any step rolls back to your prior settings |
-| `/digest` | Schedule a daily run of a curated subset of your watchlist. Single-screen picker: 24-hour grid + 10 IANA time zones (Pacific, Eastern, UTC, GMT/BST, JST, …) + a `📋 Tickers (N/M)` filter screen with a 3×3 paginated multi-select. One summary message per day, one Telegraph link per ticker. `▶ Run now` triggers an ad-hoc fan-out; `🔕 Off` disables (preserves hour, tz, and tickers for one-tap re-enable). New users start with an empty filter and must opt in. Auto-disables itself if you block the bot. |
-| `/history` (no args) | Inline-button picker of all tickers with saved analyses |
-| `/history NVDA` | Inline-button picker of recent analysis dates. `← Back` returns to the ticker picker. |
-| `/history NVDA 2026-04-15` | Direct lookup — publishes that day's saved analysis to Telegraph |
-| `/status` | Operational snapshot: uptime, # analyses since boot, graph-pool size, your current LLM config |
-
-The Telegram client also exposes a Menu button next to the input field with the same commands (populated via `set_my_commands`), and `/`-autocomplete works after typing the first letter or two.
+Discover them in Telegram via the Menu button next to the input field, `/`-autocomplete, or `/help`. The full reference lives in `/help`; the canonical set is registered in `app.py:BOT_COMMANDS`.
 
 ## Configuration
 
