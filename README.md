@@ -24,7 +24,7 @@ Telegram bot wrapping the [TradingAgents](https://github.com/TauricResearch/Trad
 - 📋 **Watchlist Management**: Curate tickers via `/add`, `/del`, `/watch`. Each is yfinance-validated; class-share dot forms (`BRK.B`) auto-correct to dash form (`BRK-B`).
 - ⚡ **Parallel Execution**: Tap multiple tickers and they run in parallel, gated by `TG_BOT_MAX_CONCURRENT_ANALYSES`. Overflow shows `⏳ Queued` until a slot frees.
 - ⏳ **Live Progress + Cancel**: Per-step pipeline progress streams back into the Telegram message caption. Each in-flight analysis carries a ❌ Cancel button — cancellation is checked at every LLM-call boundary so the abort is near-instant.
-- 🌅 **Daily Digest**: `/digest` schedules a recurring run of your full watchlist at any hour + IANA timezone, posting one summary message per day with a Telegraph link per ticker.
+- 🌅 **Daily Digest**: `/digest` schedules a recurring run of a curated subset of your watchlist at any hour + IANA timezone — paginated multi-select picker, one summary message per day with a Telegraph link per ticker.
 - 📜 **Analysis History**: `/history` browses every saved analysis by ticker → date and republishes to Telegraph on demand, with `← Back` round-trip navigation.
 - 🤹 **Multi-LLM Provider**: OpenAI, DeepSeek, Anthropic, Google, xAI, Qwen, GLM, Ollama — per-user `/config` picks provider + deep-think + quick-think model independently.
 - 🛡 **Production-grade**: `ALLOWED_USER_IDS` allowlist, atomic + `fsync` per-user JSON storage, multi-arch Docker image (`amd64` + `arm64`) daily-rebuilt to track upstream, CodeQL `security-extended` + Trivy scanning, provenance + SBOM attestations.
@@ -86,7 +86,7 @@ Want to run from source instead? See [`docs/DEVELOPMENT.md`](./docs/DEVELOPMENT.
 | `/del` (no args) | Inline-button picker — tap ❌ on each ticker, `✅ Done` to close |
 | `/watch`, `/list` | Paginated select-mode keyboard (9 per page). Tap any ticker to toggle (✅ prefix), use `✓ Select all` / `✗ Clear` for bulk, then `✅ Done (N)` runs the selected ones. Single ticker uses the cached graph; 2+ run in parallel up to `TG_BOT_MAX_CONCURRENT_ANALYSES`. Each in-flight analysis has its own ❌ Cancel button. |
 | `/config` | Three-step picker: provider → deep model → quick model. `❌ Cancel` at any step rolls back to your prior settings |
-| `/digest` | Schedule a daily run of every ticker in your watchlist. Single-screen picker: 24-hour grid + 10 IANA time zones (Pacific, Eastern, UTC, GMT/BST, JST, …). One summary message per day, one Telegraph link per ticker. `▶ Run now` triggers an ad-hoc fan-out; `🔕 Off` disables. Auto-disables itself if you block the bot. |
+| `/digest` | Schedule a daily run of a curated subset of your watchlist. Single-screen picker: 24-hour grid + 10 IANA time zones (Pacific, Eastern, UTC, GMT/BST, JST, …) + a `📋 Tickers (N/M)` filter screen with a 3×3 paginated multi-select. One summary message per day, one Telegraph link per ticker. `▶ Run now` triggers an ad-hoc fan-out; `🔕 Off` disables (preserves hour, tz, and tickers for one-tap re-enable). New users start with an empty filter and must opt in. Auto-disables itself if you block the bot. |
 | `/history` (no args) | Inline-button picker of all tickers with saved analyses |
 | `/history NVDA` | Inline-button picker of recent analysis dates. `← Back` returns to the ticker picker. |
 | `/history NVDA 2026-04-15` | Direct lookup — publishes that day's saved analysis to Telegraph |
