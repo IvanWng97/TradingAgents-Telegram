@@ -31,7 +31,7 @@ from tg_bot.handlers import (
     status_cmd,
 )
 from tg_bot.handlers.callbacks import register_digest_job
-from tg_bot.storage import user_config_storage
+from tg_bot.storage import user_config_storage, watchlist_storage
 
 
 logging.basicConfig(
@@ -66,7 +66,31 @@ async def _post_init(application: Application) -> None:
     """
     application.bot_data["start_time"] = time.time()
     await application.bot.set_my_commands(BOT_COMMANDS)
+
+    # One-time backfill for users whose digest predates the ticker-filter
+    # feature: copy their current watchlist into the new `tickers` field so
+    # tomorrow's run still covers everything they had before. New users get
+    # `tickers: []` from `_empty_digest` and must opt in.
+    #
+    # Walks every user with a digest block (enabled or not) so that a user
+    # who turned digest off pre-deploy and turns it back on later still
+    # benefits from the back-compat — without this, they'd silently transition
+    # to the explicit-opt-in semantic on re-enable.
+    migrated = 0
+    for user_id_str in user_config_storage.iter_users_with_digest():
+        digest = user_config_storage.get_digest(user_id_str)
+        if digest and ("tickers" not in digest or digest.get("tickers") is None):
+            wl = watchlist_storage.get_watchlist(user_id_str)
+            await user_config_storage.set_digest_tickers(user_id_str, wl)
+            migrated += 1
+    if migrated:
+        logger.info(
+            "digest: backfilled tickers for %d existing user(s) on startup",
+            migrated,
+        )
+
     enabled = user_config_storage.iter_enabled_digests()
+
     for user_id_str, digest in enabled:
         try:
             register_digest_job(application, int(user_id_str), digest)

@@ -85,7 +85,17 @@ class UserConfigStorage(JsonStorage):
 
     @staticmethod
     def _empty_digest() -> dict[str, Any]:
-        return {"enabled": False, "hour_local": None, "tz": None, "chat_id": None}
+        # `tickers` is the explicit-opt-in filter list. New users start with
+        # an empty list so the fan-out won't run anything until they pick;
+        # existing users (saves predating this field) get their `tickers` key
+        # backfilled at _post_init from the current watchlist for back-compat.
+        return {
+            "enabled": False,
+            "hour_local": None,
+            "tz": None,
+            "chat_id": None,
+            "tickers": [],
+        }
 
     def get_digest(self, user_id: str) -> Optional[dict[str, Any]]:
         """Return the digest block (or None if never set). Read-only — copy
@@ -130,6 +140,27 @@ class UserConfigStorage(JsonStorage):
         await self._save_async()
         return True
 
+    async def set_digest_tickers(self, user_id: str, tickers: list[str]) -> bool:
+        """Replace the digest-filter ticker list. De-duplicated + sorted so
+        on-disk order is canonical (smaller diffs, predictable picker order).
+
+        Doesn't touch `enabled`/`hour`/`tz` — the filter is independent of
+        scheduling. An empty list is allowed and means "no tickers selected"
+        (fan-out emits a reminder rather than running the watchlist)."""
+        # Hard reject non-list inputs — passing a bare string would iterate
+        # characters and silently store ["A", "D", "N", "V"] for "NVDA".
+        if not isinstance(tickers, (list, tuple, set, frozenset)):
+            raise TypeError(
+                f"tickers must be a list/tuple/set, got {type(tickers).__name__}"
+            )
+        canonical = sorted(set(t.strip().upper() for t in tickers if t.strip()))
+        user_id = str(user_id)
+        bucket = self._data.setdefault(user_id, {})
+        digest = bucket.setdefault(self.DIGEST_KEY, self._empty_digest())
+        digest["tickers"] = canonical
+        await self._save_async()
+        return True
+
     async def disable_digest(self, user_id: str) -> bool:
         """Disable the digest; preserves hour + tz for one-tap re-enable."""
         digest = self._data.get(str(user_id), {}).get(self.DIGEST_KEY)
@@ -138,6 +169,23 @@ class UserConfigStorage(JsonStorage):
         digest["enabled"] = False
         await self._save_async()
         return True
+
+    def iter_users_with_digest(self) -> list[str]:
+        """Every user_id that has any digest block (enabled or not).
+
+        Used by `_post_init` to backfill the `tickers` field on legacy saves
+        — covers BOTH currently-enabled digests and disabled-but-preserved
+        ones, so a user who flips the switch back on doesn't lose their
+        original watchlist scope.
+        """
+        out: list[str] = []
+        for user_id, bucket in self._data.items():
+            if not isinstance(bucket, dict):
+                continue
+            digest = bucket.get(self.DIGEST_KEY)
+            if isinstance(digest, dict):
+                out.append(user_id)
+        return out
 
     def iter_enabled_digests(self) -> list[tuple[str, dict[str, Any]]]:
         """List of (user_id, digest_block) for users with a fully-configured,

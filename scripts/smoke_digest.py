@@ -115,6 +115,7 @@ async def test_first_time_tz_then_hour() -> None:
         "hour_local": None,
         "tz": "America/Los_Angeles",
         "chat_id": None,
+        "tickers": [],
     }, d
     # Tz set but not yet enabled — partial config, doesn't fire.
     assert s.iter_enabled_digests() == []
@@ -354,13 +355,15 @@ class _FakeBot:
 
 class _FakeContext:
     """Minimal stand-in for ContextTypes.DEFAULT_TYPE. `_handle_digest`
-    reads `context.bot` and `context.application.job_queue` (via
-    register_digest_job / cancel_digest_job)."""
+    reads `context.bot`, `context.application.job_queue` (via
+    register_digest_job / cancel_digest_job), and `context.chat_data`
+    (digest ticker pagination + run-once guard)."""
 
     def __init__(self) -> None:
         self.bot = _FakeBot()
         # _FakeFanOutApp gives us a job_queue with the right interface.
         self.application = _FakeFanOutApp()
+        self.chat_data: dict = {}
 
 
 async def _make_dispatch_env(chat_id: int = 999) -> tuple[Any, Any, Any, Any]:
@@ -958,6 +961,7 @@ async def test_fanout_forbidden_during_progress_edit() -> None:
     s, _ = fresh_storage()
     await s.set_digest_tz("42", "America/Los_Angeles")
     await s.set_digest_hour("42", 10, 999)
+    await s.set_digest_tickers("42", ["A", "B", "C"])
 
     class _W:
         def get_watchlist(self, _u):
@@ -1157,6 +1161,385 @@ async def test_fanout_cancel_mid_run() -> None:
         cbmod._analyze_one_for_digest = orig_a
 
 
+# --- Ticker filter feature ------------------------------------------------
+
+
+async def test_tickers_default_empty() -> None:
+    """First call to set_digest_hour creates a digest block with tickers=[]
+    so new users must explicitly opt tickers in via the filter screen."""
+    s, _ = fresh_storage()
+    await s.set_digest_tz("42", "America/Los_Angeles")
+    await s.set_digest_hour("42", 10, 999)
+    d = s.get_digest("42")
+    assert d["tickers"] == [], d
+
+
+async def test_set_digest_tickers_canonical() -> None:
+    """Stored list is de-duped, uppercased, and sorted — keeps on-disk
+    order predictable across writes."""
+    s, _ = fresh_storage()
+    await s.set_digest_tickers("42", ["nvda", "AAPL", "nvda", "  TSLA  ", ""])
+    d = s.get_digest("42")
+    assert d["tickers"] == ["AAPL", "NVDA", "TSLA"], d
+
+
+async def test_tickers_independent() -> None:
+    """Setting tickers must not touch enabled/hour/tz, and disabling the
+    digest must not wipe tickers."""
+    s, _ = fresh_storage()
+    await s.set_digest_tz("42", "America/Los_Angeles")
+    await s.set_digest_hour("42", 10, 999)
+    await s.set_digest_tickers("42", ["NVDA"])
+    d = s.get_digest("42")
+    assert d["enabled"] and d["hour_local"] == 10 and d["tz"] == "America/Los_Angeles"
+    assert d["tickers"] == ["NVDA"]
+    await s.disable_digest("42")
+    d2 = s.get_digest("42")
+    assert d2["enabled"] is False
+    assert d2["tickers"] == ["NVDA"], "disable must not wipe filter"
+
+
+async def test_picker_tickers_screen() -> None:
+    """Tickers screen renders the toggle grid with ✅ on selected entries
+    plus the bulk + Back rows."""
+    s, _ = fresh_storage()
+    await s.set_digest_tz("42", "America/Los_Angeles")
+    await s.set_digest_hour("42", 10, 999)
+    await s.set_digest_tickers("42", ["NVDA"])
+    digest = s.get_digest("42")
+    text, kb = build_digest_response(
+        digest, mode="tickers", watchlist=["AAPL", "NVDA", "TSLA"], page=0
+    )
+    flat = [b.text for row in kb.inline_keyboard for b in row]
+    assert "✅ NVDA" in flat, flat
+    assert "AAPL" in flat and "TSLA" in flat
+    assert "✓ Select all" in flat and "✗ Clear" in flat
+    assert "← Back" in flat
+
+
+async def test_picker_tickers_empty_watchlist() -> None:
+    """Empty-watchlist case shows a hint and only a Back button — no grid."""
+    text, kb = build_digest_response(
+        {"tickers": []}, mode="tickers", watchlist=[], page=0
+    )
+    flat = [b.text for row in kb.inline_keyboard for b in row]
+    assert flat == ["← Back"], flat
+    assert "empty" in text.lower() or "/add" in text
+
+
+async def test_picker_hour_shows_count() -> None:
+    """Hour screen carries a 📋 Tickers (N/M) button when a watchlist is
+    passed in, and the status line shows the same count."""
+    digest = {
+        "enabled": True,
+        "hour_local": 10,
+        "tz": "America/Los_Angeles",
+        "chat_id": 999,
+        "tickers": ["NVDA"],
+    }
+    text, kb = build_digest_response(
+        digest, mode="hours", watchlist=["AAPL", "NVDA", "TSLA"]
+    )
+    flat = [b.text for row in kb.inline_keyboard for b in row]
+    assert any("📋 Tickers (1/3)" in t for t in flat), flat
+    assert "1/3 tickers" in text
+
+
+async def test_callback_tt_toggle() -> None:
+    """digest:tt:NVDA toggles inclusion and saves to storage on every tap."""
+    s, q, ctx, restore = await _make_dispatch_env()
+    try:
+        from tg_bot.handlers import callbacks as cbmod
+        from tg_bot.handlers.callbacks import _handle_digest
+
+        # Pre-condition: tz must be set before tickers are editable (the
+        # picker UI enforces this; the M1 callback gate enforces it on the
+        # backend in case a stale button slips past).
+        await s.set_digest_tz("42", "America/Los_Angeles")
+
+        class _W:
+            def get_watchlist(self, _u):
+                return ["AAPL", "NVDA"]
+
+        orig_w = cbmod.watchlist_storage
+        cbmod.watchlist_storage = _W()
+        try:
+            # First tap — adds.
+            await _handle_digest(q, ctx, user_id=42, data="digest:tt:NVDA")
+            assert s.get_digest("42")["tickers"] == ["NVDA"]
+            # Second tap — removes (toggle).
+            await _handle_digest(q, ctx, user_id=42, data="digest:tt:NVDA")
+            assert s.get_digest("42")["tickers"] == []
+        finally:
+            cbmod.watchlist_storage = orig_w
+    finally:
+        restore()
+
+
+async def test_callback_tt_rejects_stale() -> None:
+    """A stale callback button referencing a ticker no longer in the
+    watchlist must surface a toast and not modify storage."""
+    s, q, ctx, restore = await _make_dispatch_env()
+    try:
+        from tg_bot.handlers import callbacks as cbmod
+        from tg_bot.handlers.callbacks import _handle_digest
+
+        await s.set_digest_tz("42", "America/Los_Angeles")
+
+        class _W:
+            def get_watchlist(self, _u):
+                return ["AAPL"]
+
+        orig_w = cbmod.watchlist_storage
+        cbmod.watchlist_storage = _W()
+        try:
+            await _handle_digest(q, ctx, user_id=42, data="digest:tt:NVDA")
+            assert s.get_digest("42").get("tickers") == []
+            assert q.answers, "expected a toast on stale ticker tap"
+        finally:
+            cbmod.watchlist_storage = orig_w
+    finally:
+        restore()
+
+
+async def test_callback_tt_bulk() -> None:
+    """ttall picks up every watchlist entry; ttclear empties."""
+    s, q, ctx, restore = await _make_dispatch_env()
+    try:
+        from tg_bot.handlers import callbacks as cbmod
+        from tg_bot.handlers.callbacks import _handle_digest
+
+        await s.set_digest_tz("42", "America/Los_Angeles")
+
+        class _W:
+            def get_watchlist(self, _u):
+                return ["AAPL", "NVDA", "TSLA"]
+
+        orig_w = cbmod.watchlist_storage
+        cbmod.watchlist_storage = _W()
+        try:
+            await _handle_digest(q, ctx, user_id=42, data="digest:ttall")
+            assert s.get_digest("42")["tickers"] == ["AAPL", "NVDA", "TSLA"]
+            await _handle_digest(q, ctx, user_id=42, data="digest:ttclear")
+            assert s.get_digest("42")["tickers"] == []
+        finally:
+            cbmod.watchlist_storage = orig_w
+    finally:
+        restore()
+
+
+async def test_callback_ttpage() -> None:
+    """ttpage:next advances; ttpage:prev clamps at 0."""
+    s, q, ctx, restore = await _make_dispatch_env()
+    try:
+        from tg_bot.handlers import callbacks as cbmod
+        from tg_bot.handlers.callbacks import _handle_digest
+
+        await s.set_digest_tz("42", "America/Los_Angeles")
+
+        class _W:
+            def get_watchlist(self, _u):
+                return [f"T{i}" for i in range(15)]  # 2 pages at PAGE_SIZE=9
+
+        orig_w = cbmod.watchlist_storage
+        cbmod.watchlist_storage = _W()
+        try:
+            ctx.chat_data["digest_tickers_page"] = 0
+            await _handle_digest(q, ctx, user_id=42, data="digest:ttpage:next")
+            assert ctx.chat_data["digest_tickers_page"] == 1
+            await _handle_digest(q, ctx, user_id=42, data="digest:ttpage:prev")
+            assert ctx.chat_data["digest_tickers_page"] == 0
+            await _handle_digest(q, ctx, user_id=42, data="digest:ttpage:prev")
+            assert ctx.chat_data["digest_tickers_page"] == 0  # clamped
+        finally:
+            cbmod.watchlist_storage = orig_w
+    finally:
+        restore()
+
+
+async def test_fanout_filter_intersects() -> None:
+    """Filter is intersected with current watchlist: a ticker user removed
+    after picking it for the digest is silently dropped, the rest still run."""
+    from tg_bot.handlers import callbacks as cbmod
+
+    s, _ = fresh_storage()
+    await s.set_digest_tz("42", "America/Los_Angeles")
+    await s.set_digest_hour("42", 10, 999)
+    # Filter has NVDA + AAPL + TSLA; current watchlist no longer has TSLA.
+    await s.set_digest_tickers("42", ["NVDA", "AAPL", "TSLA"])
+
+    class _W:
+        def get_watchlist(self, _u):
+            return ["NVDA", "AAPL"]  # TSLA removed since filter was set
+
+    seen: list[str] = []
+
+    async def _fake(_uid, ticker, reporter=None):
+        seen.append(ticker)
+        return {"ticker": ticker, "signal": "BUY", "telegraph_url": None}
+
+    orig_w = cbmod.watchlist_storage
+    orig_a = cbmod._analyze_one_for_digest
+    orig_uc = cbmod.user_config_storage
+    cbmod.watchlist_storage = _W()
+    cbmod._analyze_one_for_digest = _fake
+    cbmod.user_config_storage = s
+    try:
+        app = _FakeFanOutApp()
+        await cbmod.run_user_digest(app, 42, 999)
+        assert sorted(seen) == ["AAPL", "NVDA"], seen
+    finally:
+        cbmod.watchlist_storage = orig_w
+        cbmod._analyze_one_for_digest = orig_a
+        cbmod.user_config_storage = orig_uc
+
+
+async def test_callback_tt_requires_tz() -> None:
+    """A `tt:`/`ttall`/`ttclear` tap with no digest configured (no tz)
+    must decline with a toast, never write a partial digest record."""
+    s, q, ctx, restore = await _make_dispatch_env()
+    try:
+        from tg_bot.handlers import callbacks as cbmod
+        from tg_bot.handlers.callbacks import _handle_digest
+
+        class _W:
+            def get_watchlist(self, _u):
+                return ["NVDA"]
+
+        orig_w = cbmod.watchlist_storage
+        cbmod.watchlist_storage = _W()
+        try:
+            # No tz/hour/digest configured. A stale or hand-crafted callback
+            # that lands here must decline.
+            await _handle_digest(q, ctx, user_id=42, data="digest:tt:NVDA")
+            await _handle_digest(q, ctx, user_id=42, data="digest:ttall")
+            await _handle_digest(q, ctx, user_id=42, data="digest:ttclear")
+            d = s.get_digest("42")
+            assert d is None or not d.get("tickers"), (
+                f"no partial write should happen; got {d}"
+            )
+            assert len(q.answers) >= 3, "each path should toast"
+        finally:
+            cbmod.watchlist_storage = orig_w
+    finally:
+        restore()
+
+
+async def test_set_digest_tickers_rejects_string() -> None:
+    """Passing a bare string instead of a list raises TypeError; without the
+    guard, set() over the string would shred it into chars."""
+    s, _ = fresh_storage()
+    try:
+        await s.set_digest_tickers("42", "NVDA")  # type: ignore[arg-type]
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("expected TypeError on string input")
+
+
+async def test_post_init_backfill_idempotent() -> None:
+    """First call backfills; second is a no-op. No re-writes, no clobbering
+    a user's explicit empty filter on the second pass."""
+    s, _ = fresh_storage()
+
+    # Simulate a legacy save: digest block with no tickers field.
+    await s.set_digest_tz("42", "America/Los_Angeles")
+    await s.set_digest_hour("42", 10, 999)
+    # Manually strip the tickers field to mimic a pre-feature on-disk record.
+    s._data["42"]["digest"].pop("tickers", None)
+    await s._save_async()
+    assert "tickers" not in s.get_digest("42")
+
+    # Stub a watchlist storage with a known list.
+    class _W:
+        def get_watchlist(self, _u):
+            return ["NVDA", "AAPL"]
+
+    wl = _W()
+
+    # Run the migration loop twice.
+    async def _migrate():
+        migrated = 0
+        for uid in s.iter_users_with_digest():
+            d = s.get_digest(uid)
+            if d and ("tickers" not in d or d.get("tickers") is None):
+                await s.set_digest_tickers(uid, wl.get_watchlist(uid))
+                migrated += 1
+        return migrated
+
+    n1 = await _migrate()
+    assert n1 == 1, f"first pass should backfill 1 user; got {n1}"
+    assert s.get_digest("42")["tickers"] == ["AAPL", "NVDA"]
+    n2 = await _migrate()
+    assert n2 == 0, f"second pass should be no-op; got {n2}"
+
+    # And: a user who had explicitly cleared their filter (tickers=[])
+    # must NOT be re-backfilled on a subsequent run.
+    await s.set_digest_tz("99", "America/New_York")
+    await s.set_digest_hour("99", 9, 100)
+    await s.set_digest_tickers("99", [])  # explicit empty
+    n3 = await _migrate()
+    assert n3 == 0
+    assert s.get_digest("99")["tickers"] == []
+
+
+async def test_iter_users_with_digest_includes_disabled() -> None:
+    """Migration walks all digest users, not just enabled ones — a user who
+    turned digest off pre-deploy still gets the back-compat backfill."""
+    s, _ = fresh_storage()
+    # Enabled user.
+    await s.set_digest_tz("aaa", "America/New_York")
+    await s.set_digest_hour("aaa", 9, 100)
+    # Disabled (was enabled, then turned off).
+    await s.set_digest_tz("bbb", "America/Los_Angeles")
+    await s.set_digest_hour("bbb", 10, 200)
+    await s.disable_digest("bbb")
+    # Partial — only tz set.
+    await s.set_digest_tz("ccc", "Europe/London")
+
+    uids = sorted(s.iter_users_with_digest())
+    assert uids == ["aaa", "bbb", "ccc"], uids
+
+
+async def test_fanout_empty_filter_reminder() -> None:
+    """User with active digest but empty `tickers` filter: fan-out sends
+    a one-line reminder, no analyses run."""
+    from tg_bot.handlers import callbacks as cbmod
+
+    s, _ = fresh_storage()
+    await s.set_digest_tz("42", "America/Los_Angeles")
+    await s.set_digest_hour("42", 10, 999)
+    # Filter explicitly empty — new-user "must opt in" semantic.
+    assert s.get_digest("42")["tickers"] == []
+
+    class _W:
+        def get_watchlist(self, _u):
+            return ["NVDA", "AAPL"]
+
+    ran: list[str] = []
+
+    async def _fake(_uid, ticker, reporter=None):
+        ran.append(ticker)
+        return {"ticker": ticker, "signal": "BUY", "telegraph_url": None}
+
+    orig_w = cbmod.watchlist_storage
+    orig_a = cbmod._analyze_one_for_digest
+    orig_uc = cbmod.user_config_storage
+    cbmod.watchlist_storage = _W()
+    cbmod._analyze_one_for_digest = _fake
+    cbmod.user_config_storage = s
+    try:
+        app = _FakeFanOutApp()
+        await cbmod.run_user_digest(app, 42, 999)
+        assert ran == [], "no analyses should run when filter is empty"
+        assert app.bot.sent, "reminder message should be sent"
+        assert "no tickers" in app.bot.sent[0]["text"].lower()
+    finally:
+        cbmod.watchlist_storage = orig_w
+        cbmod._analyze_one_for_digest = orig_a
+        cbmod.user_config_storage = orig_uc
+
+
 # --- Runner ----------------------------------------------------------------
 
 
@@ -1220,6 +1603,26 @@ SCENARIOS = [
         test_handle_digest_cancel_unknown_message_id,
     ),
     ("fanout cancel mid-run renders cancelled", test_fanout_cancel_mid_run),
+    # --- ticker-filter feature ---
+    ("tickers default is empty list", test_tickers_default_empty),
+    ("set_digest_tickers de-dups + sorts", test_set_digest_tickers_canonical),
+    ("set_digest_tickers preserves hour/tz/enabled", test_tickers_independent),
+    ("picker tickers screen renders with watchlist", test_picker_tickers_screen),
+    ("picker tickers screen empty watchlist", test_picker_tickers_empty_watchlist),
+    ("picker hour screen shows tickers count", test_picker_hour_shows_count),
+    ("callback digest:tt toggles per-tap save", test_callback_tt_toggle),
+    ("callback digest:tt rejects non-watchlist", test_callback_tt_rejects_stale),
+    ("callback digest:ttall + ttclear bulk", test_callback_tt_bulk),
+    ("callback digest:ttpage advances + clamps", test_callback_ttpage),
+    ("callback digest:tt requires tz set", test_callback_tt_requires_tz),
+    ("set_digest_tickers rejects string input", test_set_digest_tickers_rejects_string),
+    ("_post_init backfill is idempotent", test_post_init_backfill_idempotent),
+    (
+        "iter_users_with_digest includes disabled",
+        test_iter_users_with_digest_includes_disabled,
+    ),
+    ("fanout intersects filter with watchlist", test_fanout_filter_intersects),
+    ("fanout empty filter sends reminder, no run", test_fanout_empty_filter_reminder),
 ]
 
 

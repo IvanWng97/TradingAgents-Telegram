@@ -736,12 +736,16 @@ async def _handle_cancel(
         await query.edit_message_text("Cancelled\\.", parse_mode="MarkdownV2")
 
 
-async def _redraw_digest(query, user_id: int, mode: str) -> None:
-    """Re-render the digest picker in `mode` (auto/hours/tz). Swallows the
-    'message is not modified' BadRequest that fires when the user taps the
-    same hour/tz they already had selected — there's nothing to update."""
+async def _redraw_digest(query, user_id: int, mode: str, page: int = 0) -> None:
+    """Re-render the digest picker in `mode` (auto/hours/tz/tickers).
+
+    Threads the watchlist through `build_digest_response` so the hour screen
+    can show the 📋 Tickers (N/M) button and the tickers screen has the
+    toggle grid. Swallows the 'message is not modified' BadRequest that fires
+    when the user taps a no-op (e.g. the same hour they already had)."""
     digest = user_config_storage.get_digest(user_id)
-    text, kb = build_digest_response(digest, mode=mode)
+    watchlist = watchlist_storage.get_watchlist(user_id)
+    text, kb = build_digest_response(digest, mode=mode, watchlist=watchlist, page=page)
     try:
         await query.edit_message_text(text, parse_mode="MarkdownV2", reply_markup=kb)
     except Exception as e:
@@ -757,9 +761,14 @@ async def _handle_digest(
       - `digest:hour:HH`    — set hour, enable, capture chat_id, redraw hours
       - `digest:tz:<IANA>`  — set tz; if active, stays active. Returns to hour grid.
       - `digest:tzpick`     — swap to the tz picker
-      - `digest:hourpick`   — back-to-hours (← Back from tz screen)
-      - `digest:off`        — disable (preserves hour + tz), redraw hours
-      - `digest:run`        — fire fan-out now (stub until step 4 wires it)
+      - `digest:hourpick`   — back-to-hours (← Back from tz/tickers screen)
+      - `digest:off`        — disable (preserves hour + tz + tickers), redraw hours
+      - `digest:run`        — fire fan-out now
+      - `digest:tickerpick` — swap to the ticker filter screen
+      - `digest:tt:<T>`     — toggle one ticker in the digest filter (per-tap save)
+      - `digest:ttall`      — select every ticker on the watchlist
+      - `digest:ttclear`    — clear the digest ticker filter
+      - `digest:ttpage:{prev,next,noop}` — paginate the tickers screen
     """
     chat_id = query.message.chat_id
     parts = data.split(":", 2)
@@ -794,7 +803,80 @@ async def _handle_digest(
     elif action == "tzpick":
         await _redraw_digest(query, user_id, mode="tz")
     elif action == "hourpick":
+        # Reset ticker pagination so the user lands on page 1 next time
+        # they open the filter — predictable.
+        context.chat_data.pop("digest_tickers_page", None)
         await _redraw_digest(query, user_id, mode="hours")
+    elif action == "tickerpick":
+        # Same tz gate as the tt-* writes — a stale callback for a user with
+        # no tz configured renders an awkward "pick a time zone" status line
+        # under a ticker grid. Decline + toast keeps the flow consistent.
+        digest = user_config_storage.get_digest(user_id)
+        if not digest or not digest.get("tz"):
+            await query.answer("Set a time zone first via /digest.", show_alert=True)
+            return
+        context.chat_data["digest_tickers_page"] = 0
+        await _redraw_digest(query, user_id, mode="tickers", page=0)
+    elif action in ("tt", "ttall", "ttclear"):
+        # Defensive gate: a stale callback button could fire `tt:*` for a
+        # user who has no digest configured yet (no tz/hour). The picker UI
+        # never exposes the ticker screen before tz is set, but a hand-
+        # crafted button or a /config Cancel mid-edit could land here. Decline
+        # and toast — never let a partial digest write happen.
+        digest = user_config_storage.get_digest(user_id)
+        if not digest or not digest.get("tz"):
+            await query.answer("Set a time zone first via /digest.", show_alert=True)
+            return
+
+        if action == "tt":
+            # Toggle one ticker. Validate against the live watchlist so a stale
+            # callback button (e.g. ticker just removed via /del in another
+            # session) can't sneak a non-watchlist symbol into the filter.
+            watchlist = set(watchlist_storage.get_watchlist(user_id))
+            if not arg or arg not in watchlist:
+                await query.answer(
+                    "Ticker no longer in your watchlist.", show_alert=True
+                )
+                await _redraw_digest(
+                    query,
+                    user_id,
+                    mode="tickers",
+                    page=context.chat_data.get("digest_tickers_page", 0),
+                )
+                return
+            selected = set(digest.get("tickers") or [])
+            if arg in selected:
+                selected.discard(arg)
+            else:
+                selected.add(arg)
+            await user_config_storage.set_digest_tickers(user_id, sorted(selected))
+        elif action == "ttall":
+            wl = watchlist_storage.get_watchlist(user_id)
+            # Skip the write when the filter already matches — saves an fsync
+            # on a no-op tap (common when a user double-taps Select all).
+            if set(digest.get("tickers") or []) != set(wl):
+                await user_config_storage.set_digest_tickers(user_id, wl)
+        else:  # ttclear
+            if digest.get("tickers"):
+                await user_config_storage.set_digest_tickers(user_id, [])
+
+        await _redraw_digest(
+            query,
+            user_id,
+            mode="tickers",
+            page=context.chat_data.get("digest_tickers_page", 0),
+        )
+    elif action == "ttpage":
+        # `arg` is "prev" / "next" / "noop". Page index lives in chat_data
+        # so the user keeps their place across toggles within a session.
+        page = context.chat_data.get("digest_tickers_page", 0)
+        if arg == "next":
+            page += 1
+        elif arg == "prev":
+            page = max(0, page - 1)
+        # else: "noop" — central indicator, just redraw current page
+        context.chat_data["digest_tickers_page"] = page
+        await _redraw_digest(query, user_id, mode="tickers", page=page)
     elif action == "off":
         await user_config_storage.disable_digest(user_id)
         cancel_digest_job(context.application, user_id)
@@ -1075,16 +1157,63 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
     Auto-disables the digest on `Forbidden` (user blocked the bot) so
     the JobQueue doesn't keep retrying every day.
     """
-    watchlist = watchlist_storage.get_watchlist(user_id)
+    full_watchlist = watchlist_storage.get_watchlist(user_id)
     today = date.today().isoformat()
     safe_date = escape_markdown(today, version=2)
 
-    if not watchlist:
+    if not full_watchlist:
         logger.info("digest: skipping user %s — empty watchlist", user_id)
         return
 
+    # Apply the digest filter, intersected with the live watchlist (auto-prune
+    # tickers the user removed since the filter was last edited). When `tickers`
+    # is missing entirely (legacy save predating the filter feature), fall back
+    # to the full watchlist for backward compat — the _post_init migration
+    # backfills these on next startup.
+    digest_block = user_config_storage.get_digest(user_id) or {}
+    raw_filter = digest_block.get("tickers")
+    if raw_filter is None:
+        watchlist = full_watchlist
+    else:
+        # `t in full_watchlist` is implicit — t is iterated from it.
+        filter_set = set(raw_filter)
+        watchlist = [t for t in full_watchlist if t in filter_set]
+
+    if not watchlist:
+        # Filter is set but resolved to nothing (user has cleared it, or every
+        # selected ticker has since been removed from the watchlist). Send a
+        # one-line nudge so they know the digest fired but had nothing to do.
+        logger.info(
+            "digest: empty filter for user %s — sending reminder",
+            user_id,
+        )
+        try:
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"🌙 *Daily Digest* — {safe_date}\n\n"
+                    "_No tickers selected\\. Open /digest and tap "
+                    "📋 Tickers to pick what to include\\._"
+                ),
+                parse_mode="MarkdownV2",
+            )
+        except Forbidden:
+            logger.warning(
+                "digest: user %s blocked the bot, disabling on reminder", user_id
+            )
+            await user_config_storage.disable_digest(user_id)
+            cancel_digest_job(application, user_id)
+        except Exception as e:
+            logger.debug("digest reminder send failed: %s", e)
+        return
+
     n = len(watchlist)
-    logger.info("digest: launching for user %s (%d tickers)", user_id, n)
+    logger.info(
+        "digest: launching for user %s (%d/%d tickers after filter)",
+        user_id,
+        n,
+        len(full_watchlist),
+    )
 
     # status[ticker]: "pending" | ("analyzing", friendly, ordinal) |
     #                 "cancelled" | dict (completed result) | None (failed).

@@ -473,7 +473,11 @@ async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     """
     user_id = update.effective_user.id
     digest = user_config_storage.get_digest(user_id)
-    text, kb = build_digest_response(digest)
+    # Pass the watchlist through so the first render carries the
+    # 📋 Tickers (N/M) button + count suffix; otherwise the user has to
+    # tap any other action to discover the filter exists.
+    watchlist = watchlist_storage.get_watchlist(user_id)
+    text, kb = build_digest_response(digest, watchlist=watchlist)
     await update.message.reply_text(text, reply_markup=kb, parse_mode="MarkdownV2")
 
 
