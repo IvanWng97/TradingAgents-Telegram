@@ -2,7 +2,11 @@
 
 # TradingAgents Telegram Bot
 
-<img src="https://i.imgur.com/PWR7kBI.png" alt="TradingAgents Telegram Bot" width="160">
+<br>
+
+<img src="assets/logo.png" alt="TradingAgents Telegram Bot" width="160">
+
+<br>
 
 [![Lint](https://github.com/IvanWng97/TradingAgents-Telegram/actions/workflows/lint.yml/badge.svg)](https://github.com/IvanWng97/TradingAgents-Telegram/actions/workflows/lint.yml)
 [![Docker](https://github.com/IvanWng97/TradingAgents-Telegram/actions/workflows/docker-build.yml/badge.svg)](https://github.com/IvanWng97/TradingAgents-Telegram/actions/workflows/docker-build.yml)
@@ -13,6 +17,22 @@
 </div>
 
 Telegram bot wrapping the [TradingAgents](https://github.com/TauricResearch/TradingAgents) framework. Curate a watchlist via Telegram, tap one or more tickers, and the bot runs `TradingAgentsGraph.propagate(...)` for each — replying with a finviz chart, the trade decision, a short summary, and a Telegraph link to the full analysis. Per-step pipeline progress streams back into the message caption while the analysis runs.
+
+## 🚀 Features
+
+- 🤖 **Multi-Agent Analysis**: Wraps [TradingAgents](https://github.com/TauricResearch/TradingAgents) — analyst → researcher → trader → risk-manager LLM agents collaborate on each ticker.
+- 📋 **Watchlist Management**: Curate tickers via `/add`, `/del`, `/watch`. Each is yfinance-validated; class-share dot forms (`BRK.B`) auto-correct to dash form (`BRK-B`).
+- ⚡ **Parallel Execution**: Tap multiple tickers and they run in parallel, gated by `TG_BOT_MAX_CONCURRENT_ANALYSES`. Overflow shows `⏳ Queued` until a slot frees.
+- ⏳ **Live Progress Streaming**: Per-step pipeline progress streams back into the Telegram message caption while the analysis runs.
+- 🛑 **Cooperative Cancel**: Each in-flight analysis carries a ❌ Cancel button; cancellation is checked at every LLM-call boundary so the abort is near-instant.
+- 🌅 **Daily Digest**: `/digest` schedules a recurring run of your full watchlist at any hour + IANA timezone, posting one summary message per day with a Telegraph link per ticker.
+- 📜 **Analysis History**: `/history` browses every saved analysis by ticker → date and republishes to Telegraph on demand, with `← Back` round-trip navigation.
+- 🤹 **Multi-LLM Provider**: OpenAI, DeepSeek, Anthropic, Google, xAI, Qwen, GLM, Ollama — per-user `/config` picks provider + deep-think + quick-think model independently.
+- 📈 **Finviz Charts + Telegraph Reports**: Each analysis posts a finviz daily chart inline, with a Telegraph link to the full multi-agent rationale.
+- 🔐 **Access Control**: `ALLOWED_USER_IDS` allowlist gates every update; rejection responds with the requesting user's Telegram ID for easy whitelisting.
+- 🐳 **Docker-Ready**: Multi-arch (`linux/amd64` + `linux/arm64`) prebuilt image on Docker Hub, daily-rebuilt to track upstream `tradingagents@HEAD`.
+- 💾 **Durable Storage**: JSON-backed per-user state with atomic + `fsync` writes — survives mid-write crashes and power loss.
+- 🛡 **Hardened CI**: Per-arch Trivy scanning, CodeQL `security-extended`, weekly Dependabot, provenance + SBOM attestations published with every image.
 
 ## Demo
 
