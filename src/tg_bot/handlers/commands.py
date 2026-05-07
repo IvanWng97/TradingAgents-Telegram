@@ -49,7 +49,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Optional:\n"
         "• /digest — schedule a daily auto-run of selected tickers\n"
         "• /history — browse past analyses\n\n"
-        "Full command list: /help"
+        "Full command list: /help\n\n"
+        "⭐ Enjoying the bot? Star it on GitHub:\n"
+        "https://github.com/IvanWng97/TradingAgents-Telegram",
+        disable_web_page_preview=True,
     )
 
 
@@ -70,7 +73,10 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "No args → ticker picker.\n"
         "/status - Bot uptime, graph pool stats, your current LLM config, "
         "next digest fire time.\n"
-        "/start - Onboarding message."
+        "/start - Onboarding message.\n\n"
+        "⭐ Like the bot? Star it: "
+        "https://github.com/IvanWng97/TradingAgents-Telegram",
+        disable_web_page_preview=True,
     )
 
 
