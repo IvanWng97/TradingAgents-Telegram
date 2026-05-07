@@ -37,28 +37,40 @@ ADD_PROMPT = "📝 Send the ticker symbol(s) to add (e.g. NVDA AAPL TSLA):"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Onboarding nudge — leads first-time users through the minimum
+    setup before /watch can actually run anything. Full command reference
+    lives in /help so this stays short."""
     await update.message.reply_text(
-        "Welcome to TradingAgents Bot!\n\n"
-        "Available commands:\n"
-        "/add <ticker> - Add a stock to watchlist\n"
-        "/del <ticker> - Remove a stock from watchlist\n"
-        "/watch or /list - Show your watchlist\n"
-        "/config - Configure LLM provider\n"
-        "/help - Show this help message"
+        "👋 Welcome to TradingAgents Bot!\n\n"
+        "First-time setup:\n"
+        "1. /config — pick your LLM provider + deep/quick models\n"
+        "2. /add NVDA AAPL — add tickers to your watchlist\n"
+        "3. /watch — tap Done to run your first analysis\n\n"
+        "Optional:\n"
+        "• /digest — schedule a daily auto-run of selected tickers\n"
+        "• /history — browse past analyses\n\n"
+        "Full command list: /help"
     )
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Canonical command reference. Keep in sync with `BOT_COMMANDS` in
+    `app.py` (which feeds Telegram's /-autocomplete + Menu button)."""
     await update.message.reply_text(
         "Available commands:\n\n"
-        "/add <ticker> [<ticker> ...] - Add stocks (e.g. /add NVDA AAPL TSLA)\n"
-        "/del [<ticker> ...] - Remove stocks. With no args opens a picker.\n"
-        "/watch or /list - Show your watchlist with clickable buttons\n"
-        "/config - Configure LLM provider and deep/quick models\n"
+        "/add <ticker> [...] - Add tickers (e.g. /add NVDA AAPL). "
+        "With no args, the bot prompts you.\n"
+        "/del [<ticker> ...] - Remove tickers. With no args, opens a picker.\n"
+        "/watch or /list - Paginated watchlist; tap to select, "
+        "Done to run (parallel for multiple).\n"
+        "/config - Pick LLM provider + deep/quick think models.\n"
+        "/digest - Schedule a daily auto-run; pick time zone, hour, "
+        "and a ticker filter (multi-select).\n"
         "/history [<ticker>] [YYYY-MM-DD] - Browse past analyses. "
-        "With no args, shows tickers with saved history.\n"
-        "/status - Bot uptime, pool stats, and your current LLM config\n"
-        "/start - Welcome message"
+        "No args → ticker picker.\n"
+        "/status - Bot uptime, graph pool stats, your current LLM config, "
+        "next digest fire time.\n"
+        "/start - Onboarding message."
     )
 
 
