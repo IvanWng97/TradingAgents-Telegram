@@ -51,6 +51,21 @@ command -v curl >/dev/null 2>&1 || {
     exit 1
 }
 
+# Pick the Compose CLI flavor available on this machine. V2 (the
+# `docker compose` plugin) is the modern form; V1 (`docker-compose`,
+# hyphenated) is the deprecated standalone binary still shipped on many
+# legacy installs. Detect whichever responds and use it consistently
+# both for our own pull below AND in the final-message echo so users
+# can copy-paste verbatim.
+if docker compose version >/dev/null 2>&1; then
+    DC="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+    DC="docker-compose"
+else
+    warn "Docker Compose not found. Install Docker Compose v2 plugin or docker-compose."
+    exit 1
+fi
+
 # Choose install location.
 if [[ -e "$INSTALL_DIR" && -f "$INSTALL_DIR/.env" ]]; then
     warn "$INSTALL_DIR/.env already exists. Re-running will OVERWRITE it."
@@ -174,7 +189,7 @@ ok "Wrote .env (chmod 600 — readable only by you)"
 
 # ─── Pull image ──────────────────────────────────────────────────────────
 step "Pulling Docker image"
-docker compose pull
+$DC pull
 
 # ─── Final message ───────────────────────────────────────────────────────
 HERE="$(pwd)"
@@ -187,8 +202,8 @@ You're configured at: ${BOLD}$HERE${NC}
 ${BOLD}Next:${NC}
 
   cd $HERE
-  docker compose up -d         # start the bot
-  docker compose logs -f       # follow logs (Ctrl-C to detach)
+  $DC up -d         # start the bot
+  $DC logs -f       # follow logs (Ctrl-C to detach)
 
 ${BOLD}Then in Telegram, message your bot:${NC}
 
@@ -199,6 +214,6 @@ ${BOLD}Then in Telegram, message your bot:${NC}
   /digest                      # (optional) schedule a daily auto-run
 
 ${YELLOW}Tip:${NC} if /start says "Not authorized", your user ID isn't in ALLOWED_USER_IDS.
-     Edit $HERE/.env, then \`docker compose up -d\` to restart.
+     Edit $HERE/.env, then \`$DC up -d\` to restart.
 
 EOF
