@@ -1,14 +1,30 @@
 """Same-day result cache — skip the LLM run when an identical analysis
 just happened.
 
-Key: (provider, deep_think_llm, quick_think_llm, ticker, date_iso). The
-LLM output for a given config+ticker+date is identical regardless of
-which user triggered the run, so a hit saves the bill-payer's tokens
-AND lets a manual /watch followed by the daily digest cost only one
-actual run.
+Key: (provider, deep_think_llm, quick_think_llm, ticker, date_iso, rounds,
+effort) — `rounds` and `effort` are graph-baked and would change output,
+so they belong in the key alongside the model triple. The pool key in
+analysis.py shares the 5-element config quintuple (provider, deep, quick,
+rounds, effort) so two users on different config knobs get isolated cache
+entries AND isolated graph instances. The LLM output for a given
+config+ticker+date is identical regardless of which user triggered the
+run, so a hit saves the bill-payer's tokens AND lets a manual /watch
+followed by the daily digest cost only one actual run.
 
 Layout: `<TG_BOT_DATA_DIR>/result_cache/<config_slug>/<TICKER>/<date>.json`.
-Each file carries `{final_state: dict, signal: str, telegraph_url: str | None}`.
+Slug shape: `<provider>__<deep>__<quick>` for default users; `__r{n}`
+appended only when rounds≠1, `__e{level}` only when effort is set, so
+default-config users keep their existing cache slot when a customized
+run lands.
+
+Each file carries `{final_state: dict, signal: str, telegraph_url:
+str | None, generated_at: str}`. `generated_at` is an ISO UTC timestamp
+the formatter renders on cache-hit responses so users see when the
+cached decision was made (not the moment they tapped). The whole
+`final_state` is persisted (not a slim shape) so future renderer changes
+don't require re-running every cached ticker; LangChain message objects
+are coerced via `_json_default`.
+
 Filesystem-backed so the cache survives bot restarts; atomic writes
 (tempfile + fsync + rename, same pattern as `JsonStorage._save`) guarantee
 readers never see a partial file.
