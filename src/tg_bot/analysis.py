@@ -2,6 +2,7 @@
 
 import contextlib
 import logging
+import os
 import queue
 import threading
 from collections import OrderedDict
@@ -16,6 +17,38 @@ from tg_bot.progress import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Maps the provider name (as picked via /config) → the env var that holds
+# its API key. Used by `check_llm_configured` to give users a targeted
+# error before the LLM call 401s with a generic message. Keep in sync
+# with `.env.example` and the catalog in `MODEL_OPTIONS` below.
+PROVIDER_ENV_KEYS: dict[str, Optional[str]] = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GOOGLE_API_KEY",
+    "xai": "XAI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "qwen": "DASHSCOPE_API_KEY",
+    "glm": "ZHIPUAI_API_KEY",
+    "ollama": None,  # local; no key needed
+    # openrouter / azure intentionally absent — their /config selection
+    # short-circuits with a notice and the run falls back to DEFAULT_CONFIG,
+    # which the no-provider branch below already flags.
+}
+
+
+def check_llm_configured(user_id, user_config_storage) -> Optional[str]:
+    """Return None if the user is ready to run analyses, or a short reason
+    string explaining what to fix. Callers wrap the reason in their own
+    user-facing rendering (full message vs `/status` line)."""
+    provider = user_config_storage.get_llm_provider(user_id)
+    if not provider:
+        return "no provider — tap /config"
+    env_var = PROVIDER_ENV_KEYS.get(provider)
+    if env_var and not os.environ.get(env_var):
+        return f"{provider} picked but {env_var} not set in .env"
+    return None
 
 
 # Pool of TradingAgentsGraph instances keyed by (provider, deep, quick).

@@ -16,6 +16,7 @@ from telegram.helpers import escape_markdown
 
 from tg_bot.analysis import (
     TRADINGAGENTS_AVAILABLE,
+    check_llm_configured,
     get_model_options,
     has_model_catalog,
     run_trading_analysis,
@@ -109,6 +110,24 @@ async def _queued_cancel_edit(bot, chat_id: int, message_id: int) -> None:
         except Exception as e:
             logger.warning("queued cancel-ack edit failed: %s", e)
         _last_cancel_edit_at = time.monotonic()
+
+
+def _llm_setup_error_message(reason: str) -> str:
+    """Render the short reason from `check_llm_configured` as a friendly
+    MarkdownV2 message for the user, including the next-step hint. Two
+    flavors based on which failure mode we hit."""
+    if reason.startswith("no provider"):
+        return (
+            "⚠️ *No LLM provider configured*\\.\n\n"
+            "Tap /config to pick a provider \\+ deep/quick models, then try again\\."
+        )
+    # Mode B: provider picked, but matching env var missing. Format is
+    # "deepseek picked but DEEPSEEK_API_KEY not set in .env".
+    return (
+        f"⚠️ *LLM key missing*\\.\n\n"
+        f"`{escape_markdown(reason, version=2)}`\n\n"
+        "Add the key to your `\\.env` and restart the bot \\(`docker\\-compose up \\-d`\\)\\."
+    )
 
 
 def _model_keyboard(mode: str, provider: str) -> InlineKeyboardMarkup:
@@ -535,6 +554,17 @@ async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) 
     context.chat_data.pop("watch_selection", None)
     context.chat_data.pop("watch_page", None)
 
+    # Fail fast before launching N parallel tasks: a missing /config or
+    # missing API key would otherwise produce N identical generic auth
+    # errors, one per ticker. Single message at the entry point is much
+    # cleaner UX.
+    reason = check_llm_configured(user_id, user_config_storage)
+    if reason is not None:
+        await query.edit_message_text(
+            _llm_setup_error_message(reason), parse_mode="MarkdownV2"
+        )
+        return
+
     if len(selection) == 1:
         # Single-ticker: replace the watchlist menu with the analysis flow.
         try:
@@ -882,6 +912,21 @@ async def _handle_digest(
         cancel_digest_job(context.application, user_id)
         await _redraw_digest(query, user_id, mode="hours")
     elif action == "run":
+        # Fail fast on missing LLM setup before fan-out — otherwise every
+        # ticker's analysis would 401 the same way and the digest message
+        # would be a wall of identical errors.
+        reason = check_llm_configured(user_id, user_config_storage)
+        if reason is not None:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=_llm_setup_error_message(reason),
+                    parse_mode="MarkdownV2",
+                )
+            except Exception as e:
+                logger.warning("digest:run unconfigured-notice send failed: %s", e)
+            await query.answer()
+            return
         # Fire-and-forget so the callback returns immediately; the digest
         # may take minutes if the watchlist is long. The fan-out itself
         # serializes through the existing _run_semaphore so manual
@@ -1163,6 +1208,32 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
 
     if not full_watchlist:
         logger.info("digest: skipping user %s — empty watchlist", user_id)
+        return
+
+    # Belt-and-suspenders LLM precheck: the manual ▶ Run now path also
+    # gates upstream, but the daily JobQueue callback comes through here
+    # too — and a user who enabled digest before running /config (or with
+    # a stale .env) would otherwise see a wall of identical 401 errors.
+    reason = check_llm_configured(user_id, user_config_storage)
+    if reason is not None:
+        logger.info(
+            "digest: skipping user %s — LLM not configured (%s)", user_id, reason
+        )
+        try:
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text=_llm_setup_error_message(reason),
+                parse_mode="MarkdownV2",
+            )
+        except Forbidden:
+            logger.warning(
+                "digest: user %s blocked the bot, disabling on llm-precheck",
+                user_id,
+            )
+            await user_config_storage.disable_digest(user_id)
+            cancel_digest_job(application, user_id)
+        except Exception as e:
+            logger.debug("digest llm-precheck send failed: %s", e)
         return
 
     # Apply the digest filter, intersected with the live watchlist (auto-prune

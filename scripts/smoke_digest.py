@@ -484,6 +484,19 @@ async def test_next_fire_wrap() -> None:
 # --- JobQueue + fan-out scenarios -----------------------------------------
 
 
+def _disable_llm_precheck_globally() -> None:
+    """Disable check_llm_configured for the rest of the smoke run.
+
+    The precheck has dedicated coverage in `test_llm_precheck_*`; the
+    fan-out / cancel / progress tests below should not have to also arm
+    a provider + matching env var. Patches the import in callbacks so
+    every `run_user_digest` / `_handle_done` call sees the no-op.
+    """
+    from tg_bot.handlers import callbacks as cbmod
+
+    cbmod.check_llm_configured = lambda *_a, **_kw: None
+
+
 class _FakeJob:
     def __init__(self, name: str, callback, time_, data: dict) -> None:
         self.name = name
@@ -1540,6 +1553,47 @@ async def test_fanout_empty_filter_reminder() -> None:
         cbmod.user_config_storage = orig_uc
 
 
+# --- LLM-setup precheck ----------------------------------------------------
+
+
+async def test_llm_precheck_no_provider() -> None:
+    """Without /config, the precheck reports a `no provider` reason —
+    callers render a 'tap /config' message instead of running analysis."""
+    from tg_bot.analysis import check_llm_configured
+
+    s, _ = fresh_storage()
+    reason = check_llm_configured("42", s)
+    assert reason is not None and "no provider" in reason, reason
+
+
+async def test_llm_precheck_missing_env_key() -> None:
+    """Provider picked but matching env var unset → reason names the var."""
+    from tg_bot.analysis import check_llm_configured
+
+    s, _ = fresh_storage()
+    await s.set_llm_provider("42", "deepseek")
+    saved = os.environ.pop("DEEPSEEK_API_KEY", None)
+    try:
+        reason = check_llm_configured("42", s)
+        assert reason is not None and "DEEPSEEK_API_KEY" in reason, reason
+    finally:
+        if saved is not None:
+            os.environ["DEEPSEEK_API_KEY"] = saved
+
+
+async def test_llm_precheck_ok() -> None:
+    """Provider set + matching env var present → returns None (gate opens)."""
+    from tg_bot.analysis import check_llm_configured
+
+    s, _ = fresh_storage()
+    await s.set_llm_provider("42", "deepseek")
+    os.environ["DEEPSEEK_API_KEY"] = "sk-test-irrelevant-value"
+    try:
+        assert check_llm_configured("42", s) is None
+    finally:
+        os.environ.pop("DEEPSEEK_API_KEY", None)
+
+
 # --- Runner ----------------------------------------------------------------
 
 
@@ -1623,10 +1677,19 @@ SCENARIOS = [
     ),
     ("fanout intersects filter with watchlist", test_fanout_filter_intersects),
     ("fanout empty filter sends reminder, no run", test_fanout_empty_filter_reminder),
+    # --- LLM-setup precheck ---
+    ("precheck flags missing /config", test_llm_precheck_no_provider),
+    ("precheck flags missing API key", test_llm_precheck_missing_env_key),
+    ("precheck passes when provider+key set", test_llm_precheck_ok),
 ]
 
 
 async def main() -> int:
+    # Disable the LLM-setup precheck globally — fan-out / cancel / progress
+    # tests should not have to arm a provider + matching env var. Dedicated
+    # tests below restore + re-patch the real function as needed.
+    _disable_llm_precheck_globally()
+
     failures = 0
     for label, fn in SCENARIOS:
         try:

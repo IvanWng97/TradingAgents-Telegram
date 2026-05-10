@@ -9,7 +9,7 @@ from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Upd
 from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
-from tg_bot.analysis import pool_stats
+from tg_bot.analysis import check_llm_configured, pool_stats
 from tg_bot.digest import build_digest_response, humanize_delta, next_fire, tz_short
 from tg_bot.formatters import escape_md_v2_url, format_analysis_result_markdown
 from tg_bot.history import (
@@ -510,7 +510,10 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     analyses_run = context.bot_data.get("analysis_count", 0)
     pool_keys, pool_instances = pool_stats()
 
-    provider = user_config_storage.get_llm_provider(user_id) or "default (openai)"
+    # Surface a precheck warning so users can spot a missing /config or a
+    # provider-key mismatch without having to fail an actual analysis first.
+    setup_reason = check_llm_configured(user_id, user_config_storage)
+    provider = user_config_storage.get_llm_provider(user_id) or "(not set)"
     deep = user_config_storage.get_llm_model(user_id, "deep") or "default"
     quick = user_config_storage.get_llm_model(user_id, "quick") or "default"
 
@@ -548,4 +551,6 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"• Deep: `{deep}`\n"
         f"• Quick: `{quick}`"
     )
+    if setup_reason is not None:
+        message += f"\n\n⚠️ `{escape_markdown(setup_reason, version=2)}`"
     await update.message.reply_text(message, parse_mode="MarkdownV2")
