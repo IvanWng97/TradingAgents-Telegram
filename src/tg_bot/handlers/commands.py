@@ -47,7 +47,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "2. /add NVDA AAPL — add tickers to your watchlist\n"
         "3. /watch — tap Done to run your first analysis\n\n"
         "Optional:\n"
-        "• /digest — schedule a daily auto-run of selected tickers\n"
+        "• /digest — schedule a daily auto-run (pick which tickers to include)\n"
         "• /history — browse past analyses\n\n"
         "Full command list: /help\n\n"
         "⭐ Enjoying the bot? Star it on GitHub:\n"
