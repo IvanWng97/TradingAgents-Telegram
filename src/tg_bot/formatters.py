@@ -91,7 +91,13 @@ def format_analysis_result_markdown(
             bits.append(f"Generated {generated_at.isoformat()}")
         if config_summary:
             bits.append(config_summary)
-        header = f"> {' · '.join(bits)}\n\n"
+        # `---` is a hard separator: without it, a body whose first line
+        # starts with `> ` (LLM agents occasionally quote a thesis or risk
+        # warning) gets pulled into the header blockquote across the
+        # blank line, fusing them visually. The horizontal rule renders
+        # as <hr/> in Telegraph and forces a fresh blockquote for the
+        # body's `> ` lines.
+        header = f"> {' · '.join(bits)}\n\n---\n\n"
     return (
         f"{header}"
         f"{final_state.get('final_trade_decision', 'N/A')}\n\n"

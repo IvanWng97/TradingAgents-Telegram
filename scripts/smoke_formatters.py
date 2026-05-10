@@ -39,7 +39,7 @@ def test_fresh_run_prepends_full_header() -> None:
         generated_at=datetime(2026, 5, 10, 12, 34, tzinfo=timezone.utc),
     )
     assert out.startswith(
-        "> Generated 2026-05-10 12:34 UTC · openai · gpt-4o/o4-mini\n\n"
+        "> Generated 2026-05-10 12:34 UTC · openai · gpt-4o/o4-mini\n\n---\n\n"
     ), out
     assert "HOLD - sample." in out
 
@@ -53,7 +53,7 @@ def test_history_prepends_date_only_header() -> None:
         "historical",
         generated_at=date(2026, 4, 15),
     )
-    assert out.startswith("> Generated 2026-04-15\n\n"), out
+    assert out.startswith("> Generated 2026-04-15\n\n---\n\n"), out
     assert "12:34" not in out  # no time fragment leaked through
 
 
@@ -64,7 +64,7 @@ def test_config_summary_only_no_timestamp() -> None:
         "HOLD",
         config_summary="anthropic · claude-sonnet-4 · r2",
     )
-    assert out.startswith("> anthropic · claude-sonnet-4 · r2\n\n"), out
+    assert out.startswith("> anthropic · claude-sonnet-4 · r2\n\n---\n\n"), out
 
 
 def test_no_args_no_header() -> None:
@@ -84,6 +84,33 @@ def test_datetime_subclass_check_picks_full_format() -> None:
     assert "09:05 UTC" in out, out
 
 
+def test_body_blockquote_lines_stay_separate_from_header() -> None:
+    """Hard separator between header and body must prevent body lines
+    starting with `> ` (LLM agents occasionally quote a thesis/risk
+    warning) from being absorbed into the header blockquote across the
+    blank line. Without `---`, markdown.markdown lazy-continues the
+    blockquote and fuses the two visually."""
+    import markdown
+
+    state = {
+        "final_trade_decision": "> Per the Buffett doctrine: hold quality.",
+        "trader_investment_plan": "details",
+    }
+    out = format_analysis_result_markdown(
+        "SOFI",
+        state,
+        "HOLD",
+        config_summary="openai · gpt-4o/o4-mini",
+        generated_at=datetime(2026, 5, 10, 12, 34, tzinfo=timezone.utc),
+    )
+    rendered = markdown.markdown(out, extensions=["tables"])
+    # Two separate blockquotes (header + body), divided by an <hr/>.
+    # If the separator were missing, rendered would have a single
+    # <blockquote> containing both header and body paragraphs.
+    assert rendered.count("<blockquote>") == 2, rendered
+    assert "<hr />" in rendered, rendered
+
+
 SCENARIOS = [
     ("fresh run prepends full ts + config header", test_fresh_run_prepends_full_header),
     ("history prepends date-only header", test_history_prepends_date_only_header),
@@ -95,6 +122,10 @@ SCENARIOS = [
     (
         "datetime checked before date in isinstance chain",
         test_datetime_subclass_check_picks_full_format,
+    ),
+    (
+        "body blockquote lines don't merge with header",
+        test_body_blockquote_lines_stay_separate_from_header,
     ),
 ]
 
