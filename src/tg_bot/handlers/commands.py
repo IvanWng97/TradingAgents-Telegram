@@ -356,8 +356,11 @@ async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    # Drop today's cached entry for this (config, ticker). Next analysis
-    # will miss the cache and pay for the LLM run, then repopulate.
+    # Drop today's cached entry for this (config, ticker, rounds, effort).
+    # Next analysis will miss the cache and pay for the LLM run, then
+    # repopulate.
+    from tg_bot.handlers.callbacks import _cache_key_extras
+
     config = build_user_config(user_id, user_config_storage)
     today_iso = date.today().isoformat()
     result_cache.invalidate(
@@ -366,6 +369,7 @@ async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         config["quick_think_llm"],
         ticker,
         today_iso,
+        **_cache_key_extras(config),
     )
     chat_id = update.effective_chat.id
     await _run_analysis_for_ticker(context, chat_id, user_id, ticker)
@@ -500,10 +504,14 @@ async def config_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     current_quick = user_config_storage.get_llm_model(user_id, "quick") or "default"
 
     # Snapshot the current LLM state so a Cancel during the flow can restore it.
+    # `rounds` and `effort` are graph/vocabulary knobs that survive provider
+    # switches but still need to roll back if the user cancels mid-flow.
     context.user_data["llm_snapshot"] = {
         "provider": user_config_storage.get_llm_provider(user_id),
         "deep": user_config_storage.get_llm_model(user_id, "deep"),
         "quick": user_config_storage.get_llm_model(user_id, "quick"),
+        "rounds": user_config_storage.get_max_debate_rounds(user_id),
+        "effort": user_config_storage.get_effort_level(user_id),
     }
 
     providers = UserConfigStorage.VALID_PROVIDERS

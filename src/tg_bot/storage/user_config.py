@@ -26,7 +26,19 @@ class UserConfigStorage(JsonStorage):
         "azure",
     ]
     MODEL_KEYS = {"deep": "deep_think_llm", "quick": "quick_think_llm"}
-    LLM_KEYS = frozenset({"llm_provider", *MODEL_KEYS.values()})
+    ROUNDS_KEY = "max_debate_rounds"
+    EFFORT_KEY = "effort_level"
+    # All LLM-config keys cleared together by `clear()` (e.g. on /config Cancel
+    # rollback). `set_llm_provider` only clears the provider-specific keys
+    # (deep/quick) since rounds + effort are vocabulary that carries cleanly
+    # across providers.
+    LLM_KEYS = frozenset({"llm_provider", *MODEL_KEYS.values(), ROUNDS_KEY, EFFORT_KEY})
+    VALID_ROUNDS = (1, 2, 3)
+    VALID_EFFORT_LEVELS = ("low", "medium", "high")
+    # Providers that have a "thinking effort" knob in tradingagents'
+    # DEFAULT_CONFIG. Used to gate the /config picker step — for providers
+    # without one (deepseek, qwen, glm, ollama, xai) the step is skipped.
+    PROVIDERS_WITH_EFFORT = frozenset({"openai", "anthropic", "google"})
     DIGEST_KEY = "digest"
 
     async def set_llm_provider(self, user_id: str, provider: str) -> bool:
@@ -61,6 +73,50 @@ class UserConfigStorage(JsonStorage):
         if key is None:
             return None
         return self._data.get(str(user_id), {}).get(key)
+
+    # ─── debate rounds + effort level ───────────────────────────────────
+    # Quality knobs from tradingagents' DEFAULT_CONFIG. `max_debate_rounds`
+    # controls bull-vs-bear analyst cycles before the Research Manager
+    # decides; `effort_level` is a provider-agnostic vocabulary that
+    # `build_user_config` maps to the appropriate provider key
+    # (openai_reasoning_effort / anthropic_effort / google_thinking_level).
+    # Higher rounds = more nuanced thesis, ~2× cost on the analyst nodes.
+    # Higher effort = deeper thinking on reasoning-capable models.
+
+    async def set_max_debate_rounds(self, user_id: str, rounds: int) -> bool:
+        if rounds not in self.VALID_ROUNDS:
+            return False
+        user_id = str(user_id)
+        self._data.setdefault(user_id, {})[self.ROUNDS_KEY] = int(rounds)
+        await self._save_async()
+        return True
+
+    def get_max_debate_rounds(self, user_id: str) -> int:
+        """Returns the user's stored value, or 1 (DEFAULT_CONFIG) if unset."""
+        v = self._data.get(str(user_id), {}).get(self.ROUNDS_KEY)
+        return int(v) if isinstance(v, int) and v in self.VALID_ROUNDS else 1
+
+    async def set_effort_level(self, user_id: str, level: Optional[str]) -> bool:
+        """`level` in {'low', 'medium', 'high'} or None to clear back to
+        provider default."""
+        if level is None:
+            user_id = str(user_id)
+            bucket = self._data.get(user_id)
+            if bucket and self.EFFORT_KEY in bucket:
+                bucket.pop(self.EFFORT_KEY)
+                await self._save_async()
+            return True
+        level = level.strip().lower()
+        if level not in self.VALID_EFFORT_LEVELS:
+            return False
+        user_id = str(user_id)
+        self._data.setdefault(user_id, {})[self.EFFORT_KEY] = level
+        await self._save_async()
+        return True
+
+    def get_effort_level(self, user_id: str) -> Optional[str]:
+        v = self._data.get(str(user_id), {}).get(self.EFFORT_KEY)
+        return v if v in self.VALID_EFFORT_LEVELS else None
 
     async def clear(self, user_id: str) -> bool:
         """Remove LLM keys for a user; preserves non-LLM blocks (e.g., digest)

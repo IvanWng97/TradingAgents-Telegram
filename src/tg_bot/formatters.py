@@ -27,6 +27,28 @@ DECISION_EMOJI = {
 }
 
 
+def build_config_summary(config: dict) -> str:
+    """One-liner describing the LLM config that produced an analysis —
+    rendered into the caption as `via <summary>`. Returns the bare
+    `provider/deep_model` for default runs; appends `· r{n}` only when
+    rounds != 1 and `· e={level}` only when an effort is set, so the
+    line stays tight for the common case."""
+    parts = [
+        f"{config.get('llm_provider', 'unknown')}/"
+        f"{config.get('deep_think_llm', 'default')}"
+    ]
+    rounds = config.get("max_debate_rounds", 1)
+    if rounds != 1:
+        parts.append(f"r{rounds}")
+    # Effort lives under different keys per provider; pick whichever is set.
+    for key in ("openai_reasoning_effort", "anthropic_effort", "google_thinking_level"):
+        v = config.get(key)
+        if v:
+            parts.append(f"e={v}")
+            break
+    return " · ".join(parts)
+
+
 def format_analysis_result_markdown(ticker: str, final_state: dict, signal: str) -> str:
     """Markdown body for the Telegraph page.
 
@@ -67,8 +89,18 @@ def format_short_message(
     signal: str,
     telegraph_url: str | None = None,
     summary: str | None = None,
+    config_summary: str | None = None,
+    generated_at: datetime | None = None,
 ) -> str:
     """MarkdownV2 caption shown alongside the chart in the Telegram message.
+
+    `generated_at` defaults to "now" for fresh runs. Cache-hit paths pass
+    the original analysis time so users see when the cached decision was
+    actually made, not the moment they tapped the button.
+
+    `config_summary` (optional) renders a one-line trace of the LLM
+    config that produced this analysis — provider/deep-model plus
+    rounds/effort suffix when the user customized them via /config.
 
     All user-supplied text is escaped via `telegram.helpers.escape_markdown`
     so a stray `.` `-` `!` `(` doesn't break parsing.
@@ -76,9 +108,8 @@ def format_short_message(
     emoji = DECISION_EMOJI.get(signal.strip().upper(), "📊")
     safe_ticker = escape_markdown(ticker, version=2)
     safe_signal = escape_markdown(signal, version=2)
-    timestamp = escape_markdown(
-        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), version=2
-    )
+    when = generated_at if generated_at else datetime.now(timezone.utc)
+    timestamp = escape_markdown(when.strftime("%Y-%m-%d %H:%M UTC"), version=2)
 
     lines = [
         f"{emoji} *{safe_ticker}* — *{safe_signal}*",
@@ -88,6 +119,8 @@ def format_short_message(
         lines.append(escape_markdown(summary, version=2))
         lines.append("")
     lines.append(f"_Generated {timestamp}_")
+    if config_summary:
+        lines.append(f"_via {escape_markdown(config_summary, version=2)}_")
     lines.append("")
 
     if telegraph_url:

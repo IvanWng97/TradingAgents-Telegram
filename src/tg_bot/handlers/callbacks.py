@@ -28,6 +28,7 @@ from tg_bot.chart import finviz_chart_url
 from tg_bot.digest import build_digest_response
 from tg_bot.formatters import (
     DECISION_EMOJI,
+    build_config_summary,
     escape_md_v2_url,
     extract_summary,
     format_analysis_result_markdown,
@@ -47,10 +48,39 @@ from tg_bot.progress import (
     resolve_step,
 )
 from tg_bot.storage import user_config_storage, watchlist_storage
+from tg_bot.storage.user_config import UserConfigStorage
 from tg_bot.telegraph_client import publish_to_telegraph
 
 
 logger = logging.getLogger(__name__)
+
+
+# Provider-key map duplicated from analysis._EFFORT_KEY_BY_PROVIDER; keeping
+# it private to this module avoids the import dance for what's a 3-row dict.
+_EFFORT_KEYS = ("openai_reasoning_effort", "anthropic_effort", "google_thinking_level")
+
+
+def _cache_key_extras(config: dict) -> dict:
+    """Pull the cache-key-affecting bits out of a resolved tradingagents
+    config dict — `rounds` and `effort` are the only knobs that change
+    output, so they're the only ones the cache needs to disambiguate."""
+    rounds = config.get("max_debate_rounds", 1)
+    effort = next((config[k] for k in _EFFORT_KEYS if config.get(k)), None)
+    return {"rounds": rounds, "effort": effort}
+
+
+def _parse_iso(s: str | None):
+    """Round-trip a stored ISO-8601 timestamp back to an aware datetime.
+    Returns None for missing or unparseable values so the caller falls
+    through to the format helper's "now" default."""
+    if not s:
+        return None
+    try:
+        from datetime import datetime as _dt
+
+        return _dt.fromisoformat(s)
+    except ValueError:
+        return None
 
 
 # Bounds total concurrent analyses across the whole bot. Acts as a
@@ -180,12 +210,101 @@ async def _handle_quick(
 ) -> None:
     await user_config_storage.set_llm_model(user_id, "quick", model)
     deep = user_config_storage.get_llm_model(user_id, "deep")
-    # Quick is the last step of the /config flow — drop the rollback snapshot
-    # set by config_cmd so the next /config doesn't restore stale state.
+    # Two more steps follow: rounds (always) → effort (only for providers
+    # with a thinking knob). Snapshot stays live until effort step (or the
+    # rounds step for providers without effort) finishes.
+    current_rounds = user_config_storage.get_max_debate_rounds(user_id)
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{'✅ ' if n == current_rounds else ''}{n} — {label}",
+                callback_data=f"rounds:{n}",
+            )
+        ]
+        for n, label in [
+            (1, "Fast (default, 1× cost)"),
+            (2, "Balanced (~1.5× cost)"),
+            (3, "Thorough (~2× cost)"),
+        ]
+    ]
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel:config")])
+    await query.edit_message_text(
+        f"Provider: `{provider}`\nDeep: `{deep}`\nQuick: `{model}`\n\n"
+        "How many *bull/bear debate rounds*?\n"
+        "Higher \\= more nuanced thesis, more LLM calls\\.",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def _handle_rounds(
+    query, context: ContextTypes.DEFAULT_TYPE, user_id: int, rounds: int
+) -> None:
+    if not await user_config_storage.set_max_debate_rounds(user_id, rounds):
+        # Out-of-range value somehow reached us — bail without ending the flow.
+        await query.answer("Invalid rounds value.", show_alert=False)
+        return
+    provider = user_config_storage.get_llm_provider(user_id)
+    deep = user_config_storage.get_llm_model(user_id, "deep")
+    quick = user_config_storage.get_llm_model(user_id, "quick")
+    # Skip the effort step for providers without a thinking knob — for them
+    # rounds is the last step, so finalize here.
+    if provider not in UserConfigStorage.PROVIDERS_WITH_EFFORT:
+        context.user_data.pop("llm_snapshot", None)
+        await query.edit_message_text(
+            "LLM configuration saved\\.\n\n"
+            f"Provider: `{provider}`\nDeep: `{deep}`\nQuick: `{quick}`\n"
+            f"Rounds: `{rounds}`",
+            parse_mode="MarkdownV2",
+        )
+        return
+    current_effort = user_config_storage.get_effort_level(user_id)
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{'✅ ' if (current_effort is None) else ''}Default (provider-decided)",
+                callback_data="effort:none",
+            )
+        ]
+    ]
+    for level in UserConfigStorage.VALID_EFFORT_LEVELS:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{'✅ ' if level == current_effort else ''}{level.title()}",
+                    callback_data=f"effort:{level}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel:config")])
+    await query.edit_message_text(
+        f"Provider: `{provider}`\nDeep: `{deep}`\nQuick: `{quick}`\n"
+        f"Rounds: `{rounds}`\n\n"
+        "Reasoning *effort* on the deep\\-think model?\n"
+        "Higher \\= deeper thinking on reasoning models, more tokens\\.",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def _handle_effort(
+    query, context: ContextTypes.DEFAULT_TYPE, user_id: int, raw_level: str
+) -> None:
+    level = None if raw_level == "none" else raw_level
+    if not await user_config_storage.set_effort_level(user_id, level):
+        await query.answer("Invalid effort level.", show_alert=False)
+        return
+    provider = user_config_storage.get_llm_provider(user_id)
+    deep = user_config_storage.get_llm_model(user_id, "deep")
+    quick = user_config_storage.get_llm_model(user_id, "quick")
+    rounds = user_config_storage.get_max_debate_rounds(user_id)
+    # Effort is the last step — drop the rollback snapshot.
     context.user_data.pop("llm_snapshot", None)
+    effort_display = level if level else "default"
     await query.edit_message_text(
         "LLM configuration saved\\.\n\n"
-        f"Provider: `{provider}`\nDeep: `{deep}`\nQuick: `{model}`",
+        f"Provider: `{provider}`\nDeep: `{deep}`\nQuick: `{quick}`\n"
+        f"Rounds: `{rounds}`\nEffort: `{effort_display}`",
         parse_mode="MarkdownV2",
     )
 
@@ -213,17 +332,19 @@ async def _run_analysis_for_ticker(
     context.bot_data["analysis_count"] = context.bot_data.get("analysis_count", 0) + 1
 
     # Cache short-circuit: if an identical analysis already ran today
-    # (same provider + deep + quick + ticker, any user), render directly
-    # from the cached final state and skip the LLM run, the progress
-    # flow, the Telegraph round-trip, and the cancel plumbing.
+    # (same provider + deep + quick + rounds + effort + ticker, any user),
+    # render directly from the cached final state and skip the LLM run,
+    # the progress flow, the Telegraph round-trip, and the cancel plumbing.
     config = build_user_config(user_id, user_config_storage)
     today_iso = date.today().isoformat()
+    cache_kwargs = _cache_key_extras(config)
     cached = result_cache.lookup(
         config["llm_provider"],
         config["deep_think_llm"],
         config["quick_think_llm"],
         ticker,
         today_iso,
+        **cache_kwargs,
     )
     if cached:
         logger.info("[%s] result_cache HIT — skipping LLM run", ticker)
@@ -234,6 +355,8 @@ async def _run_analysis_for_ticker(
             cached["signal"],
             cached.get("telegraph_url"),
             summary=summary,
+            config_summary=build_config_summary(config),
+            generated_at=_parse_iso(cached.get("generated_at")),
         )
         try:
             await context.bot.send_photo(
@@ -483,7 +606,13 @@ async def _run_analysis_for_ticker(
             return "cancelled"
 
         summary = extract_summary(final_state.get("final_trade_decision", ""))
-        caption = format_short_message(ticker, signal, telegraph_url, summary=summary)
+        caption = format_short_message(
+            ticker,
+            signal,
+            telegraph_url,
+            summary=summary,
+            config_summary=build_config_summary(config),
+        )
         await context.bot.edit_message_caption(
             chat_id=chat_id,
             message_id=progress_msg.message_id,
@@ -504,6 +633,7 @@ async def _run_analysis_for_ticker(
             final_state,
             signal,
             telegraph_url,
+            **cache_kwargs,
         )
         return "completed"
     except CancelledByUserError:
@@ -804,6 +934,13 @@ async def _handle_cancel(
             else:
                 # No prior provider — wipe whatever was just written.
                 await user_config_storage.clear(user_id)
+            # Restore rounds + effort regardless of provider — they're
+            # provider-agnostic, so they survived the wipe above and any
+            # mid-flow rounds:/effort: write needs rolling back too.
+            await user_config_storage.set_max_debate_rounds(
+                user_id, snapshot.get("rounds") or 1
+            )
+            await user_config_storage.set_effort_level(user_id, snapshot.get("effort"))
         await query.edit_message_text(
             "❌ LLM configuration cancelled — previous settings restored\\.",
             parse_mode="MarkdownV2",
@@ -1081,12 +1218,14 @@ async def _analyze_one_for_digest(
     # the "Starting…" reporter event.
     config = build_user_config(user_id, user_config_storage)
     today_iso = date.today().isoformat()
+    cache_kwargs = _cache_key_extras(config)
     cached = result_cache.lookup(
         config["llm_provider"],
         config["deep_think_llm"],
         config["quick_think_llm"],
         ticker,
         today_iso,
+        **cache_kwargs,
     )
     if cached:
         logger.info("digest: result_cache HIT for %s — skipping LLM run", ticker)
@@ -1152,6 +1291,7 @@ async def _analyze_one_for_digest(
             final_state,
             signal,
             telegraph_url,
+            **cache_kwargs,
         )
 
         return {"ticker": ticker, "signal": signal, "telegraph_url": telegraph_url}
@@ -1649,6 +1789,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data.startswith("quick:"):
         _, provider, model = data.split(":", 2)
         await _handle_quick(query, context, user_id, provider, model)
+    elif data.startswith("rounds:"):
+        try:
+            rounds = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        await _handle_rounds(query, context, user_id, rounds)
+    elif data.startswith("effort:"):
+        await _handle_effort(query, context, user_id, data.split(":", 1)[1])
     elif data.startswith("multi:"):
         await _handle_select_toggle(query, context, user_id, data.split(":", 1)[1])
     elif data.startswith("wsel:"):
