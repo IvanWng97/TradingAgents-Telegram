@@ -29,19 +29,22 @@ DECISION_EMOJI = {
 
 def build_config_summary(config: dict) -> str:
     """One-liner describing the LLM config that produced an analysis —
-    rendered into the caption as `via <summary>`. Returns the bare
-    `provider/deep_model` for default runs; appends `· r{n}` only when
-    rounds != 1 and `· e={level}` only when an effort is set, so the
-    line stays tight for the common case."""
+    rendered into the caption as `via <summary>`.
+
+    Layout: `<provider> · <deep>/<quick> · r{n} · e={level}`. Provider
+    and the deep/quick model pair are always shown so users can tell
+    at a glance what produced the result; `r{n}` and `e={level}` are
+    appended only when the user customized those knobs (rounds != 1
+    or effort set), so the line stays tight for the common case."""
     # Late import to avoid a load-time cycle (analysis → formatters via
     # config-rendering helpers). EFFORT_KEY_BY_PROVIDER is the single
     # source of truth for the per-provider key vocabulary.
     from tg_bot.analysis import EFFORT_KEY_BY_PROVIDER
 
-    parts = [
-        f"{config.get('llm_provider', 'unknown')}/"
-        f"{config.get('deep_think_llm', 'default')}"
-    ]
+    provider = config.get("llm_provider", "unknown")
+    deep = config.get("deep_think_llm", "default")
+    quick = config.get("quick_think_llm", "default")
+    parts = [provider, f"{deep}/{quick}"]
     rounds = config.get("max_debate_rounds", 1)
     if rounds != 1:
         parts.append(f"r{rounds}")

@@ -187,9 +187,14 @@ async def test_config_summary_default() -> None:
     from tg_bot.formatters import build_config_summary
 
     out = build_config_summary(
-        {"llm_provider": "openai", "deep_think_llm": "gpt-4o", "max_debate_rounds": 1}
+        {
+            "llm_provider": "openai",
+            "deep_think_llm": "gpt-4o",
+            "quick_think_llm": "o4-mini",
+            "max_debate_rounds": 1,
+        }
     )
-    assert out == "openai/gpt-4o", out
+    assert out == "openai · gpt-4o/o4-mini", out
 
 
 async def test_config_summary_custom_rounds() -> None:
@@ -199,10 +204,14 @@ async def test_config_summary_custom_rounds() -> None:
         {
             "llm_provider": "deepseek",
             "deep_think_llm": "deepseek-v4-pro",
+            "quick_think_llm": "deepseek-v4-flash",
             "max_debate_rounds": 2,
         }
     )
-    assert "r2" in out and "deepseek/deepseek-v4-pro" in out, out
+    # Both models present, rounds suffix appended, no effort marker.
+    assert "deepseek-v4-pro/deepseek-v4-flash" in out, out
+    assert "· r2" in out, out
+    assert "e=" not in out, out
 
 
 async def test_config_summary_with_effort() -> None:
@@ -212,11 +221,13 @@ async def test_config_summary_with_effort() -> None:
         {
             "llm_provider": "anthropic",
             "deep_think_llm": "claude-sonnet-4",
+            "quick_think_llm": "claude-haiku-4",
             "max_debate_rounds": 2,
             "anthropic_effort": "high",
         }
     )
-    assert "r2" in out and "e=high" in out, out
+    assert "claude-sonnet-4/claude-haiku-4" in out, out
+    assert "· r2 · e=high" in out, out
 
 
 SCENARIOS = [
