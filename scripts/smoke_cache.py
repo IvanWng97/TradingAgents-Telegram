@@ -246,6 +246,59 @@ async def test_slug_handles_special_chars() -> None:
     assert got is not None and got["signal"] == "BUY"
 
 
+async def test_non_serializable_objects_in_state() -> None:
+    """`final_state` from tradingagents carries LangChain message objects
+    (e.g. HumanMessage) that aren't JSON-native. The cache must coerce
+    these via `default=` instead of failing the whole write — otherwise
+    every run leaves an orphan .tmp and the next lookup misses."""
+    _fresh_data_dir()
+    from tg_bot import cache
+
+    class FakeMessage:
+        """Pydantic-v1 style — has .dict() returning a serializable form."""
+
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+        def dict(self) -> dict:
+            return {"type": "human", "content": self.content}
+
+    class OpaqueMessage:
+        """No .dict(), no .model_dump() — only .content. Falls through to
+        the typed-content branch of _json_default."""
+
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    state = {
+        "final_trade_decision": "BUY",
+        "messages": [FakeMessage("hi"), OpaqueMessage("opaque")],
+    }
+    cache.store(
+        "openai",
+        "gpt-4o",
+        "o4-mini",
+        "NVDA",
+        "2026-05-09",
+        state,
+        "BUY",
+        None,
+    )
+    got = cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09")
+    assert got is not None, "store must not fail on LangChain-style messages"
+    msgs = got["final_state"]["messages"]
+    assert msgs[0]["content"] == "hi"
+    assert msgs[1]["content"] == "opaque" and msgs[1]["__type__"] == "OpaqueMessage"
+    # And no orphan tempfiles linger.
+    cache_dir = (
+        Path(os.environ["TG_BOT_DATA_DIR"])
+        / "result_cache"
+        / "openai__gpt-4o__o4-mini"
+        / "NVDA"
+    )
+    assert list(cache_dir.glob("*.tmp")) == []
+
+
 async def test_atomic_write_is_complete_json() -> None:
     """Reading right after a store must always yield valid JSON — no
     partial writes (the rename pattern guarantees this)."""
@@ -287,6 +340,7 @@ SCENARIOS = [
     ("lazy eviction drops old dates", test_lazy_eviction_drops_old_dates),
     ("corrupt file returns None", test_corrupt_file_returns_none),
     ("slug handles special chars", test_slug_handles_special_chars),
+    ("non-serializable LangChain objects", test_non_serializable_objects_in_state),
     ("atomic write is complete JSON", test_atomic_write_is_complete_json),
 ]
 

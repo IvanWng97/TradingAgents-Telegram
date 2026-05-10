@@ -54,6 +54,26 @@ def _slug(provider: str, deep: str, quick: str) -> str:
     return _SLUG_SAFE.sub("_", f"{provider}__{deep}__{quick}")
 
 
+def _json_default(obj: Any) -> Any:
+    """Fallback encoder for objects json doesn't natively understand.
+
+    `final_state` from tradingagents contains LangChain message objects
+    (e.g. `HumanMessage`) sprinkled through the agent debate fields —
+    these aren't JSON-serializable by default. Try the pydantic v2/v1
+    dump methods, fall back to a content-bearing dict, and finally to a
+    typed repr so a single weird object never sinks the whole write."""
+    for attr in ("model_dump", "dict"):
+        fn = getattr(obj, attr, None)
+        if callable(fn):
+            try:
+                return fn()
+            except Exception:
+                pass
+    if hasattr(obj, "content"):
+        return {"__type__": type(obj).__name__, "content": obj.content}
+    return {"__type__": type(obj).__name__, "repr": repr(obj)}
+
+
 def _path_for(provider: str, deep: str, quick: str, ticker: str, date_iso: str) -> Path:
     return (
         _data_dir()
@@ -117,14 +137,23 @@ def store(
         tmp_fd = tempfile.NamedTemporaryFile(
             mode="w", dir=path.parent, delete=False, suffix=".tmp"
         )
+        tmp_path = tmp_fd.name
         try:
-            json.dump(payload, tmp_fd)
-            tmp_fd.flush()
-            os.fsync(tmp_fd.fileno())
-            tmp_path = tmp_fd.name
-        finally:
-            tmp_fd.close()
-        os.replace(tmp_path, path)
+            try:
+                json.dump(payload, tmp_fd, default=_json_default)
+                tmp_fd.flush()
+                os.fsync(tmp_fd.fileno())
+            finally:
+                tmp_fd.close()
+            os.replace(tmp_path, path)
+        except Exception:
+            # Drop the partial tempfile so the dir doesn't accumulate
+            # orphan .tmp leftovers across repeated failures.
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
     except Exception as e:
         logger.warning("result_cache: failed to write %s: %s", path, e)
 
