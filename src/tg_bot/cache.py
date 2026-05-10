@@ -41,6 +41,39 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def cache_key_extras(config: dict) -> dict:
+    """Pull the cache-key-affecting bits out of a resolved tradingagents
+    config dict — `rounds` and `effort` are the only knobs beyond
+    (provider, deep, quick) that change output, so they're the only ones
+    the cache needs to disambiguate. Returns a kwargs dict ready to splat
+    into `lookup` / `store` / `invalidate`."""
+    # Late import: analysis.py imports from cache (transitively via
+    # callbacks), so importing analysis at module load creates a cycle.
+    # The dict is module-level on analysis so the lookup is O(1) once
+    # imported, and the import itself is cached after first call.
+    from tg_bot.analysis import EFFORT_KEY_BY_PROVIDER
+
+    rounds = config.get("max_debate_rounds", 1)
+    effort = next(
+        (config[k] for k in EFFORT_KEY_BY_PROVIDER.values() if config.get(k)),
+        None,
+    )
+    return {"rounds": rounds, "effort": effort}
+
+
+def parse_generated_at(s: Optional[str]) -> Optional[datetime]:
+    """Round-trip a stored ISO-8601 timestamp back to an aware datetime.
+    Returns None for missing or unparseable values so callers can fall
+    through to "now" defaults — pre-PR cache entries (no `generated_at`
+    field) and corrupted strings both land here gracefully."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
 # `data` matches `Config`'s implicit default — kept in sync via the env var
 # rather than importing Config here (would create a circular dependency
 # with analysis.py once the cache is wired into the run path).

@@ -55,34 +55,6 @@ from tg_bot.telegraph_client import publish_to_telegraph
 logger = logging.getLogger(__name__)
 
 
-# Provider-key map duplicated from analysis._EFFORT_KEY_BY_PROVIDER; keeping
-# it private to this module avoids the import dance for what's a 3-row dict.
-_EFFORT_KEYS = ("openai_reasoning_effort", "anthropic_effort", "google_thinking_level")
-
-
-def _cache_key_extras(config: dict) -> dict:
-    """Pull the cache-key-affecting bits out of a resolved tradingagents
-    config dict — `rounds` and `effort` are the only knobs that change
-    output, so they're the only ones the cache needs to disambiguate."""
-    rounds = config.get("max_debate_rounds", 1)
-    effort = next((config[k] for k in _EFFORT_KEYS if config.get(k)), None)
-    return {"rounds": rounds, "effort": effort}
-
-
-def _parse_iso(s: str | None):
-    """Round-trip a stored ISO-8601 timestamp back to an aware datetime.
-    Returns None for missing or unparseable values so the caller falls
-    through to the format helper's "now" default."""
-    if not s:
-        return None
-    try:
-        from datetime import datetime as _dt
-
-        return _dt.fromisoformat(s)
-    except ValueError:
-        return None
-
-
 # Bounds total concurrent analyses across the whole bot. Acts as a
 # coroutine-level FIFO queue (waiters are served in arrival order).
 # Lazy-init on first use so we bind it to the running loop, not the
@@ -337,7 +309,7 @@ async def _run_analysis_for_ticker(
     # the progress flow, the Telegraph round-trip, and the cancel plumbing.
     config = build_user_config(user_id, user_config_storage)
     today_iso = date.today().isoformat()
-    cache_kwargs = _cache_key_extras(config)
+    cache_kwargs = result_cache.cache_key_extras(config)
     cached = result_cache.lookup(
         config["llm_provider"],
         config["deep_think_llm"],
@@ -356,7 +328,7 @@ async def _run_analysis_for_ticker(
             cached.get("telegraph_url"),
             summary=summary,
             config_summary=build_config_summary(config),
-            generated_at=_parse_iso(cached.get("generated_at")),
+            generated_at=result_cache.parse_generated_at(cached.get("generated_at")),
         )
         try:
             await context.bot.send_photo(
@@ -1218,7 +1190,7 @@ async def _analyze_one_for_digest(
     # the "Starting…" reporter event.
     config = build_user_config(user_id, user_config_storage)
     today_iso = date.today().isoformat()
-    cache_kwargs = _cache_key_extras(config)
+    cache_kwargs = result_cache.cache_key_extras(config)
     cached = result_cache.lookup(
         config["llm_provider"],
         config["deep_think_llm"],

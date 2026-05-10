@@ -359,8 +359,6 @@ async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Drop today's cached entry for this (config, ticker, rounds, effort).
     # Next analysis will miss the cache and pay for the LLM run, then
     # repopulate.
-    from tg_bot.handlers.callbacks import _cache_key_extras
-
     config = build_user_config(user_id, user_config_storage)
     today_iso = date.today().isoformat()
     result_cache.invalidate(
@@ -369,7 +367,7 @@ async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         config["quick_think_llm"],
         ticker,
         today_iso,
-        **_cache_key_extras(config),
+        **result_cache.cache_key_extras(config),
     )
     chat_id = update.effective_chat.id
     await _run_analysis_for_ticker(context, chat_id, user_id, ticker)

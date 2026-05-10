@@ -33,6 +33,11 @@ def build_config_summary(config: dict) -> str:
     `provider/deep_model` for default runs; appends `· r{n}` only when
     rounds != 1 and `· e={level}` only when an effort is set, so the
     line stays tight for the common case."""
+    # Late import to avoid a load-time cycle (analysis → formatters via
+    # config-rendering helpers). EFFORT_KEY_BY_PROVIDER is the single
+    # source of truth for the per-provider key vocabulary.
+    from tg_bot.analysis import EFFORT_KEY_BY_PROVIDER
+
     parts = [
         f"{config.get('llm_provider', 'unknown')}/"
         f"{config.get('deep_think_llm', 'default')}"
@@ -41,7 +46,7 @@ def build_config_summary(config: dict) -> str:
     if rounds != 1:
         parts.append(f"r{rounds}")
     # Effort lives under different keys per provider; pick whichever is set.
-    for key in ("openai_reasoning_effort", "anthropic_effort", "google_thinking_level"):
+    for key in EFFORT_KEY_BY_PROVIDER.values():
         v = config.get(key)
         if v:
             parts.append(f"e={v}")
