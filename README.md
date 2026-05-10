@@ -87,7 +87,8 @@ The image is rebuilt automatically by a daily GitHub Action whenever upstream [`
 | `/history` (no args) | Inline-button picker of all tickers with saved analyses |
 | `/history NVDA` | Inline-button picker of recent analysis dates. `← Back` returns to the ticker picker. |
 | `/history NVDA 2026-04-15` | Direct lookup — publishes that day's saved analysis to Telegraph |
-| `/refresh NVDA` | Drop today's cached result and re-run the analysis. Useful when intraday data has shifted enough that the morning's take is stale. |
+| `/refresh NVDA` | Direct fast-path: drop today's cached result for `NVDA` and re-run the analysis. |
+| `/refresh` (no args) | Same paginated multi-select picker as `/watch`, but the Done button is `🔄 Refresh (N)` and tapping it drops today's cache for each selected ticker before running. Useful when several tickers' intraday data has shifted and you want to refresh them in one shot. |
 | `/status` | Operational snapshot: uptime, # analyses since boot, graph-pool size, your current LLM config |
 
 The Telegram client also exposes a Menu button next to the input field with the same commands (populated via `set_my_commands`), and `/`-autocomplete works after typing the first letter or two.

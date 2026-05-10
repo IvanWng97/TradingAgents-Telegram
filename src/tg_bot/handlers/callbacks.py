@@ -649,7 +649,10 @@ async def _handle_select_toggle(
     else:
         selection.add(ticker)
     page = context.chat_data.get("watch_page", 0)
-    text, kb = build_watchlist_response(user_id, selected=selection, page=page)
+    mode = context.chat_data.get("watch_mode", "watch")
+    text, kb = build_watchlist_response(
+        user_id, selected=selection, page=page, mode=mode
+    )
     if kb is None:
         await query.edit_message_text(text)
     else:
@@ -667,7 +670,10 @@ async def _handle_select_bulk(
         selection = set()
     context.chat_data["watch_selection"] = selection
     page = context.chat_data.get("watch_page", 0)
-    text, kb = build_watchlist_response(user_id, selected=selection, page=page)
+    mode = context.chat_data.get("watch_mode", "watch")
+    text, kb = build_watchlist_response(
+        user_id, selected=selection, page=page, mode=mode
+    )
     if kb is None:
         await query.edit_message_text(text)
     else:
@@ -688,7 +694,10 @@ async def _handle_page_nav(
         page = max(0, page - 1)
     context.chat_data["watch_page"] = page
     selection = context.chat_data.get("watch_selection") or set()
-    text, kb = build_watchlist_response(user_id, selected=selection, page=page)
+    mode = context.chat_data.get("watch_mode", "watch")
+    text, kb = build_watchlist_response(
+        user_id, selected=selection, page=page, mode=mode
+    )
     if kb is None:
         await query.edit_message_text(text)
     else:
@@ -698,6 +707,12 @@ async def _handle_page_nav(
 async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
     """Unified entry point for both single and multi-ticker analysis runs.
 
+    Mode-aware via `chat_data["watch_mode"]`:
+      - "watch": runs cache-aware (lookup short-circuits before LLM call).
+      - "refresh": invalidates today's cache for each selected ticker
+        first, so every selection pays for a fresh LLM run. Same picker,
+        same dispatch, only difference is the pre-flight invalidation.
+
     1 selected → cached graph (fast init, no parallel benefit anyway).
     N selected → fresh graph per ticker, run in parallel via asyncio.gather.
     """
@@ -706,6 +721,7 @@ async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) 
         await query.answer("No tickers selected.", show_alert=True)
         return
     chat_id = query.message.chat_id
+    mode = context.chat_data.pop("watch_mode", "watch")
     context.chat_data.pop("watch_selection", None)
     context.chat_data.pop("watch_page", None)
 
@@ -719,6 +735,32 @@ async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) 
             _llm_setup_error_message(reason), parse_mode="MarkdownV2"
         )
         return
+
+    # Refresh mode: drop today's cache entries for each selected ticker
+    # so the upcoming `_run_analysis_for_ticker` calls all miss and pay
+    # for fresh LLM runs. Single config build covers all tickers since
+    # the cache key uses the same provider/deep/quick/rounds/effort.
+    if mode == "refresh":
+        config = build_user_config(user_id, user_config_storage)
+        today_iso = date.today().isoformat()
+        cache_kwargs = result_cache.cache_key_extras(config)
+        invalidated = 0
+        for ticker in selection:
+            if result_cache.invalidate(
+                config["llm_provider"],
+                config["deep_think_llm"],
+                config["quick_think_llm"],
+                ticker,
+                today_iso,
+                **cache_kwargs,
+            ):
+                invalidated += 1
+        logger.info(
+            "refresh: invalidated %d/%d cache entries for %s",
+            invalidated,
+            len(selection),
+            selection,
+        )
 
     if len(selection) == 1:
         # Single-ticker: replace the watchlist menu with the analysis flow.
