@@ -12,6 +12,9 @@ on:
 
 env:
   IMAGE_NAME: ivanwng97/tradingagents-telegram
+  # ghcr.io requires lowercase owner; matches the Docker Hub repo name so
+  # users can pull from either registry with the same image suffix.
+  GHCR_IMAGE_NAME: ghcr.io/ivanwng97/tradingagents-telegram
 
 # A second push to the same ref while a build is in flight cancels the older
 # run — saves CI minutes when fixing a typo immediately after pushing. Cron +
@@ -29,6 +32,8 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      # Required for the ghcr.io login + push using GITHUB_TOKEN.
+      packages: write
 
     steps:
       - name: Checkout repository
@@ -74,12 +79,25 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Log in to GHCR
+        if: steps.gate.outputs.skip != 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Extract metadata
         id: meta
         if: steps.gate.outputs.skip != 'true'
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.IMAGE_NAME }}
+          # Multiline list — each tag in `tags:` below is emitted for every
+          # image listed here, so the build-push step pushes to both
+          # registries in a single multi-arch manifest assembly.
+          images: |
+            ${{ env.IMAGE_NAME }}
+            ${{ env.GHCR_IMAGE_NAME }}
           tags: |
             type=ref,event=branch
             type=sha,format=long
