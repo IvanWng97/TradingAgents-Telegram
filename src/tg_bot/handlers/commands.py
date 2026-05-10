@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import time
+from datetime import date
 
 import markdown
 from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -345,8 +346,6 @@ async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     avoid a module-import cycle (callbacks.py already imports from
     commands.py at top level).
     """
-    from datetime import date
-
     from tg_bot import cache as result_cache
     from tg_bot.analysis import build_user_config
     from tg_bot.handlers.callbacks import (
@@ -530,7 +529,17 @@ async def build_history_response(ticker: str, date_str: str) -> str:
     if state is None:
         return f"No analysis found for {safe_ticker} on {safe_date}\\."
 
-    md_body = format_analysis_result_markdown(ticker, state, signal="historical")
+    # Pass the historical date so the Telegraph page leads with a
+    # "Generated YYYY-MM-DD" header. config is unknown for /history (the
+    # tradingagents on-disk log doesn't record it), so config_summary
+    # stays None.
+    try:
+        gen_date = date.fromisoformat(date_str)
+    except ValueError:
+        gen_date = None
+    md_body = format_analysis_result_markdown(
+        ticker, state, signal="historical", generated_at=gen_date
+    )
     html = markdown.markdown(md_body, extensions=["tables"])
     telegraph_url = await publish_to_telegraph(f"{ticker} {date_str}", html)
 
