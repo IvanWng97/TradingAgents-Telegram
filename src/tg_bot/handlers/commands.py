@@ -377,7 +377,17 @@ async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     # With args → direct fast-path. One-step UX for power users who
-    # already know the ticker; skips the picker entirely.
+    # already know the ticker; skips the picker entirely. Multi-ticker
+    # refresh has a dedicated picker UX (the no-args form), so reject
+    # extra args explicitly rather than silently dropping them — `/refresh
+    # NVDA AAPL` would otherwise look like it queued both but only run NVDA.
+    if len(args) > 1:
+        await update.message.reply_text(
+            "`/refresh` takes one ticker at a time\\. "
+            "For multiple, run `/refresh` alone and use the picker\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
     ticker = args[0].strip().upper()
     if ticker not in watchlist_storage.get_watchlist(user_id):
         await update.message.reply_text(

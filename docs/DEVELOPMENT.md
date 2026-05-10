@@ -35,10 +35,12 @@ pre-commit install   # one-time: lints/formats on every git commit
 Smoke tests live under `scripts/`:
 
 ```bash
-python scripts/smoke_concurrent.py   # 11 orchestration scenarios
-python scripts/smoke_parallel.py     # parallelism wall-time check
-python scripts/smoke_digest.py       # 57 scenarios: storage, picker, fan-out, cancel, precheck
-python scripts/smoke_cache.py        # 9 scenarios: same-day result cache
+python scripts/smoke_concurrent.py    # 11 orchestration scenarios: queue, cancel, retry, shutdown
+python scripts/smoke_parallel.py      # parallelism wall-time check (5 tickers, cap=5)
+python scripts/smoke_digest.py        # 57 scenarios: storage, picker, fan-out, cancel, precheck
+python scripts/smoke_cache.py         # 14 scenarios: same-day result cache + slug variants
+python scripts/smoke_user_config.py   # 16 scenarios: rounds + effort knobs, build_user_config, config_summary
+python scripts/smoke_watchlist.py     # 4 scenarios: /watch + /refresh shared picker
 ```
 
 See [`CLAUDE.md`](../CLAUDE.md) for architecture notes, key contracts, and current limitations.

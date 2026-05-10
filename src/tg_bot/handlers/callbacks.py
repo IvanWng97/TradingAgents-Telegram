@@ -721,9 +721,12 @@ async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) 
         await query.answer("No tickers selected.", show_alert=True)
         return
     chat_id = query.message.chat_id
-    mode = context.chat_data.pop("watch_mode", "watch")
-    context.chat_data.pop("watch_selection", None)
-    context.chat_data.pop("watch_page", None)
+
+    # Read mode without popping yet — if the precheck fails we want chat_data
+    # intact so the next /refresh attempt still sees the right mode (the
+    # picker's edit-message-text replaces the keyboard, but we still want
+    # state-coherent state for the user re-running the command).
+    mode = context.chat_data.get("watch_mode", "watch")
 
     # Fail fast before launching N parallel tasks: a missing /config or
     # missing API key would otherwise produce N identical generic auth
@@ -735,6 +738,11 @@ async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) 
             _llm_setup_error_message(reason), parse_mode="MarkdownV2"
         )
         return
+
+    # Precheck passed — commit to running. Now drop the picker state.
+    context.chat_data.pop("watch_mode", None)
+    context.chat_data.pop("watch_selection", None)
+    context.chat_data.pop("watch_page", None)
 
     # Refresh mode: drop today's cache entries for each selected ticker
     # so the upcoming `_run_analysis_for_ticker` calls all miss and pay
@@ -772,12 +780,15 @@ async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) 
         return
 
     # Multi-ticker: parallel runs share the per-key graph pool — first run
-    # in a fresh pool pays init cost, subsequent reuse warm instances.
+    # in a fresh pool pays init cost, subsequent reuse warm instances. The
+    # header verb mirrors the picker so the user's "🔄 Refresh (N)" tap
+    # transitions to "🔄 Refreshing", not the generic queue verb.
     safe_list = escape_markdown(", ".join(selection), version=2)
     queue_msg_id = query.message.message_id
+    header_verb = "🔄 Refreshing" if mode == "refresh" else "🚀 Running queue"
     try:
         await query.edit_message_text(
-            f"🚀 Running queue: {safe_list}\n\n"
+            f"{header_verb}: {safe_list}\n\n"
             "_Analyses run in parallel — cancel each independently\\._",
             parse_mode="MarkdownV2",
         )

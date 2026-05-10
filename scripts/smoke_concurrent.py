@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import tempfile
 import threading
 import time
 from collections import defaultdict
@@ -31,6 +32,10 @@ from typing import Callable
 
 # Cap=5 across all tests. Individual tests vary ticker count.
 os.environ["TG_BOT_MAX_CONCURRENT_ANALYSES"] = "5"
+# Isolate from any real on-disk cache: a same-day result cache hit would
+# short-circuit `_run_analysis_for_ticker` before the cancel registry +
+# semaphore plumbing fires, defeating the orchestration assertions.
+os.environ["TG_BOT_DATA_DIR"] = tempfile.mkdtemp(prefix="smoke_concurrent_")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -141,7 +146,15 @@ async def fake_publish(title, content):
 
 
 def reset_state() -> None:
-    """Reset every piece of shared state so tests are isolated."""
+    """Reset every piece of shared state so tests are isolated.
+
+    Includes a fresh `TG_BOT_DATA_DIR` per test — multiple scenarios
+    here use overlapping ticker names (`TKR00..`), and the same-day
+    result cache would otherwise let test N's stored entries short-
+    circuit test M's `_run_analysis_for_ticker` call before any slot
+    is acquired or caption rendered. The cache module reads the env
+    var on every call, so swapping it here propagates without re-import.
+    """
     global _STOP_SIGNAL, _BUILD_COUNT
     _STOP_SIGNAL = threading.Event()
     callbacks._STOP_SIGNAL = _STOP_SIGNAL  # not used, but keep symmetry
@@ -149,6 +162,7 @@ def reset_state() -> None:
     analysis_mod._graph_pool.clear()
     with _BUILD_LOCK:
         _BUILD_COUNT = 0
+    os.environ["TG_BOT_DATA_DIR"] = tempfile.mkdtemp(prefix="smoke_concurrent_")
 
 
 def install_mocks(
