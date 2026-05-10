@@ -172,7 +172,9 @@ A change in this repo usually touches more than just code — these surfaces dri
    - `src/tg_bot/handlers/commands.py:start` — onboarding nudge text.
    - `src/tg_bot/handlers/commands.py:help_cmd` and `app.py:BOT_COMMANDS` — slash-menu copy + the canonical command list.
 3. **If env-var surface changed**, sync `.env.example` and `docs/CONFIGURATION.md`. Provider keys also need a row in `analysis.py:PROVIDER_ENV_KEYS` so the LLM precheck can flag a missing key.
-4. **If a handler contract changed** (auth gate, LLM precheck, etc.), existing smoke fixtures may need updating to bypass the new gate or arm the new precondition. We learned this the hard way twice: the H4 auth fail-closed change required updating channel-post tests, and the LLM precheck broke 7 fan-out tests until we added a global bypass in the smoke runner.
+4. **If a handler contract, dataflow, or command surface changed**, smoke coverage moves in lockstep — non-optional, treat "no smoke scenario" as a merge blocker. Two directions:
+   - **Existing fixtures may need updates** to bypass new gates or arm new preconditions. Learned twice: the H4 auth fail-closed change required updating channel-post tests; the LLM precheck broke 7 fan-out tests until we added a global bypass in the smoke runner.
+   - **New behavior needs a new scenario.** A new callback prefix, storage field, command, dataflow path, or invariant from the Architecture section each need at least one assertion in `scripts/smoke_*.py` (extend an existing suite or start a new one for a wholly new subsystem). Every recent PR shipped one — PR #14 added `smoke_cache.py`, PR #15 added `smoke_user_config.py` + 4 scenarios in `smoke_cache.py`, PR #16 added `smoke_watchlist.py`. Don't break the pattern.
 5. **Commit messages must end with `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`** — the system prompt mandates this and the GitHub UI uses it to render Claude as a co-author.
 
 ## Conventions
