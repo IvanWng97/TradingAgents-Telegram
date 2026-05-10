@@ -1,7 +1,7 @@
 """Pure formatting helpers — no I/O, no globals."""
 
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from telegram.helpers import escape_markdown
 
@@ -57,14 +57,43 @@ def build_config_summary(config: dict) -> str:
     return " · ".join(parts)
 
 
-def format_analysis_result_markdown(ticker: str, final_state: dict, signal: str) -> str:
+def format_analysis_result_markdown(
+    ticker: str,
+    final_state: dict,
+    signal: str,
+    config_summary: str | None = None,
+    generated_at: date | datetime | None = None,
+) -> str:
     """Markdown body for the Telegraph page.
 
+    Telegraph URLs are public-by-default and frequently shared bare; the
+    in-Telegram caption carries the `via <provider>...` config trace but
+    the Telegraph page itself was contextless. When `config_summary` or
+    `generated_at` is provided, prepend a blockquote header with the
+    timestamp and config so readers of a shared link can tell which model
+    + run produced the analysis.
+
+    `generated_at` accepts `datetime` for fresh runs (full UTC stamp) and
+    `date` for /history republishes (date only — historical logs don't
+    record the analysis time of day). datetime is checked first because
+    it's a subclass of date.
+
     Currently emits final_trade_decision + trader_investment_plan; other
-    final_state sections (analyst reports, debate verdicts) can be appended
-    later.
+    final_state sections (analyst reports, debate verdicts) can be
+    appended later.
     """
+    header = ""
+    if config_summary or generated_at is not None:
+        bits = []
+        if isinstance(generated_at, datetime):
+            bits.append(f"Generated {generated_at.strftime('%Y-%m-%d %H:%M UTC')}")
+        elif isinstance(generated_at, date):
+            bits.append(f"Generated {generated_at.isoformat()}")
+        if config_summary:
+            bits.append(config_summary)
+        header = f"> {' · '.join(bits)}\n\n"
     return (
+        f"{header}"
         f"{final_state.get('final_trade_decision', 'N/A')}\n\n"
         f"{final_state.get('trader_investment_plan', '')}\n"
     )

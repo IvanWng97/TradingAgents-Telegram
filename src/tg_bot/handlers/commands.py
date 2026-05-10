@@ -530,7 +530,19 @@ async def build_history_response(ticker: str, date_str: str) -> str:
     if state is None:
         return f"No analysis found for {safe_ticker} on {safe_date}\\."
 
-    md_body = format_analysis_result_markdown(ticker, state, signal="historical")
+    # Pass the historical date so the Telegraph page leads with a
+    # "Generated YYYY-MM-DD" header. config is unknown for /history (the
+    # tradingagents on-disk log doesn't record it), so config_summary
+    # stays None.
+    from datetime import date as _date
+
+    try:
+        gen_date = _date.fromisoformat(date_str)
+    except ValueError:
+        gen_date = None
+    md_body = format_analysis_result_markdown(
+        ticker, state, signal="historical", generated_at=gen_date
+    )
     html = markdown.markdown(md_body, extensions=["tables"])
     telegraph_url = await publish_to_telegraph(f"{ticker} {date_str}", html)
 

@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 import uuid
-from datetime import date, time as dt_time
+from datetime import date, datetime, time as dt_time, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import markdown
@@ -565,7 +565,13 @@ async def _run_analysis_for_ticker(
             )
             return "unavailable"
 
-        markdown_content = format_analysis_result_markdown(ticker, final_state, signal)
+        markdown_content = format_analysis_result_markdown(
+            ticker,
+            final_state,
+            signal,
+            config_summary=build_config_summary(config),
+            generated_at=datetime.now(timezone.utc),
+        )
         # `tables` extension generates <table> for GFM pipe-tables; the
         # telegraph_client then rewrites them into <ul> since Telegraph
         # strips <table>. Without this extension the pipes survive as
@@ -1313,7 +1319,13 @@ async def _analyze_one_for_digest(
         # row just renders without a link.
         chart_url = finviz_chart_url(ticker)
         try:
-            md = format_analysis_result_markdown(ticker, final_state, signal)
+            md = format_analysis_result_markdown(
+                ticker,
+                final_state,
+                signal,
+                config_summary=build_config_summary(config),
+                generated_at=datetime.now(timezone.utc),
+            )
             html = markdown.markdown(md, extensions=["tables"])
             html = f'<img src="{chart_url}"/>{html}'
             telegraph_url = await publish_to_telegraph(f"{ticker} Analysis", html)
