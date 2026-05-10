@@ -22,9 +22,12 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-# Conservative ticker validator: A–Z, 0–9, dot, hyphen. Prevents path
-# traversal when joining the ticker into a directory path.
-_TICKER_RE = re.compile(r"^[A-Z0-9.\-]+$")
+# Conservative ticker validator: alphanumerics with `.` or `-` only between
+# alnum groups (matches BRK-B, 7203.T, RDS.A; rejects "..", ".A", "A.", "A..B").
+# `[A-Z0-9.\-]+` looked equivalent but `.` is a literal inside a character
+# class — `..` and `.A` matched, so it didn't actually block path traversal
+# when joining the ticker into a directory path.
+_TICKER_RE = re.compile(r"^[A-Z0-9]+(?:[.\-][A-Z0-9]+)*$")
 _DATE_FILENAME_RE = re.compile(r"^full_states_log_(\d{4}-\d{2}-\d{2})\.json$")
 
 

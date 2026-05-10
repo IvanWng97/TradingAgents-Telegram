@@ -114,6 +114,7 @@ async def _post_stop(application: Application) -> None:
     that no longer have a backing process.
     """
     cancelled = 0
+    digest_cancelled = 0
     try:
         for _chat_id, cd in application.chat_data.items():
             registry = cd.get("analysis_cancels") or {}
@@ -123,12 +124,25 @@ async def _post_stop(application: Application) -> None:
                 if async_event is not None:
                     async_event.set()
                 cancelled += 1
+            # Digest fan-outs have their own cancel registry — different
+            # value shape ({"cancel_event", "tasks"}) and the cancel_event
+            # is shared across all tickers in the fan-out, but the
+            # rationale is identical: signal mid-run cancellation so
+            # in-flight tickers unwind cleanly before the SIGKILL hits.
+            digest_registry = cd.get("digest_cancels") or {}
+            for entry in digest_registry.values():
+                entry["cancel_event"].set()
+                for t in entry.get("tasks") or []:
+                    if not t.done():
+                        t.cancel()
+                digest_cancelled += 1
     except Exception as e:
         logger.warning("post_stop: failed to iterate chat_data: %s", e)
-    if cancelled:
+    if cancelled or digest_cancelled:
         logger.info(
-            "Graceful shutdown: signalled %d in-flight analyses; draining 2s",
+            "Graceful shutdown: signalled %d analyses + %d digests; draining 2s",
             cancelled,
+            digest_cancelled,
         )
         await asyncio.sleep(2.0)
 

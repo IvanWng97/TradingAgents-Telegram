@@ -450,6 +450,10 @@ async def _run_analysis_for_ticker(
     if not TRADINGAGENTS_AVAILABLE:
         if acquired:
             sem.release()
+        # The `try:` block that pops cancel_registry in `finally` starts
+        # below — early-returning here would leak the entry written at L358
+        # for the chat's lifetime. Pop explicitly.
+        cancel_registry.pop(run_id, None)
         await context.bot.edit_message_caption(
             chat_id=chat_id,
             message_id=progress_msg.message_id,
@@ -666,8 +670,14 @@ async def _handle_select_bulk(
     `clear` empties."""
     if action == "all":
         selection = set(watchlist_storage.get_watchlist(user_id))
-    else:
+    elif action == "clear":
         selection = set()
+    else:
+        # Unknown wsel:* sub-action — log and bail rather than silently
+        # falling through to "clear", which would surprise a future
+        # contributor who adds e.g. wsel:invert.
+        logger.warning("_handle_select_bulk: unknown action=%r", action)
+        return
     context.chat_data["watch_selection"] = selection
     page = context.chat_data.get("watch_page", 0)
     mode = context.chat_data.get("watch_mode", "watch")
@@ -973,6 +983,13 @@ async def _handle_cancel(
     elif what == "del":
         await query.edit_message_text("✅ Done\\.", parse_mode="MarkdownV2")
     elif what in ("watch", "hist", "digest"):
+        if what == "watch":
+            # Mirror _handle_done: drop the picker state so a stale
+            # wsel:/wpage:/multi: callback from an older message can't
+            # mutate it before the next /watch or /refresh re-initializes.
+            context.chat_data.pop("watch_mode", None)
+            context.chat_data.pop("watch_selection", None)
+            context.chat_data.pop("watch_page", None)
         try:
             await query.delete_message()
         except Exception:

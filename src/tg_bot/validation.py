@@ -28,9 +28,10 @@ logger = logging.getLogger(__name__)
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 
-# Same conservative regex as history.normalize_ticker — A–Z, 0–9, dot, hyphen.
-# Blocks path-traversal-style junk before any network call.
-_TICKER_RE = re.compile(r"^[A-Z0-9.\-]+$")
+# Same regex as history.normalize_ticker — alnum groups separated by single
+# `.` or `-`. Rejects "..", ".A", "A.", "A..B" so the ticker can't smuggle
+# path-traversal sequences past validation.
+_TICKER_RE = re.compile(r"^[A-Z0-9]+(?:[.\-][A-Z0-9]+)*$")
 
 # US class-share pattern: alphanumerics + a single trailing letter after a dot
 # (BRK.B, BF.B, RDS.A). Doesn't match international tickers like 0700.HK or

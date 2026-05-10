@@ -143,7 +143,9 @@ class GraphPool:
             )
 
 
-_graph_pool: "OrderedDict[tuple[str, str, str], GraphPool]" = OrderedDict()
+_graph_pool: "OrderedDict[tuple[str, str, str, int, Optional[str]], GraphPool]" = (
+    OrderedDict()
+)
 _pool_mutex = threading.Lock()
 
 
