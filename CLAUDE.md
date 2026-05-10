@@ -100,6 +100,20 @@ TRADINGAGENTS_CACHE_DIR=...           # tradingagents data cache; defaults to ~/
 
 **Docker persistence caveat.** `TRADINGAGENTS_RESULTS_DIR` and `TRADINGAGENTS_CACHE_DIR` default to paths under `~/.tradingagents`, which is ephemeral inside the container. To persist `/history` data and avoid re-fetching yfinance on every restart, set them to paths under `/app/data/` (which is bind-mounted) — for example `TRADINGAGENTS_RESULTS_DIR=/app/data/ta-logs`.
 
+## Workflow when making changes
+
+A change in this repo usually touches more than just code — these surfaces drift in parallel and there's no automated check that catches the drift, so verify each pass before declaring done.
+
+1. **Verify the code works.** `.venv/bin/python -m ruff check src/ scripts/ && ruff format --check` and `.venv/bin/python scripts/smoke_digest.py` (currently 57 scenarios). For UI-affecting changes, also restart the bot and exercise the change in Telegram — smoke tests verify code correctness, not feature correctness.
+2. **If user-visible behavior changed**, sync four places that drift independently:
+   - `README.md` — Commands table + Features bullets.
+   - `CLAUDE.md` — Commands table + Key contracts + a "Recently fixed (May 2026)" entry for non-trivial changes.
+   - `src/tg_bot/handlers/commands.py:start` — onboarding nudge text.
+   - `src/tg_bot/handlers/commands.py:help_cmd` and `app.py:BOT_COMMANDS` — slash-menu copy + the canonical command list.
+3. **If env-var surface changed**, sync `.env.example` and `docs/CONFIGURATION.md`. Provider keys also need a row in `analysis.py:PROVIDER_ENV_KEYS` so the LLM precheck can flag a missing key.
+4. **If a handler contract changed** (auth gate, LLM precheck, etc.), existing smoke fixtures may need updating to bypass the new gate or arm the new precondition. We learned this the hard way twice: the H4 auth fail-closed change required updating channel-post tests, and the LLM precheck broke 7 fan-out tests until we added a global bypass in the smoke runner.
+5. **Commit messages must end with `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`** — the system prompt mandates this and the GitHub UI uses it to render Claude as a co-author.
+
 ## Conventions
 
 - Don't reintroduce a `utils.py` junk drawer. New helpers go in a focused module.
