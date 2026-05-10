@@ -204,6 +204,33 @@ def _resolve_models(
     return deep, quick
 
 
+def build_user_config(user_id, user_config_storage) -> dict:
+    """Resolve the tradingagents config dict for this user — same logic
+    `run_trading_analysis` uses, exposed so cache-key construction agrees
+    with the actual run. Returns DEFAULT_CONFIG if the user hasn't picked
+    a provider via /config (matches the run's silent fallback)."""
+    user_provider = user_config_storage.get_llm_provider(user_id)
+    config = DEFAULT_CONFIG.copy()
+    if user_provider:
+        config["llm_provider"] = user_provider
+        deep_model, quick_model = _resolve_models(
+            user_id, user_config_storage, user_provider
+        )
+        if deep_model:
+            config["deep_think_llm"] = deep_model
+        if quick_model:
+            config["quick_think_llm"] = quick_model
+        if not (deep_model and quick_model):
+            logger.warning(
+                "No catalog models for provider %r; using DEFAULT_CONFIG models "
+                "(%s / %s) — the provider's API may reject these.",
+                user_provider,
+                config["deep_think_llm"],
+                config["quick_think_llm"],
+            )
+    return config
+
+
 def run_trading_analysis(
     ticker: str,
     user_id,
@@ -228,25 +255,7 @@ def run_trading_analysis(
     if not TRADINGAGENTS_AVAILABLE:
         return None, None
 
-    user_provider = user_config_storage.get_llm_provider(user_id)
-    config = DEFAULT_CONFIG.copy()
-    if user_provider:
-        config["llm_provider"] = user_provider
-        deep_model, quick_model = _resolve_models(
-            user_id, user_config_storage, user_provider
-        )
-        if deep_model:
-            config["deep_think_llm"] = deep_model
-        if quick_model:
-            config["quick_think_llm"] = quick_model
-        if not (deep_model and quick_model):
-            logger.warning(
-                "No catalog models for provider %r; using DEFAULT_CONFIG models "
-                "(%s / %s) — the provider's API may reject these.",
-                user_provider,
-                config["deep_think_llm"],
-                config["quick_think_llm"],
-            )
+    config = build_user_config(user_id, user_config_storage)
 
     pool = _get_or_create_pool(config)
     set_reporter(reporter)
