@@ -219,12 +219,18 @@ def build_watchlist_response(
     user_id: int,
     selected: set[str] | None = None,
     page: int = 0,
+    mode: str = "watch",
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     """Render the watchlist as MarkdownV2 + a paginated select-mode keyboard.
 
     Every visible ticker is a toggle button (callback `multi:<ticker>`);
     selected ones get a ✅ prefix. Selection persists across pages — the
     Done counter shows the total selected, not just on this page.
+
+    `mode` toggles between the standard `/watch` styling and `/refresh` —
+    keyboard structure is identical in both, only the header text and
+    the Done-button label change. Behavior on tap is differentiated in
+    `_handle_done` via `chat_data["watch_mode"]`.
 
     Layout (multi-page):
         [T1] [T2] [T3]
@@ -241,6 +247,7 @@ def build_watchlist_response(
         return ("Your watchlist is empty.\nUse /add <ticker> to add stocks.", None)
 
     selected = selected or set()
+    is_refresh = mode == "refresh"
 
     total_pages = max(
         1, (len(watchlist) + WATCHLIST_PAGE_SIZE - 1) // WATCHLIST_PAGE_SIZE
@@ -280,30 +287,43 @@ def build_watchlist_response(
             InlineKeyboardButton("✗ Clear", callback_data="wsel:clear"),
         ]
     )
+    done_label = (
+        f"🔄 Refresh ({len(selected)})" if is_refresh else f"✅ Done ({len(selected)})"
+    )
     keyboard.append(
         [
-            InlineKeyboardButton(
-                f"✅ Done ({len(selected)})", callback_data="runall:go"
-            ),
+            InlineKeyboardButton(done_label, callback_data="runall:go"),
             InlineKeyboardButton("❌ Cancel", callback_data="cancel:watch"),
         ]
     )
     # Tickers are already visible as buttons — no point listing them in the
-    # message body too. Just a short header.
-    message = (
-        f"*Your Watchlist \\({len(watchlist)} stocks\\)* — "
-        "tap to select, then ✅ Done\\."
-    )
+    # message body too. Just a short header. Refresh-mode header tells the
+    # user the cache will be dropped so they don't fire it expecting a
+    # cheap re-render.
+    if is_refresh:
+        message = (
+            f"*🔄 Force Refresh \\({len(watchlist)} stocks\\)* — "
+            "tap to select, then 🔄 Refresh\\.\n"
+            "_Drops today's cached result — pays for the LLM run again\\._"
+        )
+    else:
+        message = (
+            f"*Your Watchlist \\({len(watchlist)} stocks\\)* — "
+            "tap to select, then ✅ Done\\."
+        )
     return (message, InlineKeyboardMarkup(keyboard))
 
 
 async def list_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     # Fresh /watch always starts on page 0 with no selection — clear any
-    # leftover state from an abandoned previous render in this chat.
+    # leftover state from an abandoned previous render in this chat. The
+    # watch_mode flag distinguishes /watch from /refresh's picker so
+    # paging callbacks and the Done handler behave correctly per mode.
     context.chat_data["watch_selection"] = set()
     context.chat_data["watch_page"] = 0
-    text, kb = build_watchlist_response(user_id, selected=set(), page=0)
+    context.chat_data["watch_mode"] = "watch"
+    text, kb = build_watchlist_response(user_id, selected=set(), page=0, mode="watch")
     if kb is None:
         await update.message.reply_text(text)
     else:
@@ -311,9 +331,15 @@ async def list_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Force a fresh analysis on a watchlist ticker, bypassing today's
+    """Force a fresh analysis on watchlist ticker(s), bypassing today's
     same-day result cache. Useful when intraday data has shifted enough
     that the user wants a re-analysis instead of the cached morning take.
+
+    Two forms (mirrors `/del NVDA` vs `/del`):
+      - `/refresh NVDA` → direct fast-path, single ticker
+      - `/refresh` (no args) → paginated multi-select picker like `/watch`,
+        but tapping Done invalidates today's cache for each selected
+        ticker before launching the analyses
 
     Late-imports `_run_analysis_for_ticker` and the cache helpers to
     avoid a module-import cycle (callbacks.py already imports from
@@ -330,10 +356,35 @@ async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     user_id = update.effective_user.id
     args = context.args or []
+
+    # No-args → render the same picker as /watch, but flagged so the
+    # Done handler invalidates the cache for each selected ticker
+    # before running. Sharing the keyboard means pagination, bulk
+    # select-all/clear, and selection state all work identically.
     if not args:
+        context.chat_data["watch_selection"] = set()
+        context.chat_data["watch_page"] = 0
+        context.chat_data["watch_mode"] = "refresh"
+        text, kb = build_watchlist_response(
+            user_id, selected=set(), page=0, mode="refresh"
+        )
+        if kb is None:
+            await update.message.reply_text(text)
+        else:
+            await update.message.reply_text(
+                text, reply_markup=kb, parse_mode="MarkdownV2"
+            )
+        return
+
+    # With args → direct fast-path. One-step UX for power users who
+    # already know the ticker; skips the picker entirely. Multi-ticker
+    # refresh has a dedicated picker UX (the no-args form), so reject
+    # extra args explicitly rather than silently dropping them — `/refresh
+    # NVDA AAPL` would otherwise look like it queued both but only run NVDA.
+    if len(args) > 1:
         await update.message.reply_text(
-            "Usage: `/refresh NVDA` — re-runs the analysis even if today's "
-            "result is already cached\\.",
+            "`/refresh` takes one ticker at a time\\. "
+            "For multiple, run `/refresh` alone and use the picker\\.",
             parse_mode="MarkdownV2",
         )
         return

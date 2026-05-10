@@ -303,13 +303,28 @@ def _get_or_create_pool(config: dict) -> GraphPool:
     combo, creating it if not seen yet. Pool builder closes over `config`
     so each newly-built instance binds the right provider+models.
 
+    Pool key includes `max_debate_rounds` and the active effort value
+    because tradingagents bakes both into the graph at construction time
+    (`max_debate_rounds` → `ConditionalLogic.__init__`; effort → LLM
+    client kwargs). Without this, a User-A run with rounds=1 would be
+    reused by a User-B request with rounds=3 silently — User B's "Thorough"
+    selection produces a Fast-mode graph with no error surfaced.
+
     LRU-evicts the oldest key when GRAPH_CACHE_MAX is exceeded — that drops
     all instances for that key (each pinned an LLM client + ChromaDB).
     """
+    # Same effort-key resolution as `cache.cache_key_extras` so the pool
+    # key and the cache key disambiguate the same set of inputs.
+    effort = next(
+        (config[k] for k in EFFORT_KEY_BY_PROVIDER.values() if config.get(k)),
+        None,
+    )
     key = (
         config.get("llm_provider", ""),
         config.get("deep_think_llm", ""),
         config.get("quick_think_llm", ""),
+        config.get("max_debate_rounds", 1),
+        effort,
     )
 
     def _builder():

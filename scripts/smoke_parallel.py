@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import tempfile
 import threading
 import time
 from types import SimpleNamespace
@@ -24,6 +25,10 @@ from types import SimpleNamespace
 # Match cap to ticker count so no runs are queued — we want all 5 to
 # enter the work phase simultaneously.
 os.environ["TG_BOT_MAX_CONCURRENT_ANALYSES"] = "5"
+# Isolate from any real on-disk cache: the same-day result cache would
+# short-circuit our fake_busy_analysis (no LLM call, no WINDOWS entry,
+# `KeyError` later). A fresh tempdir guarantees every lookup misses.
+os.environ["TG_BOT_DATA_DIR"] = tempfile.mkdtemp(prefix="smoke_parallel_")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
