@@ -23,7 +23,7 @@ dependencies = [
     # IANA tz database for `zoneinfo` — the python:3.14-slim base image
     # doesn't ship system tzdata, so ZoneInfo("America/Los_Angeles") would
     # raise ZoneInfoNotFoundError without this. Pure-Python wheel, ~700 KB.
-    "tzdata>=2025.2",
+    "tzdata>=2026.2",
     "tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git",
 ]
 
