@@ -32,6 +32,62 @@ src/tg_bot/
 
 Top-level: `pyproject.toml` (deps), `Dockerfile`, `docker-compose.yml`, `.env`, `data/` (runtime state, gitignored), `docs/` (TROUBLESHOOTING / DEVELOPMENT / TODO — the README delegates to these), `.github/workflows/` (lint + Docker build with SHA-check skip + CodeQL + on-demand Claude review).
 
+## Architecture (for code reviewers)
+
+This section gives reviewers — human or LLM — the structural context needed to spot cross-file regressions before "Key contracts" goes deep on each subsystem.
+
+### Request lifecycle (manual `/watch` tap)
+
+1. Telegram delivers Update → PTB queue. `concurrent_updates=True` ensures cancel taps aren't queued behind in-flight analyses.
+2. **Auth gate** (`auth.py:authorize`, group=-1) — drops Update if user not in `ALLOWED_USER_IDS`. Fail-closed when `effective_user` is missing and an allowlist is set.
+3. **Handler dispatch** — commands match by name; callbacks dispatch by prefix (order-sensitive where overlapping: `cancel_analysis:` before `cancel:`, `digest_cancel:` before `digest:`).
+4. Picker accumulates selection in `chat_data["watch_selection"]`; Done routes through `_handle_done` → `_run_analysis_for_ticker` per ticker.
+5. **Cache lookup** (`cache.lookup`) keyed on `(provider, deep, quick, ticker, date_iso, rounds, effort)` — hits short-circuit before semaphore acquire, reuse persisted `telegraph_url`, skip the progress flow.
+6. **Cancel registry** — write `chat_data["analysis_cancels"][run_id] = (threading.Event, asyncio.Event)` on entry; pop in `finally`.
+7. **Concurrency gate** — `asyncio.wait([sem.acquire(), cancel_async.wait()])` races slot acquisition vs queued-cancel. Above-cap users see `⏳ Queued`.
+8. **GraphPool acquire** — keyed on `(provider, deep, quick, rounds, effort)`; per-key cap matches the semaphore so the pool's blocking-queue branch is unreachable.
+9. **`to_thread(propagate)`** — LangGraph runs; tradingagents threads our `BaseCallbackHandler` into LLM kwargs.
+10. **Per-step progress** — `on_chat_model_start` → `ProgressReporter._dispatch` → `editMessageCaption` (re-attaches cancel keyboard; Telegram drops `reply_markup` otherwise). `cancel_event` is checked **before** every step; raising `CancelledByUserError` aborts the in-flight LLM call (requires `raise_error=True` on the handler — LangChain swallows handler exceptions by default).
+11. **Race-close checks** — three: post-`to_thread`, post-Telegraph publish, before final caption edit. A late tap discards instead of overwriting.
+12. **Cache store** (`cache.store`) — full `final_state` (LangChain messages coerced via `_json_default`); atomic write (tempfile + fsync + rename); sweep stale-date siblings for the same `(config, ticker)`.
+13. **Telegraph publish** via `to_thread(create_page)`.
+14. **Final caption edit** + pool release + cancel registry pop.
+
+Digest fan-out (`/digest` JobQueue fire) diverges at steps 1+4: `run_user_digest` intersects `digest.tickers` with the live watchlist (auto-prunes), sends a header carrying `❌ Cancel digest` (one shared cancel_event for in-flight + `Task.cancel()` for pending), fans out via `_analyze_one_for_digest`. On `Forbidden` (user blocked the bot): auto-disable + cancel JobQueue job.
+
+### State ownership
+
+| State | Location | Lifetime | Persistence | Writer |
+|---|---|---|---|---|
+| Watchlist | `data/watchlist.json` | Forever | Atomic + fsync | `WatchlistStorage` |
+| User config (LLM + digest) | `data/user_config.json` | Forever | Atomic + fsync | `UserConfigStorage` |
+| Same-day cache entries | `data/result_cache/<slug>/<TICKER>/<date>.json` | Until next-date sweep | Atomic per-file + fsync | `cache.store` |
+| Graph instance pool | `analysis._graph_pool` | Process (LRU at `GRAPH_CACHE_MAX`) | Memory | `analysis.acquire` |
+| Ticker validation cache | `validation._cache` | Process (5min TTL, 1024 FIFO) | Memory | `validate_ticker` |
+| `chat_data["watch_selection"]` / `["watch_page"]` / `["watch_mode"]` | PTB chat memory | Until Done/Cancel | Memory | Picker entry + callbacks |
+| `chat_data["analysis_cancels"]` | PTB chat memory | Per analysis | Memory | `_run_analysis_for_ticker` |
+| `chat_data["digest_running:<uid>"]` | PTB chat memory | Per fan-out | Memory | `run-now` callback |
+| `bot_data["start_time"]` / `["analysis_count"]` | PTB bot memory | Process | Memory | `_post_init` / analysis entry |
+| TradingAgents disk logs | `TRADINGAGENTS_RESULTS_DIR/<TICKER>/…` | Forever | tradingagents-managed | tradingagents lib |
+| TradingAgents data cache | `TRADINGAGENTS_CACHE_DIR/…` | Forever | tradingagents-managed | tradingagents lib |
+
+Storage singletons (`watchlist_storage`, `user_config_storage`) are imported from `tg_bot.storage` — never construct your own.
+
+### Cross-cutting invariants
+
+These constraints span multiple files and aren't enforceable by any single test — verify before merging changes that touch the listed surfaces.
+
+1. **Cache key tuple ⊃ GraphPool key tuple.** Cache key = `(provider, deep, quick, ticker, date, rounds, effort)`; pool key = `(provider, deep, quick, rounds, effort)`. They share the config quintuple — adding a graph-baked knob requires extending **both** keys (and the cache slug in `cache._slug`), or two users on different new-knob values silently share an instance configured wrong. Reviewers have missed this; check both at once.
+2. **`concurrent_updates=True` + `raise_error=True` are co-load-bearing for cancellation.** Without `concurrent_updates`, the cancel-button update queues behind the in-flight analysis. Without `raise_error` on the progress callback, LangChain swallows `CancelledByUserError`. Either alone breaks cancel.
+3. **`editMessageCaption` must re-attach `reply_markup`.** Telegram drops the cancel keyboard when not re-sent. `ProgressReporter` re-attaches on every caption edit — new edit paths must do the same.
+4. **MarkdownV2 escaping discipline.** Variable content → `escape_markdown(version=2)`. URL link targets in `[text](url)` → `formatters.escape_md_v2_url`. Code spans → no escape. Mixing produces broken renders or `Bad Request: can't parse entities` at runtime.
+5. **Cancel registry race-close.** Three checks (post-`to_thread`, post-Telegraph, pre-final-edit) ensure a late tap discards rather than overwriting "Cancelling…" with success. New analysis paths must replicate the pattern.
+6. **`final_state` persists whole.** Cache stores the full dict; `_json_default` coerces LangChain messages through `model_dump → dict → {__type__, content} → repr`. New nested object types in `final_state` must survive that fallback chain or the write fails (and the tempfile is `unlink`'d, not retained).
+7. **Watchlist pickers share `chat_data["watch_*"]` across modes.** `/watch` and `/refresh` both populate `watch_selection` / `watch_page` / `watch_mode`. `watch_mode` is set by the entry command, threaded through every re-render handler, popped on Done. New picker variants must follow the same shape.
+8. **Storage mutations go through `_save_async`.** Atomic + fsync via tempfile + `os.replace`. Bypassing risks mid-write corruption on crash.
+9. **Digest schedule: storage is source of truth.** `JobQueue` is rebuilt from `user_config.json` at every `_post_init`. Don't add jobs without persisting the schedule first, or a restart silently drops them.
+10. **Ticker storage normalization.** Watchlists are uppercase + sorted on read; `validate_ticker` rewrites class-share dot forms (`BRK.B → BRK-B`). Lookups against storage must `.upper()` first.
+
 ## Run / deploy
 
 | | Command |
