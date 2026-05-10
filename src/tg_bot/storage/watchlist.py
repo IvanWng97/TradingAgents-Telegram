@@ -9,9 +9,13 @@ class WatchlistStorage(JsonStorage):
     """Watchlists keyed by Telegram user_id (stringified)."""
 
     def _load(self) -> dict[str, list[str]]:
+        # Each user's list is dedup'd (case-folded) and sorted so every
+        # consumer — /watch picker, /digest ticker filter, /history,
+        # /del — sees a stable alphabetical order. Sorting here also
+        # repairs older saves that landed in insertion / arbitrary order.
         raw = super()._load()
         return {
-            user_id: list(
+            user_id: sorted(
                 {t.upper() for t in tickers if isinstance(t, str) and t.strip()}
             )
             for user_id, tickers in raw.items()
@@ -27,6 +31,7 @@ class WatchlistStorage(JsonStorage):
         if ticker in bucket:
             return False
         bucket.append(ticker)
+        bucket.sort()
         await self._save_async()
         return True
 
