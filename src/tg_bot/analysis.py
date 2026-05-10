@@ -204,6 +204,21 @@ def _resolve_models(
     return deep, quick
 
 
+# Per-provider key for the "thinking effort" knob. Vocabulary
+# (low/medium/high) is shared across providers but the config-dict key
+# differs. Providers absent from this map have no effort knob — we
+# silently skip applying it.
+#
+# Public — `cache.cache_key_extras` and `formatters.build_config_summary`
+# both iterate `.values()` to find which key is set on a resolved config
+# dict, so this is the single source of truth.
+EFFORT_KEY_BY_PROVIDER = {
+    "openai": "openai_reasoning_effort",
+    "anthropic": "anthropic_effort",
+    "google": "google_thinking_level",
+}
+
+
 def build_user_config(user_id, user_config_storage) -> dict:
     """Resolve the tradingagents config dict for this user — same logic
     `run_trading_analysis` uses, exposed so cache-key construction agrees
@@ -228,6 +243,16 @@ def build_user_config(user_id, user_config_storage) -> dict:
                 config["deep_think_llm"],
                 config["quick_think_llm"],
             )
+    # Quality knobs — applied independently of provider since the user's
+    # last picked rounds/effort survive provider switches. Rounds always
+    # gets written (graph-level param). Effort only applied when the
+    # current provider has a corresponding key.
+    config["max_debate_rounds"] = user_config_storage.get_max_debate_rounds(user_id)
+    effort = user_config_storage.get_effort_level(user_id)
+    if effort and user_provider:
+        provider_key = EFFORT_KEY_BY_PROVIDER.get(user_provider)
+        if provider_key:
+            config[provider_key] = effort
     return config
 
 

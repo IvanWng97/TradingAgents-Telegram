@@ -299,6 +299,135 @@ async def test_non_serializable_objects_in_state() -> None:
     assert list(cache_dir.glob("*.tmp")) == []
 
 
+async def test_default_rounds_effort_keeps_slug() -> None:
+    """Default users (rounds=1, effort=None) must keep the original slug
+    shape so existing on-disk cache entries don't get orphaned when the
+    rounds/effort feature ships."""
+    _fresh_data_dir()
+    from tg_bot import cache
+
+    # Default kwargs (omitted) should land in the same dir as before.
+    cache.store(
+        "openai",
+        "gpt-4o",
+        "o4-mini",
+        "NVDA",
+        "2026-05-09",
+        SAMPLE_STATE,
+        "BUY",
+        None,
+    )
+    expected = (
+        Path(os.environ["TG_BOT_DATA_DIR"])
+        / "result_cache"
+        / "openai__gpt-4o__o4-mini"
+        / "NVDA"
+        / "2026-05-09.json"
+    )
+    assert expected.is_file(), f"default slug shape changed: missing {expected}"
+
+
+async def test_custom_rounds_isolate_slot() -> None:
+    """rounds=1 vs rounds=2 must NOT share a cache file — they produce
+    genuinely different LLM output."""
+    _fresh_data_dir()
+    from tg_bot import cache
+
+    cache.store(
+        "openai",
+        "gpt-4o",
+        "o4-mini",
+        "NVDA",
+        "2026-05-09",
+        SAMPLE_STATE,
+        "BUY",
+        None,
+        rounds=1,
+    )
+    cache.store(
+        "openai",
+        "gpt-4o",
+        "o4-mini",
+        "NVDA",
+        "2026-05-09",
+        SAMPLE_STATE,
+        "SELL",
+        None,
+        rounds=2,
+    )
+    a = cache.lookup(
+        "openai",
+        "gpt-4o",
+        "o4-mini",
+        "NVDA",
+        "2026-05-09",
+        rounds=1,
+    )
+    b = cache.lookup(
+        "openai",
+        "gpt-4o",
+        "o4-mini",
+        "NVDA",
+        "2026-05-09",
+        rounds=2,
+    )
+    assert a is not None and a["signal"] == "BUY"
+    assert b is not None and b["signal"] == "SELL"
+
+
+async def test_custom_effort_isolates_slot() -> None:
+    """Different effort levels (or None vs set) must isolate cache slots."""
+    _fresh_data_dir()
+    from tg_bot import cache
+
+    cache.store(
+        "openai",
+        "gpt-4o",
+        "o4-mini",
+        "NVDA",
+        "2026-05-09",
+        SAMPLE_STATE,
+        "HOLD",
+        None,
+        effort="high",
+    )
+    # Default effort=None lookup should miss high-effort entry.
+    miss = cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09")
+    assert miss is None
+    hit = cache.lookup(
+        "openai",
+        "gpt-4o",
+        "o4-mini",
+        "NVDA",
+        "2026-05-09",
+        effort="high",
+    )
+    assert hit is not None and hit["signal"] == "HOLD"
+
+
+async def test_generated_at_persisted() -> None:
+    """Every store() stamps `generated_at` (ISO UTC) so cache-hit renders
+    can show the original analysis time instead of the moment-of-tap."""
+    _fresh_data_dir()
+    from tg_bot import cache
+
+    cache.store(
+        "openai",
+        "gpt-4o",
+        "o4-mini",
+        "NVDA",
+        "2026-05-09",
+        SAMPLE_STATE,
+        "BUY",
+        None,
+    )
+    got = cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09")
+    ts = got.get("generated_at")
+    assert isinstance(ts, str) and "T" in ts and ts.endswith("+00:00"), (
+        f"expected ISO UTC string, got {ts!r}"
+    )
+
+
 async def test_atomic_write_is_complete_json() -> None:
     """Reading right after a store must always yield valid JSON — no
     partial writes (the rename pattern guarantees this)."""
@@ -342,6 +471,10 @@ SCENARIOS = [
     ("slug handles special chars", test_slug_handles_special_chars),
     ("non-serializable LangChain objects", test_non_serializable_objects_in_state),
     ("atomic write is complete JSON", test_atomic_write_is_complete_json),
+    ("default rounds/effort don't shift slug", test_default_rounds_effort_keeps_slug),
+    ("custom rounds isolate cache slot", test_custom_rounds_isolate_slot),
+    ("custom effort isolate cache slot", test_custom_effort_isolates_slot),
+    ("generated_at stored on every write", test_generated_at_persisted),
 ]
 
 
