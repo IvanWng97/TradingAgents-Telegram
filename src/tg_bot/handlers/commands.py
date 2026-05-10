@@ -71,6 +71,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "and a ticker filter (multi-select).\n"
         "/history [<ticker>] [YYYY-MM-DD] - Browse past analyses. "
         "No args → ticker picker.\n"
+        "/refresh <ticker> - Force a fresh re-analysis on a watchlist "
+        "ticker, bypassing today's cached result.\n"
         "/status - Bot uptime, graph pool stats, your current LLM config, "
         "next digest fire time.\n"
         "/start - Onboarding message.\n\n"
@@ -306,6 +308,67 @@ async def list_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(text)
     else:
         await update.message.reply_text(text, reply_markup=kb, parse_mode="MarkdownV2")
+
+
+async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Force a fresh analysis on a watchlist ticker, bypassing today's
+    same-day result cache. Useful when intraday data has shifted enough
+    that the user wants a re-analysis instead of the cached morning take.
+
+    Late-imports `_run_analysis_for_ticker` and the cache helpers to
+    avoid a module-import cycle (callbacks.py already imports from
+    commands.py at top level).
+    """
+    from datetime import date
+
+    from tg_bot import cache as result_cache
+    from tg_bot.analysis import build_user_config
+    from tg_bot.handlers.callbacks import (
+        _llm_setup_error_message,
+        _run_analysis_for_ticker,
+    )
+
+    user_id = update.effective_user.id
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: `/refresh NVDA` — re-runs the analysis even if today's "
+            "result is already cached\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+    ticker = args[0].strip().upper()
+    if ticker not in watchlist_storage.get_watchlist(user_id):
+        await update.message.reply_text(
+            f"`{escape_markdown(ticker, version=2)}` is not in your watchlist\\. "
+            "Use /add first\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    # LLM precheck — same gate as /watch's Done button. A /refresh on an
+    # unconfigured user would otherwise produce the same generic auth
+    # error the precheck was added to short-circuit.
+    setup_reason = check_llm_configured(user_id, user_config_storage)
+    if setup_reason is not None:
+        await update.message.reply_text(
+            _llm_setup_error_message(setup_reason), parse_mode="MarkdownV2"
+        )
+        return
+
+    # Drop today's cached entry for this (config, ticker). Next analysis
+    # will miss the cache and pay for the LLM run, then repopulate.
+    config = build_user_config(user_id, user_config_storage)
+    today_iso = date.today().isoformat()
+    result_cache.invalidate(
+        config["llm_provider"],
+        config["deep_think_llm"],
+        config["quick_think_llm"],
+        ticker,
+        today_iso,
+    )
+    chat_id = update.effective_chat.id
+    await _run_analysis_for_ticker(context, chat_id, user_id, ticker)
 
 
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

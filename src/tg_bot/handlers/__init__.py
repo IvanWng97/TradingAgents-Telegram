@@ -10,6 +10,7 @@ from .commands import (
     help_cmd,
     history_cmd,
     list_watchlist,
+    refresh_cmd,
     start,
     status_cmd,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "config_cmd",
     "digest_cmd",
     "history_cmd",
+    "refresh_cmd",
     "status_cmd",
     "button_callback",
 ]

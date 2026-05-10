@@ -23,6 +23,7 @@ Telegram bot wrapping the [TradingAgents](https://github.com/TauricResearch/Trad
 - 🤖 **Multi-Agent Analysis**: Wraps [TradingAgents](https://github.com/TauricResearch/TradingAgents) — analyst → researcher → trader → risk-manager LLM agents collaborate on each ticker, output is a finviz chart + decision + Telegraph link.
 - 📋 **Watchlist Management**: Curate tickers via `/add`, `/del`, `/watch`. Each is yfinance-validated; class-share dot forms (`BRK.B`) auto-correct to dash form (`BRK-B`).
 - ⚡ **Parallel Execution**: Tap multiple tickers and they run in parallel, gated by `TG_BOT_MAX_CONCURRENT_ANALYSES`. Overflow shows `⏳ Queued` until a slot frees.
+- 💾 **Same-day Result Cache**: Two users on the same `/config` tapping the same ticker = one LLM run, not two. `/watch` + the daily digest hitting the same ticker = one run, not two. `/refresh NVDA` forces a re-analysis when intraday data has shifted enough.
 - ⏳ **Live Progress + Cancel**: Per-step pipeline progress streams back into the Telegram message caption. Each in-flight analysis carries a ❌ Cancel button — cancellation is checked at every LLM-call boundary so the abort is near-instant.
 - 🌅 **Daily Digest**: `/digest` schedules a recurring run of a curated subset of your watchlist at any hour + IANA timezone — paginated multi-select picker, one summary message per day with a Telegraph link per ticker.
 - 📜 **Analysis History**: `/history` browses every saved analysis by ticker → date and republishes to Telegraph on demand, with `← Back` round-trip navigation.
@@ -84,6 +85,7 @@ The image is rebuilt automatically by a daily GitHub Action whenever upstream [`
 | `/history` (no args) | Inline-button picker of all tickers with saved analyses |
 | `/history NVDA` | Inline-button picker of recent analysis dates. `← Back` returns to the ticker picker. |
 | `/history NVDA 2026-04-15` | Direct lookup — publishes that day's saved analysis to Telegraph |
+| `/refresh NVDA` | Drop today's cached result and re-run the analysis. Useful when intraday data has shifted enough that the morning's take is stale. |
 | `/status` | Operational snapshot: uptime, # analyses since boot, graph-pool size, your current LLM config |
 
 The Telegram client also exposes a Menu button next to the input field with the same commands (populated via `set_my_commands`), and `/`-autocomplete works after typing the first letter or two.

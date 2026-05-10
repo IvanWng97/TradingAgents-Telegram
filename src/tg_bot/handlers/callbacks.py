@@ -14,8 +14,10 @@ from telegram.error import Forbidden
 from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
+from tg_bot import cache as result_cache
 from tg_bot.analysis import (
     TRADINGAGENTS_AVAILABLE,
+    build_user_config,
     check_llm_configured,
     get_model_options,
     has_model_catalog,
@@ -205,9 +207,46 @@ async def _run_analysis_for_ticker(
     - "cancelled" — user tapped Cancel mid-run.
     - "unavailable" — tradingagents module not loaded.
     """
-    cancel_registry = context.chat_data.setdefault("analysis_cancels", {})
-    # /status counter — counts each analysis attempt across the whole bot.
+    # /status counter — counts each analysis attempt across the whole bot
+    # (both cache hits and live runs, since the user requested an analysis
+    # either way).
     context.bot_data["analysis_count"] = context.bot_data.get("analysis_count", 0) + 1
+
+    # Cache short-circuit: if an identical analysis already ran today
+    # (same provider + deep + quick + ticker, any user), render directly
+    # from the cached final state and skip the LLM run, the progress
+    # flow, the Telegraph round-trip, and the cancel plumbing.
+    config = build_user_config(user_id, user_config_storage)
+    today_iso = date.today().isoformat()
+    cached = result_cache.lookup(
+        config["llm_provider"],
+        config["deep_think_llm"],
+        config["quick_think_llm"],
+        ticker,
+        today_iso,
+    )
+    if cached:
+        logger.info("[%s] result_cache HIT — skipping LLM run", ticker)
+        chart_url = finviz_chart_url(ticker)
+        summary = extract_summary(cached["final_state"].get("final_trade_decision", ""))
+        caption = format_short_message(
+            ticker,
+            cached["signal"],
+            cached.get("telegraph_url"),
+            summary=summary,
+        )
+        try:
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=chart_url,
+                caption=caption,
+                parse_mode="MarkdownV2",
+            )
+        except Exception as e:
+            logger.warning("[%s] cache-hit send_photo failed: %s", ticker, e)
+        return "completed"
+
+    cancel_registry = context.chat_data.setdefault("analysis_cancels", {})
 
     # Per-run UUID is the cancel-callback key. Lets us attach the cancel
     # button via send_photo's reply_markup (which doesn't yet know the
@@ -451,6 +490,20 @@ async def _run_analysis_for_ticker(
             caption=caption,
             parse_mode="MarkdownV2",
             reply_markup=None,
+        )
+        # Persist for the rest of today so the next /watch tap or digest
+        # fire on this ticker (any user with the same config) hits the
+        # short-circuit at the top of the function. Best-effort — write
+        # failures are logged but don't fail the user-facing flow.
+        result_cache.store(
+            config["llm_provider"],
+            config["deep_think_llm"],
+            config["quick_think_llm"],
+            ticker,
+            today_iso,
+            final_state,
+            signal,
+            telegraph_url,
         )
         return "completed"
     except CancelledByUserError:
@@ -1023,6 +1076,26 @@ async def _analyze_one_for_digest(
     `reporter`, when supplied, drives the per-ticker step display in the
     shared digest message — same LangChain hook as the manual flow.
     """
+    # Cache short-circuit before acquiring a semaphore slot — a cached
+    # result needs no LLM call, so we shouldn't burn a slot or trigger
+    # the "Starting…" reporter event.
+    config = build_user_config(user_id, user_config_storage)
+    today_iso = date.today().isoformat()
+    cached = result_cache.lookup(
+        config["llm_provider"],
+        config["deep_think_llm"],
+        config["quick_think_llm"],
+        ticker,
+        today_iso,
+    )
+    if cached:
+        logger.info("digest: result_cache HIT for %s — skipping LLM run", ticker)
+        return {
+            "ticker": ticker,
+            "signal": cached["signal"],
+            "telegraph_url": cached.get("telegraph_url"),
+        }
+
     sem = _get_run_semaphore()
     # Defensive: track whether acquire actually completed before releasing.
     # CPython 3.11+ asyncio.Semaphore.acquire handles cancel-during-await
@@ -1066,6 +1139,20 @@ async def _analyze_one_for_digest(
         except Exception as e:
             logger.warning("digest: telegraph publish failed for %s: %s", ticker, e)
             telegraph_url = None
+
+        # Persist for the rest of today — same key the manual /watch flow
+        # writes, so a digest fan-out followed by a manual /watch tap on
+        # the same ticker only pays for one actual LLM run.
+        result_cache.store(
+            config["llm_provider"],
+            config["deep_think_llm"],
+            config["quick_think_llm"],
+            ticker,
+            today_iso,
+            final_state,
+            signal,
+            telegraph_url,
+        )
 
         return {"ticker": ticker, "signal": signal, "telegraph_url": telegraph_url}
     finally:

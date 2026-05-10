@@ -37,7 +37,8 @@ Smoke tests live under `scripts/`:
 ```bash
 python scripts/smoke_concurrent.py   # 11 orchestration scenarios
 python scripts/smoke_parallel.py     # parallelism wall-time check
-python scripts/smoke_digest.py       # 38 scenarios: storage, picker, fan-out, cancel
+python scripts/smoke_digest.py       # 57 scenarios: storage, picker, fan-out, cancel, precheck
+python scripts/smoke_cache.py        # 9 scenarios: same-day result cache
 ```
 
 See [`CLAUDE.md`](../CLAUDE.md) for architecture notes, key contracts, and current limitations.
