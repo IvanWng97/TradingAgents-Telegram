@@ -2,35 +2,11 @@
 
 Telegram bot wrapping the [TradingAgents](https://github.com/TauricResearch/TradingAgents) library. Users curate a watchlist via Telegram, tap a ticker, and the bot runs `TradingAgentsGraph.propagate(...)` and posts a finviz chart + Telegraph link with the verdict. Per-step pipeline progress is streamed back into the message caption while the analysis runs.
 
-## Layout (`src/` package)
+## Layout
 
-```
-src/tg_bot/
-├── __init__.py            # loads .env once on package import (load_dotenv)
-├── __main__.py            # `python -m tg_bot`
-├── app.py                 # Application builder (concurrent_updates=True), BOT_COMMANDS, main()
-├── auth.py                # authorize() TypeHandler at group=-1
-├── config.py              # Config class — env-driven
-├── analysis.py            # run_trading_analysis + GraphPool + model catalog
-├── chart.py               # finviz_chart_url (with cache-buster)
-├── formatters.py          # format_short_message, extract_summary, format_analysis_result_markdown
-├── progress.py            # ProgressReporter + cancel-aware LangChain BaseCallbackHandler
-├── digest.py              # /digest picker rendering: tz/hour grids + status line + next_fire math
-├── cache.py               # same-day result cache: skip the LLM run on a tap-tap-tap
-├── history.py             # disk-readers for past analyses (/history)
-├── telegraph_client.py    # sanitize + publish (Telegraph instance is lazy)
-├── validation.py          # yfinance-backed validate_ticker + class-share rewrite
-├── handlers/
-│   ├── commands.py        # /start /help /add /del /watch /list /config /digest /history /status
-│   └── callbacks.py       # inline-button dispatcher (prefix-based)
-└── storage/
-    ├── _base.py           # JsonStorage (atomic + fsync writes, async wrapper)
-    ├── watchlist.py       # WatchlistStorage(JsonStorage)
-    ├── user_config.py     # UserConfigStorage(JsonStorage)
-    └── __init__.py        # exports process-wide singletons
-```
+`src/tg_bot/` — package. Entry points: `app.py` (PTB Application + `BOT_COMMANDS` + lifecycle hooks), `__main__.py` (`python -m tg_bot`). Core flow modules: `analysis.py` (`run_trading_analysis` + `GraphPool` + model catalog), `cache.py` (same-day result cache), `progress.py` (cancel-aware LangChain callback), `digest.py` (`/digest` picker), `validation.py` (yfinance-backed ticker check), `history.py` (disk-reader for past analyses), `chart.py` (finviz URL), `formatters.py` (MarkdownV2 captions), `telegraph_client.py` (Telegraph publish), `auth.py` (authorize TypeHandler), `config.py` (env-driven `Config`). Handlers: `handlers/commands.py` (slash commands) + `handlers/callbacks.py` (prefix-dispatched inline buttons). Storage: `storage/{_base,watchlist,user_config}.py` — `JsonStorage` base + two singletons re-exported from `storage/__init__.py`.
 
-Top-level: `pyproject.toml` (deps), `Dockerfile`, `docker-compose.yml`, `.env`, `data/` (runtime state, gitignored), `docs/` (TROUBLESHOOTING / DEVELOPMENT / TODO — the README delegates to these), `.github/workflows/` (lint + Docker build with SHA-check skip + CodeQL + on-demand Claude review).
+Top-level: `pyproject.toml`, `Dockerfile`, `docker-compose.yml`, `.env`, `data/` (runtime state, gitignored), `docs/` (DEVELOPMENT / TROUBLESHOOTING / CONFIGURATION / MANUAL_INSTALL / TODO), `.github/workflows/` (lint + Docker build + CodeQL + on-demand Claude review).
 
 ## Architecture (for code reviewers)
 
@@ -92,7 +68,7 @@ These constraints span multiple files and aren't enforceable by any single test 
 
 | | Command |
 |---|---|
-| Install dev | `pip install -e .` (then `chflags nohidden .venv/lib/python3.14/site-packages/*.pth` once on macOS — see "macOS .pth quirk" below) |
+| Install dev | `pip install -e .` (macOS: see `docs/DEVELOPMENT.md` for the `.pth` flag fix) |
 | Run locally | `python -m tg_bot` (CWD must contain `.env` and `data/`) |
 | Build & deploy | `docker-compose up -d --build` |
 | Update | `git pull && docker-compose up -d --build` (data/ persists via bind mount) |
@@ -101,24 +77,14 @@ These constraints span multiple files and aren't enforceable by any single test 
 
 ## Commands
 
-| Command | Behavior |
-|---|---|
-| `/start`, `/help` | Welcome / help text |
-| `/add NVDA AAPL` | Bulk-add tickers. Each is yfinance-validated in parallel via `validation.validate_ticker`; class-share dot forms (`BRK.B`) auto-correct to dash form (`BRK-B`); invalid symbols are rejected with a hint. |
-| `/add` (no args) | Prompts with `ForceReply`; reply text is parsed as ticker(s) by `add_via_reply` (also validated). |
-| `/del NVDA AAPL` | Bulk-remove |
-| `/del` (no args) | Inline-button picker; each ❌ tap removes immediately, `✅ Done` closes the picker |
-| `/watch`, `/list` | Paginated select-mode watchlist (`WATCHLIST_PAGE_SIZE = 9`, 3×3 grid). Tap any ticker → ✅ prefix and `Done (N)` counter increments. `✓ Select all` / `✗ Clear` are bulk actions across ALL pages. `← Prev` / `Next →` step pages — selection persists across pages. `✅ Done` runs the selected ticker(s); `❌ Cancel` dismisses. Single ticker uses the cached graph (cheap init); 2+ tickers run in parallel via `asyncio.gather`, each pulling its own graph instance from the pool. |
-| `/config` | Five-step flow: provider → deep model → quick model → debate rounds (1/2/3) → reasoning effort (default/low/medium/high). Effort step is skipped for providers without a thinking knob (deepseek/qwen/glm/ollama/xai). Each step has `❌ Cancel` that restores a snapshot of the prior `(provider, deep, quick, rounds, effort)` quintuple |
-| `/digest` | Single-screen picker for a daily watchlist run. First-time users land on the tz picker (10 IANA zones); returning users see a 6×4 hour grid with ✅ on the active hour. `🌍 Time zone` swaps to the tz picker, `📋 Tickers (N/M)` swaps to a paginated multi-select filter (per-tap save, ✓ Select all / ✗ Clear), `▶ Run now` triggers an immediate fan-out, `🔕 Off` disables (preserves hour + tz + tickers for one-tap re-enable). Hour selection captures `chat_id` from the live update so the JobQueue callback can send unsolicited messages later. New users start with `tickers=[]` (must opt in); legacy enabled-digest users get backfilled to their full watchlist on first `_post_init` after upgrade. |
-| `/history` (no args) | Inline picker of all tickers with saved history, with `❌ Cancel` to dismiss |
-| `/history NVDA` | Inline picker of recent analysis dates with `← Back` (returns to ticker picker) and `❌ Cancel` |
-| `/history NVDA 2026-04-15` | Direct lookup by date — publishes the saved analysis to Telegraph (final view also has `← Back` to the date picker) |
-| `/refresh NVDA` | Direct fast-path: drop today's cached result for `NVDA` (current user's full cache key) and run a fresh analysis. |
-| `/refresh` (no args) | Renders the same paginated multi-select picker as `/watch`, with `🔄 Refresh (N)` as the Done button. Tapping Done invalidates today's cache for each selected ticker before launching `_run_analysis_for_ticker`, so the analyses all miss the cache and pay for fresh LLM runs. Mirrors the `/del NVDA` vs `/del` two-form pattern. |
-| `/status` | Diagnostic snapshot — process uptime, total analyses run since boot (`bot_data["analysis_count"]`), graph pool size from `analysis.pool_stats()`, and the requesting user's `(provider, deep, quick)` LLM config |
+User-facing command behavior lives in `README.md` (Commands table) and `src/tg_bot/handlers/commands.py` (implementation). Slash-menu copy is `app.py:BOT_COMMANDS`, registered via `set_my_commands` in `_post_init` (which also stamps `bot_data["start_time"]` for `/status` uptime).
 
-`set_my_commands` in `app.py:_post_init` exposes these as Telegram's native Menu button + `/`-autocomplete. `_post_init` also stamps `bot_data["start_time"] = time.time()` so `/status` can compute uptime.
+Bot-internal mechanics worth knowing that aren't in README:
+
+- **Two-form pattern.** `/add`, `/del`, `/refresh` all support both bulk-arg form (`/del NVDA AAPL`) and no-arg form (inline picker). `/add` (no args) uses `ForceReply` and matches the prompt verbatim against `update.message.reply_to_message.text` so `add_via_reply` only fires on real replies.
+- **Watch + Refresh share the picker.** Both `/watch` (no-args) and `/refresh` (no-args) render via `build_watchlist_response(..., mode=...)`; the only differences are header copy, Done-button label (`✅ Done (N)` vs `🔄 Refresh (N)`), and Done-tap behavior (refresh invalidates cache before launching). `chat_data["watch_mode"]` carries the choice through every re-render. See "Cross-cutting invariants" #7.
+- **`/config` is five steps.** provider → deep → quick → rounds (1/2/3) → effort (default/low/medium/high). Effort step is skipped for providers without a thinking knob (`PROVIDERS_WITH_EFFORT` excludes deepseek/qwen/glm/ollama/xai). `❌ Cancel` at any step rolls back via the snapshot in `user_data["llm_snapshot"]`.
+- **`/history`** parses `<ticker> [YYYY-MM-DD]` — date arg must round-trip through `date.fromisoformat`. Reads tradingagents' on-disk JSON logs at `<results_dir>/<TICKER>/TradingAgentsStrategy_logs/full_states_log_<date>.json`. `← Back` round-trip nav via `hist_back:` prefix.
 
 ## Key contracts
 
@@ -188,12 +154,9 @@ A change in this repo usually touches more than just code — these surfaces dri
 
 ## CI/CD
 
-`.github/workflows/`:
-- **`lint.yml`** — Ruff check + format on push/PR.
-- **`docker-build.yml`** — push to main, daily cron, or manual dispatch builds and dual-pushes to Docker Hub (`ivanwng97/tradingagents-telegram`) AND GitHub Container Registry (`ghcr.io/ivanwng97/tradingagents-telegram`). Same multi-arch manifest, both registries, single push step (`docker/metadata-action` emits tags for both image names). GHCR login uses `secrets.GITHUB_TOKEN` (no extra secret) and the workflow's `packages: write` permission. Trivy CRITICAL/HIGH SARIF upload. The cron run resolves upstream `tradingagents` `HEAD` SHA via `git ls-remote` and skips the build (via `actions/cache@v5`) when the SHA matches the previous build, so unchanged days don't burn CI minutes. Push events use `cache-from: type=gha` for fast iteration; schedule + manual dispatch force `--no-cache` so the `pip install` layer re-resolves tradingagents.
-- **`codeql.yml`** — `security-extended` Python analysis on push/PR/weekly cron.
-- **`claude.yml`** — on-demand Claude review via `@claude` mention in PR comments / review threads. The auto-on-every-PR variant (`claude-code-review.yml`) was removed because the marketplace plugin's installation path is broken upstream.
-- **`dependabot.yml`** — weekly bumps for pip / github-actions / docker.
+`.github/workflows/`: `lint.yml` (Ruff on push/PR), `codeql.yml` (`security-extended` Python on push/PR/weekly cron), `claude.yml` (on-demand `@claude` review in PR threads — auto-on-every-PR variant was removed; marketplace plugin install path broken upstream), `dependabot.yml` (weekly bumps).
+
+`docker-build.yml` is the non-trivial one — push-to-main / daily cron / manual dispatch builds, dual-pushes to Docker Hub (`ivanwng97/tradingagents-telegram`) AND `ghcr.io/ivanwng97/tradingagents-telegram` from a single multi-arch manifest. GHCR login uses the workflow's `secrets.GITHUB_TOKEN` + `packages: write`. Trivy CRITICAL/HIGH SARIF upload. The cron resolves upstream `tradingagents` HEAD via `git ls-remote` and skips the build (via `actions/cache@v5`) when the SHA hasn't changed; push events use `cache-from: type=gha`; schedule + dispatch force `--no-cache` so `pip install` re-resolves tradingagents.
 
 ## Known limitations
 
@@ -205,17 +168,6 @@ A change in this repo usually touches more than just code — these surfaces dri
 - **Build parallelism inside `_builder()`**: building N graphs simultaneously isn't N× faster — LangChain LLM client init and ChromaDB setup serialize partially on internal locks + GIL.
 - `asyncio.to_thread` uses Python's default thread pool (`min(32, cpu_count + 4)`) — beyond that, parallel runs queue at the executor layer regardless of the graph pool size.
 - No structured logging / correlation id. Smoke coverage exists (`scripts/smoke_*.py`) but no pytest suite. Graceful shutdown is wired (`_post_stop` signals every in-flight cancel + 2s drain).
-
-## macOS .pth quirk
-
-Python 3.14's `site.py` skips any `.pth` file marked with the macOS `UF_HIDDEN` filesystem flag. Files inside `~/Desktop` (especially with iCloud Desktop sync enabled) tend to inherit this flag. `pip install -e .` writes `__editable__.tg_bot-0.1.0.pth` which then gets ignored, so `python -m tg_bot` fails with `No module named tg_bot`.
-
-Fix:
-```bash
-chflags nohidden .venv/lib/python3.14/site-packages/*.pth
-```
-
-Apply once after each fresh install. Docker (Linux) is unaffected.
 
 ## Recently fixed (May 2026)
 
