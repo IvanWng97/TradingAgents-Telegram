@@ -381,6 +381,49 @@ def format_full_md_report(
     return _assemble_report(header, _iter_section_blocks(final_state))
 
 
+def _strip_final_decision_header(text: str) -> str:
+    """Drop the leading `**Final Trading Decision: <T>**` and
+    `**Rating: <X>**` boilerplate from `final_trade_decision` — those
+    lines duplicate the signal badge + ticker that the photo caption
+    already shows above the expandable blockquote.
+
+    Pattern-pinned (only the two known prefixes, only at the very top of
+    the text, blank lines between them OK) — no regex, no clever "skip
+    until first sentence" heuristics. Body content can't be silently
+    swallowed because the loop breaks on the first non-matching line,
+    so a later `**Rating: …**` mention inside prose stays put."""
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+        if line.startswith("**Final Trading Decision") or line.startswith("**Rating:"):
+            i += 1
+            continue
+        break
+    return "\n".join(lines[i:]).lstrip()
+
+
+def caption_summary(final_state: dict, max_len: int = 700) -> str:
+    """Caption summary clip sourced from `final_trade_decision` (the
+    post-risk-debate synthesis — matches the signal badge by
+    construction) with the redundant header stripped.
+
+    Earlier the source was `trader_investment_plan`, which produced an
+    action-oriented "I recommend X. Reasoning: …" clip — but the trader
+    runs pre-risk-debate, so for cases where the risk panel tempered
+    the trader's verdict (e.g. trader SELL → final UNDERWEIGHT) the
+    expandable disagreed with the badge. Switching the source guarantees
+    alignment; the strip recovers the 700-char budget we'd otherwise
+    waste duplicating the badge."""
+    return extract_summary(
+        _strip_final_decision_header(final_state.get("final_trade_decision", "")),
+        max_len=max_len,
+    )
+
+
 def extract_summary(decision_text: str, max_len: int = 700) -> str:
     """Word-boundary preview of the decision text — first `max_len` chars,
     clamped at the last space so the slice doesn't end mid-word.

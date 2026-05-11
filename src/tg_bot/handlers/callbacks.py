@@ -31,7 +31,7 @@ from tg_bot.digest import build_digest_response
 from tg_bot.formatters import (
     DECISION_EMOJI,
     build_config_summary,
-    extract_summary,
+    caption_summary,
     format_analysis_result_markdown,
     format_full_md_report,
     format_short_message,
@@ -383,14 +383,12 @@ async def _run_analysis_for_ticker(
     if cached:
         logger.info("[%s] result_cache HIT — skipping LLM run", ticker)
         chart_url = finviz_chart_url(ticker)
-        # trader_investment_plan is the cleanest source for the caption:
-        # action-oriented, ~1 KB, structured "I recommend X. Reasoning: …".
-        # final_trade_decision opens with a 9 KB debate-synthesis preamble
-        # that wastes the 700-char clip on meta-commentary. (Signal still
-        # comes from final_trade_decision via analysis.process_signal.)
-        summary = extract_summary(
-            cached["final_state"].get("trader_investment_plan", "")
-        )
+        # final_trade_decision is the source so the expandable prose
+        # matches the signal badge by construction (both come from the
+        # post-risk-debate synthesis). caption_summary strips the
+        # redundant `**Final Trading Decision: <T>**` + `**Rating: <X>**`
+        # boilerplate so the 700-char clip lands real content.
+        summary = caption_summary(cached["final_state"])
         caption = format_short_message(
             ticker,
             cached["signal"],
@@ -662,10 +660,10 @@ async def _run_analysis_for_ticker(
             await _render_cancelled()
             return "cancelled"
 
-        # See cache-hit branch above — trader_investment_plan is the
-        # right source for the caption preview; final_trade_decision
-        # remains the signal source via analysis.process_signal.
-        summary = extract_summary(final_state.get("trader_investment_plan", ""))
+        # See cache-hit branch above — sourced from final_trade_decision
+        # with the redundant header stripped, so the expandable prose
+        # matches the signal badge by construction.
+        summary = caption_summary(final_state)
         caption = format_short_message(
             ticker,
             signal,

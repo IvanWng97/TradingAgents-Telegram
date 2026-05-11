@@ -25,6 +25,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from tg_bot.formatters import (  # noqa: E402
+    _strip_final_decision_header,
+    caption_summary,
     format_analysis_result_markdown,
     format_full_md_report,
     format_short_message,
@@ -293,6 +295,82 @@ def test_format_short_message_uses_read_online_label() -> None:
     assert "📄" not in out, out
 
 
+def test_strip_final_decision_default_shape() -> None:
+    """Canonical `**Final Trading Decision: <T>**` + `**Rating: <X>**`
+    boilerplate at the top of final_trade_decision gets stripped so
+    the 700-char caption clip doesn't waste budget duplicating the
+    signal badge that's already above the expandable."""
+    raw = (
+        "**Final Trading Decision: BRK-B**\n\n"
+        "**Rating: HOLD**\n\n"
+        "The debate has been vigorous, but it sharpens rather than "
+        "overturns the Research Manager's verdict."
+    )
+    out = _strip_final_decision_header(raw)
+    assert "**Final Trading Decision" not in out, out
+    assert "**Rating:" not in out, out
+    assert out.startswith("The debate has been vigorous"), out
+
+
+def test_strip_only_decision_line_no_rating() -> None:
+    """Some agents emit Final Trading Decision without a separate Rating
+    line — drop just the first, pass body through."""
+    raw = "**Final Trading Decision: BRK-B**\n\nBody starts here immediately."
+    out = _strip_final_decision_header(raw)
+    assert out == "Body starts here immediately.", out
+
+
+def test_strip_only_rating_no_decision_line() -> None:
+    """Or just Rating without the Final Trading Decision line — drop it."""
+    raw = "**Rating: HOLD**\n\nBody starts here."
+    out = _strip_final_decision_header(raw)
+    assert out == "Body starts here.", out
+
+
+def test_strip_passthrough_when_no_boilerplate() -> None:
+    """Text without the known leading patterns is returned untouched —
+    no false-positive stripping of real content."""
+    raw = "The trader recommends HOLD because the market is balanced."
+    assert _strip_final_decision_header(raw) == raw
+
+
+def test_strip_does_not_swallow_body_rating_mention() -> None:
+    """A `**Rating:` line that appears deeper in the body (e.g. inside a
+    list of considerations) must NOT be stripped — only the leading
+    boilerplate, terminated at first non-matching content line."""
+    raw = (
+        "**Final Trading Decision: SPOT**\n\n"
+        "**Rating: UNDERWEIGHT**\n\n"
+        "The risk panel tempered the trader's Sell to Underweight.\n\n"
+        "**Rating considerations:**\n\n- Position size\n- Stop loss"
+    )
+    out = _strip_final_decision_header(raw)
+    assert out.startswith("The risk panel tempered"), out
+    # The body `**Rating considerations:**` line must survive.
+    assert "**Rating considerations:**" in out, out
+
+
+def test_caption_summary_aligns_with_badge_after_strip() -> None:
+    """End-to-end: caption_summary(final_state) yields stripped + clipped
+    text. For a HOLD case, the clip starts on real synthesis content
+    (not the redundant rating header) so the expandable prose lines up
+    with the badge shown above it."""
+    final_state = {
+        "final_trade_decision": (
+            "**Final Trading Decision: SPOT**\n\n"
+            "**Rating: UNDERWEIGHT**\n\n"
+            "After the risk debate, the trader's Sell recommendation is "
+            "tempered to Underweight. Maintain a partial position while "
+            "monitoring the $480 resistance for confirmation."
+        ),
+    }
+    out = caption_summary(final_state)
+    assert out.startswith("After the risk debate"), out
+    # No duplicated badge/ticker line in the 700-char clip.
+    assert "Final Trading Decision" not in out, out
+    assert "Rating: UNDERWEIGHT" not in out, out
+
+
 def test_full_report_keyboard_callback_data_shape() -> None:
     """`getmd:<TICKER>:<DATE>` payload + the `📥 Download .md (all
     sections)` button label is the wire contract — the handler dispatch
@@ -524,6 +602,31 @@ SCENARIOS = [
     (
         "📥 Download .md button payload shape (getmd:<T>:<D>)",
         test_full_report_keyboard_callback_data_shape,
+    ),
+    # final_trade_decision header strip + caption_summary
+    (
+        "strip drops `**Final Trading Decision`+`**Rating:` boilerplate",
+        test_strip_final_decision_default_shape,
+    ),
+    (
+        "strip handles missing Rating line",
+        test_strip_only_decision_line_no_rating,
+    ),
+    (
+        "strip handles missing Final Trading Decision line",
+        test_strip_only_rating_no_decision_line,
+    ),
+    (
+        "strip passes through text without boilerplate",
+        test_strip_passthrough_when_no_boilerplate,
+    ),
+    (
+        "strip does not swallow body Rating mentions",
+        test_strip_does_not_swallow_body_rating_mention,
+    ),
+    (
+        "caption_summary aligns badge + expandable after strip",
+        test_caption_summary_aligns_with_badge_after_strip,
     ),
     # Telegraph packer + full .md report
     (
