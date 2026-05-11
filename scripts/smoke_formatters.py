@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from tg_bot.formatters import (  # noqa: E402
+    _normalize_nested_bullets,
     _strip_final_decision_header,
     caption_summary,
     format_analysis_result_markdown,
@@ -293,6 +294,75 @@ def test_format_short_message_uses_read_online_label() -> None:
     # Old label and its emoji must be gone.
     assert "View Full Report" not in out, out
     assert "📄" not in out, out
+
+
+def test_normalize_indents_bullets_under_numbered_item() -> None:
+    """The buggy LLM-emitted shape (col-0 bullets directly under a
+    numbered item) gets the 4-space pad required for proper <ol><li><ul>
+    nesting by `markdown.markdown`."""
+    md = (
+        "1. First numbered\n\n"
+        "2. **Monitor for:**\n"
+        "- Sub bullet A\n"
+        "- Sub bullet B\n\n"
+        "3. Third numbered"
+    )
+    out = _normalize_nested_bullets(md)
+    assert "    - Sub bullet A" in out, out
+    assert "    - Sub bullet B" in out, out
+
+    import markdown
+
+    html = markdown.markdown(out, extensions=["tables"])
+    # Sub-bullets must end up inside a <ul> nested in <li>2, not as
+    # promoted siblings of the <ol>.
+    assert "<ul>" in html and "</ul>" in html, html
+    # 3 top-level <li> (not 5, which is what the bug produces)
+    # Counting requires excluding the nested ones — quick proxy: the
+    # outer <ol> contains exactly 3 child <li>s before </ol>.
+    ol_block = html[html.find("<ol>") : html.find("</ol>")]
+    # Top-level <li> children are those NOT inside <ul>...</ul>.
+    # Strip the <ul> block and count remaining <li>.
+    while "<ul>" in ol_block:
+        start = ol_block.find("<ul>")
+        end = ol_block.find("</ul>") + len("</ul>")
+        ol_block = ol_block[:start] + ol_block[end:]
+    assert ol_block.count("<li>") == 3, ol_block
+
+
+def test_normalize_leaves_top_level_bullets_alone() -> None:
+    """Top-level bullets not preceded by a numbered list must NOT be
+    indented — they were already at the correct level."""
+    md = "Section header\n\n- Bullet one\n- Bullet two"
+    out = _normalize_nested_bullets(md)
+    assert out == md, out
+
+
+def test_normalize_resets_on_paragraph_break() -> None:
+    """After a numbered list ends (paragraph between), subsequent col-0
+    bullets should NOT be indented — they belong to a new context."""
+    md = (
+        "1. Numbered item\n\n"
+        "Some paragraph that isn't a list item.\n\n"
+        "- Independent bullet\n"
+        "- Another independent bullet"
+    )
+    out = _normalize_nested_bullets(md)
+    # Bullets stay at column 0
+    assert "\n- Independent bullet" in out, out
+    assert "\n- Another independent bullet" in out, out
+    # No false-positive indentation of the bullets
+    assert "    - Independent bullet" not in out, out
+
+
+def test_normalize_preserves_already_indented_bullets() -> None:
+    """Bullets that the LLM already indented correctly must pass through
+    untouched — no double-indent."""
+    md = "1. **Monitor for:**\n    - Already indented A\n    - Already indented B"
+    out = _normalize_nested_bullets(md)
+    # No extra 4 spaces stacked on top of the existing 4-space indent
+    assert "        - Already indented" not in out, out
+    assert "    - Already indented A" in out, out
 
 
 def test_strip_final_decision_default_shape() -> None:
@@ -602,6 +672,23 @@ SCENARIOS = [
     (
         "📥 Download .md button payload shape (getmd:<T>:<D>)",
         test_full_report_keyboard_callback_data_shape,
+    ),
+    # Markdown nested-bullet normalization
+    (
+        "nested bullets get 4-space indent under numbered items",
+        test_normalize_indents_bullets_under_numbered_item,
+    ),
+    (
+        "top-level bullets stay at col 0 (no false-positive indent)",
+        test_normalize_leaves_top_level_bullets_alone,
+    ),
+    (
+        "paragraph break between OL and bullets resets context",
+        test_normalize_resets_on_paragraph_break,
+    ),
+    (
+        "already-indented bullets pass through untouched",
+        test_normalize_preserves_already_indented_bullets,
     ),
     # final_trade_decision header strip + caption_summary
     (

@@ -293,16 +293,75 @@ def _build_header(
     return f"> {' · '.join(bits)}\n\n---\n\n"
 
 
+def _is_numbered_list_start(line: str) -> bool:
+    """True if `line` begins with the `\\d+. ` marker that opens a markdown
+    ordered-list item. Plain-Python (no regex) check: leading digits,
+    one literal dot, one literal space."""
+    i = 0
+    while i < len(line) and line[i].isdigit():
+        i += 1
+    return i > 0 and i + 1 < len(line) and line[i] == "." and line[i + 1] == " "
+
+
+def _is_unindented_bullet(line: str) -> bool:
+    """True if `line` is `- foo` or `* foo` at column 0 — the LLM-emitted
+    shape that needs 4-space padding to nest properly under an `<ol>`."""
+    return len(line) >= 2 and line[0] in "-*" and line[1] == " "
+
+
+def _normalize_nested_bullets(md: str) -> str:
+    """Indent sub-bullets that the LLM emitted at column 0 directly under
+    a numbered-list item so `markdown.markdown` produces `<ol><li><ul><li>…`
+    instead of promoting the bullets to siblings of the parent `<ol>`.
+
+    Python-Markdown needs **4-space** indent for proper nesting under an
+    ordered list; 3 spaces flattens. The LLM very often emits the
+    intuitive-but-wrong:
+
+        4. Monitor for catalysts:
+        - First catalyst
+        - Second catalyst
+
+    State machine: after a `\\d+. ` line, any column-0 `- `/`* ` lines get
+    padded to 4 spaces. Blank lines preserve the state (loose list). A
+    non-blank, non-bullet, non-numbered line resets — sub-list is over.
+
+    Pattern-pinned to the high-confidence case (col-0 bullet directly
+    after numbered context); won't touch bullets that were already
+    correctly indented or top-level bullets in paragraphs that aren't
+    preceded by an OL.
+    """
+    out: list[str] = []
+    inside_ol = False
+    for line in md.splitlines():
+        if _is_numbered_list_start(line):
+            inside_ol = True
+            out.append(line)
+        elif inside_ol and _is_unindented_bullet(line):
+            out.append("    " + line)
+        elif line.strip() == "":
+            out.append(line)
+        else:
+            inside_ol = False
+            out.append(line)
+    return "\n".join(out)
+
+
 def _iter_section_blocks(final_state: dict) -> list[tuple[str, str]]:
     """Yield (title, content) pairs from `_REPORT_SECTIONS`, skipping
     empty/missing fields. Used by both the Telegraph packer and the full
-    .md report so section order/labels stay in lockstep."""
+    .md report so section order/labels stay in lockstep.
+
+    Each section's content runs through `_normalize_nested_bullets` so
+    LLM-emitted unindented sub-bullets under numbered items render as
+    proper nested `<ul>` instead of getting promoted to `<ol>` siblings.
+    """
     blocks: list[tuple[str, str]] = []
     for title, key in _REPORT_SECTIONS:
         value = final_state.get(key) or ""
         value = value.strip()
         if value:
-            blocks.append((title, value))
+            blocks.append((title, _normalize_nested_bullets(value)))
     return blocks
 
 
