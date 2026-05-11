@@ -6,10 +6,12 @@ import threading
 import time
 import uuid
 from datetime import date, datetime, time as dt_time, timezone
+from html import escape as _html_escape
+from io import BytesIO
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import markdown
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.error import Forbidden
 from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
@@ -29,9 +31,9 @@ from tg_bot.digest import build_digest_response
 from tg_bot.formatters import (
     DECISION_EMOJI,
     build_config_summary,
-    escape_md_v2_url,
     extract_summary,
     format_analysis_result_markdown,
+    format_full_md_report,
     format_short_message,
 )
 from tg_bot.handlers.commands import (
@@ -41,6 +43,7 @@ from tg_bot.handlers.commands import (
     build_history_tickers_response,
     build_watchlist_response,
 )
+from tg_bot.history import load_historical_state
 from tg_bot.progress import (
     TOTAL_STEPS,
     CancelledByUserError,
@@ -67,6 +70,65 @@ def _get_run_semaphore() -> asyncio.Semaphore:
     if _run_semaphore is None:
         _run_semaphore = asyncio.Semaphore(Config.MAX_CONCURRENT_ANALYSES)
     return _run_semaphore
+
+
+def _full_report_keyboard(ticker: str, date_iso: str) -> InlineKeyboardMarkup:
+    """Inline keyboard for the `📥 Download .md (all sections)` button.
+
+    Posted on the photo+caption so users opt in to the `.md` instead of
+    seeing it auto-attached. Pairs with the Telegraph `Read Online`
+    link — the web preview is curated (drops sections to fit Telegraph's
+    64 KB cap) while the `.md` is the unbounded archival download.
+    `getmd:<TICKER>:<DATE>` stays well under Telegram's 64-byte
+    callback_data cap."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "📥 Download .md (all sections)",
+                    callback_data=f"getmd:{ticker}:{date_iso}",
+                )
+            ]
+        ]
+    )
+
+
+async def _handle_get_full_md(
+    query, context: ContextTypes.DEFAULT_TYPE, ticker: str, date_str: str
+) -> None:
+    """Build and send the full `.md` report for (ticker, date) on demand.
+
+    Sources `final_state` from tradingagents' on-disk logs (durable, kept
+    forever) — not from `result_cache`, which is same-day only and would
+    miss for older photo+caption messages. Sends as a reply to the photo
+    so the pairing stays visually anchored. Falls back to a brief inline
+    text when the log file is missing (e.g. ephemeral Docker filesystem
+    after restart without TRADINGAGENTS_RESULTS_DIR persistence)."""
+    state = load_historical_state(ticker, date_str)
+    if state is None:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"📥 Markdown report unavailable for {ticker} on {date_str}.",
+            reply_to_message_id=query.message.message_id,
+            allow_sending_without_reply=True,
+            disable_notification=True,
+        )
+        return
+    try:
+        gen_date = date.fromisoformat(date_str)
+    except ValueError:
+        gen_date = None
+    try:
+        md = format_full_md_report(ticker, state, generated_at=gen_date)
+        doc = InputFile(BytesIO(md.encode("utf-8")), filename=f"{ticker}_{date_str}.md")
+        await query.message.chat.send_document(
+            document=doc,
+            reply_to_message_id=query.message.message_id,
+            allow_sending_without_reply=True,
+            disable_notification=True,
+        )
+    except Exception as e:
+        logger.warning("getmd: send_document(.md) failed for %s: %s", ticker, e)
 
 
 def _try_acquire_nonblocking(sem: asyncio.Semaphore) -> bool:
@@ -321,7 +383,14 @@ async def _run_analysis_for_ticker(
     if cached:
         logger.info("[%s] result_cache HIT — skipping LLM run", ticker)
         chart_url = finviz_chart_url(ticker)
-        summary = extract_summary(cached["final_state"].get("final_trade_decision", ""))
+        # trader_investment_plan is the cleanest source for the caption:
+        # action-oriented, ~1 KB, structured "I recommend X. Reasoning: …".
+        # final_trade_decision opens with a 9 KB debate-synthesis preamble
+        # that wastes the 700-char clip on meta-commentary. (Signal still
+        # comes from final_trade_decision via analysis.process_signal.)
+        summary = extract_summary(
+            cached["final_state"].get("trader_investment_plan", "")
+        )
         caption = format_short_message(
             ticker,
             cached["signal"],
@@ -330,12 +399,18 @@ async def _run_analysis_for_ticker(
             config_summary=build_config_summary(config),
             generated_at=result_cache.parse_generated_at(cached.get("generated_at")),
         )
+        # `today_iso` is the cache lookup key AND matches tradingagents'
+        # on-disk log filename (`full_states_log_<local-date>.json`).
+        # Using the cached `generated_at` UTC stamp would drift a day
+        # for late-night runs from negative-UTC zones (e.g. 23:00 PDT →
+        # 06:00 UTC next day → button looks for tomorrow's log → 404).
         try:
             await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=chart_url,
                 caption=caption,
-                parse_mode="MarkdownV2",
+                parse_mode="HTML",
+                reply_markup=_full_report_keyboard(ticker, today_iso),
             )
         except Exception as e:
             logger.warning("[%s] cache-hit send_photo failed: %s", ticker, e)
@@ -587,7 +662,10 @@ async def _run_analysis_for_ticker(
             await _render_cancelled()
             return "cancelled"
 
-        summary = extract_summary(final_state.get("final_trade_decision", ""))
+        # See cache-hit branch above — trader_investment_plan is the
+        # right source for the caption preview; final_trade_decision
+        # remains the signal source via analysis.process_signal.
+        summary = extract_summary(final_state.get("trader_investment_plan", ""))
         caption = format_short_message(
             ticker,
             signal,
@@ -599,8 +677,8 @@ async def _run_analysis_for_ticker(
             chat_id=chat_id,
             message_id=progress_msg.message_id,
             caption=caption,
-            parse_mode="MarkdownV2",
-            reply_markup=None,
+            parse_mode="HTML",
+            reply_markup=_full_report_keyboard(ticker, today_iso),
         )
         # Persist for the rest of today so the next /watch tap or digest
         # fire on this ticker (any user with the same config) hits the
@@ -854,12 +932,23 @@ async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) 
 
 async def _handle_history(query, ticker: str, date_str: str) -> None:
     """Render a historical analysis selected via the date-picker keyboard."""
-    caption = await build_history_response(ticker, date_str)
-    back_kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("← Back", callback_data=f"hist_back:dates:{ticker}")]]
-    )
+    caption, state = await build_history_response(ticker, date_str)
+    # Pair the Back nav with the `📥 Download .md` button when a
+    # record exists (state is None for missing logs — no doc to fetch).
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("← Back", callback_data=f"hist_back:dates:{ticker}")]
+    ]
+    if state is not None:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "📥 Download .md (all sections)",
+                    callback_data=f"getmd:{ticker}:{date_str}",
+                )
+            ]
+        )
     await query.edit_message_text(
-        caption, parse_mode="MarkdownV2", reply_markup=back_kb
+        caption, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows)
     )
 
 
@@ -1357,18 +1446,20 @@ async def _analyze_one_for_digest(
 _DIGEST_PROGRESS_INTERVAL = 2.0  # min seconds between progressive edits
 
 
-def _completed_digest_row(ticker_v2: str, result: dict) -> str:
-    """One MarkdownV2-safe row for a completed ticker. Used by both the
+def _completed_digest_row(ticker_h: str, result: dict) -> str:
+    """One HTML-safe row for a completed ticker. Used by both the
     progress view and the final summary so a row's appearance is stable
     once analysis lands — no jump from generic ✅ to a signal-coloured
-    emoji at the final-edit boundary."""
+    emoji at the final-edit boundary.
+
+    `ticker_h` is pre-escaped (html.escape) by the caller."""
     signal = (result.get("signal") or "—").strip()
     emoji = DECISION_EMOJI.get(signal.upper(), "📊")
-    signal_v2 = escape_markdown(signal, version=2)
+    signal_h = _html_escape(signal)
     if result.get("telegraph_url"):
-        url = escape_md_v2_url(result["telegraph_url"])
-        return f"{emoji} *{ticker_v2}* — *{signal_v2}* [📄]({url})"
-    return f"{emoji} *{ticker_v2}* — *{signal_v2}*"
+        href = _html_escape(result["telegraph_url"], quote=True)
+        return f'{emoji} <b>{ticker_h}</b> — <b>{signal_h}</b> <a href="{href}">📄</a>'
+    return f"{emoji} <b>{ticker_h}</b> — <b>{signal_h}</b>"
 
 
 def _format_digest_progress(
@@ -1376,7 +1467,7 @@ def _format_digest_progress(
     status: dict[str, object],
     safe_date: str,
 ) -> str:
-    """In-progress view. `status[ticker]` is one of:
+    """In-progress view (HTML). `status[ticker]` is one of:
       - "pending"           → ⏳ TICKER
       - ("analyzing", friendly, ordinal) → 📊 TICKER — Friendly (n/M)
       - "cancelled"         → ⛔ TICKER — cancelled
@@ -1384,30 +1475,32 @@ def _format_digest_progress(
       - None                → ❌ TICKER — error
     Watchlist order is preserved so the user can see exactly where the
     fan-out is at any point.
+
+    `safe_date` is pre-escaped (html.escape) by the caller.
     """
     done = sum(1 for s in status.values() if not (s == "pending" or _is_analyzing(s)))
     n = len(watchlist)
-    lines = [f"🌙 *Daily Digest* — {safe_date}  \\({done}/{n}\\)\n"]
+    lines = [f"🌙 <b>Daily Digest</b> — {safe_date}  ({done}/{n})\n"]
     for ticker in watchlist:
         s = status[ticker]
-        ticker_v2 = escape_markdown(ticker, version=2)
+        ticker_h = _html_escape(ticker)
         if s == "pending":
-            lines.append(f"⏳ {ticker_v2}")
+            lines.append(f"⏳ {ticker_h}")
         elif _is_analyzing(s):
             _, friendly, ordinal = s  # type: ignore[misc]
-            friendly_v2 = escape_markdown(friendly, version=2)
+            friendly_h = _html_escape(friendly)
             if ordinal is not None:
                 lines.append(
-                    f"📊 *{ticker_v2}* — {friendly_v2} \\({ordinal}/{TOTAL_STEPS}\\)"
+                    f"📊 <b>{ticker_h}</b> — {friendly_h} ({ordinal}/{TOTAL_STEPS})"
                 )
             else:
-                lines.append(f"📊 *{ticker_v2}* — {friendly_v2}")
+                lines.append(f"📊 <b>{ticker_h}</b> — {friendly_h}")
         elif s == "cancelled":
-            lines.append(f"⛔ *{ticker_v2}* — cancelled")
+            lines.append(f"⛔ <b>{ticker_h}</b> — cancelled")
         elif s is None:
-            lines.append(f"❌ *{ticker_v2}* — error")
+            lines.append(f"❌ <b>{ticker_h}</b> — error")
         else:
-            lines.append(_completed_digest_row(ticker_v2, s))  # type: ignore[arg-type]
+            lines.append(_completed_digest_row(ticker_h, s))  # type: ignore[arg-type]
     return "\n".join(lines)
 
 
@@ -1420,32 +1513,35 @@ def _format_digest_summary(
     status: dict[str, object],
     safe_date: str,
 ) -> str:
-    """Final view: signal-emoji per row + Telegraph link, watchlist order."""
-    lines = [f"🌙 *Daily Digest* — {safe_date}\n"]
+    """Final view (HTML): signal-emoji per row + Telegraph link,
+    watchlist order.
+
+    `safe_date` is pre-escaped (html.escape) by the caller."""
+    lines = [f"🌙 <b>Daily Digest</b> — {safe_date}\n"]
     failed = cancelled = 0
     n = len(watchlist)
     for ticker in watchlist:
         s = status[ticker]
-        ticker_v2 = escape_markdown(ticker, version=2)
+        ticker_h = _html_escape(ticker)
         if s == "cancelled":
-            lines.append(f"⛔ *{ticker_v2}* — cancelled")
+            lines.append(f"⛔ <b>{ticker_h}</b> — cancelled")
             cancelled += 1
             continue
         # Anything else (None from a real failure, or — much more rarely —
         # leftover "pending"/"analyzing" from an interruption that didn't
         # route through the cancel path) renders as ❓ and counts as failed.
         if not isinstance(s, dict):
-            lines.append(f"❓ *{ticker_v2}* — error")
+            lines.append(f"❓ <b>{ticker_h}</b> — error")
             failed += 1
             continue
-        lines.append(_completed_digest_row(ticker_v2, s))
+        lines.append(_completed_digest_row(ticker_h, s))
     tally_parts: list[str] = []
     if cancelled:
         tally_parts.append(f"{cancelled} cancelled")
     if failed:
         tally_parts.append(f"{failed} failed")
     if tally_parts:
-        lines.append(f"\n_{', '.join(tally_parts)} of {n}_")
+        lines.append(f"\n<i>{', '.join(tally_parts)} of {n}</i>")
     return "\n".join(lines)
 
 
@@ -1485,7 +1581,8 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
     """
     full_watchlist = watchlist_storage.get_watchlist(user_id)
     today = date.today().isoformat()
-    safe_date = escape_markdown(today, version=2)
+    # All digest captions are HTML mode now — escape for HTML, not MarkdownV2.
+    safe_date = _html_escape(today)
 
     if not full_watchlist:
         logger.info("digest: skipping user %s — empty watchlist", user_id)
@@ -1543,11 +1640,11 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
             await application.bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    f"🌙 *Daily Digest* — {safe_date}\n\n"
-                    "_No tickers selected\\. Open /digest and tap "
-                    "📋 Tickers to pick what to include\\._"
+                    f"🌙 <b>Daily Digest</b> — {safe_date}\n\n"
+                    "<i>No tickers selected. Open /digest and tap "
+                    "📋 Tickers to pick what to include.</i>"
                 ),
-                parse_mode="MarkdownV2",
+                parse_mode="HTML",
             )
         except Forbidden:
             logger.warning(
@@ -1581,7 +1678,7 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
         header = await application.bot.send_message(
             chat_id=chat_id,
             text=_format_digest_progress(watchlist, status, safe_date),
-            parse_mode="MarkdownV2",
+            parse_mode="HTML",
         )
     except Forbidden:
         logger.warning("digest: user %s blocked the bot, disabling", user_id)
@@ -1645,7 +1742,7 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
                     chat_id=chat_id,
                     message_id=header.message_id,
                     text=text,
-                    parse_mode="MarkdownV2",
+                    parse_mode="HTML",
                     reply_markup=cancel_kb,
                 )
             except Forbidden:
@@ -1718,7 +1815,7 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
             chat_id=chat_id,
             message_id=header.message_id,
             text=_format_digest_summary(watchlist, status, safe_date),
-            parse_mode="MarkdownV2",
+            parse_mode="HTML",
             reply_markup=None,
         )
     except Forbidden:
@@ -1876,3 +1973,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data.startswith("hist:"):
         _, ticker, date_str = data.split(":", 2)
         await _handle_history(query, ticker, date_str)
+    elif data.startswith("getmd:"):
+        _, ticker, date_str = data.split(":", 2)
+        await _handle_get_full_md(query, context, ticker, date_str)

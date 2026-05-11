@@ -4,15 +4,21 @@ import asyncio
 import logging
 import time
 from datetime import date
+from html import escape as _html_escape
 
 import markdown
-from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    ForceReply,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
 from tg_bot.analysis import check_llm_configured, pool_stats
 from tg_bot.digest import build_digest_response, humanize_delta, next_fire, tz_short
-from tg_bot.formatters import escape_md_v2_url, format_analysis_result_markdown
+from tg_bot.formatters import format_analysis_result_markdown
 from tg_bot.history import (
     list_available_dates,
     list_available_tickers,
@@ -447,8 +453,23 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if len(context.args) >= 2:
-        caption = await build_history_response(ticker, context.args[1].strip())
-        await update.message.reply_text(caption, parse_mode="MarkdownV2")
+        date_str = context.args[1].strip()
+        caption, state = await build_history_response(ticker, date_str)
+        # Surface the `📥 Download .md` button only when a record exists;
+        # otherwise it would dead-end on the same "unavailable" path.
+        kb = None
+        if state is not None:
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "📥 Download .md (all sections)",
+                            callback_data=f"getmd:{ticker}:{date_str}",
+                        )
+                    ]
+                ]
+            )
+        await update.message.reply_text(caption, parse_mode="HTML", reply_markup=kb)
     else:
         text, kb = build_history_dates_response(ticker)
         if kb is None:
@@ -516,18 +537,21 @@ def build_history_dates_response(
     )
 
 
-async def build_history_response(ticker: str, date_str: str) -> str:
-    """Load + publish a historical analysis. Returns a MarkdownV2 caption.
+async def build_history_response(ticker: str, date_str: str) -> tuple[str, dict | None]:
+    """Load + publish a historical analysis.
 
-    Shared by the /history command and the `hist:` inline-button callback so
-    both surfaces produce identical output.
+    Returns `(html_caption, final_state)`. The caption uses HTML (callers
+    must pass `parse_mode="HTML"`); `final_state` is the raw on-disk
+    tradingagents log or `None` if no record exists. Callers use
+    `final_state` to send the full `.md` document attachment alongside
+    the caption — same dual-output as the live `/watch` flow.
     """
-    safe_ticker = escape_markdown(ticker, version=2)
-    safe_date = escape_markdown(date_str, version=2)
+    safe_ticker = _html_escape(ticker)
+    safe_date = _html_escape(date_str)
 
     state = load_historical_state(ticker, date_str)
     if state is None:
-        return f"No analysis found for {safe_ticker} on {safe_date}\\."
+        return f"No analysis found for {safe_ticker} on {safe_date}.", None
 
     # Pass the historical date so the Telegraph page leads with a
     # "Generated YYYY-MM-DD" header. config is unknown for /history (the
@@ -543,14 +567,13 @@ async def build_history_response(ticker: str, date_str: str) -> str:
     html = markdown.markdown(md_body, extensions=["tables"])
     telegraph_url = await publish_to_telegraph(f"{ticker} {date_str}", html)
 
-    msg = f"📜 *{safe_ticker}* — {safe_date}\n\n"
+    msg = f"📜 <b>{safe_ticker}</b> — {safe_date}\n\n"
     if telegraph_url:
-        msg += f"📄 [View Full Report]({escape_md_v2_url(telegraph_url)})"
+        href = _html_escape(telegraph_url, quote=True)
+        msg += f'📰 <a href="{href}">Read Online (preview)</a>'
     else:
-        msg += "⚠️ Full report unavailable " + escape_markdown(
-            "(Telegraph publish failed).", version=2
-        )
-    return msg
+        msg += "⚠️ Online report unavailable (Telegraph publish failed)."
+    return msg, state
 
 
 async def config_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
