@@ -280,6 +280,37 @@ def test_format_short_message_escapes_url_chars() -> None:
     assert 'a=1&b="2"' not in out, 'raw `&` or `"` leaked into href'
 
 
+def test_format_short_message_uses_read_online_label() -> None:
+    """Caption labels the Telegraph link as `📰 Read Online (preview)`
+    to disambiguate it from the `📥 Download .md (all sections)` button
+    that sits below the photo. Both said "Full Report" before — confusing
+    when paired."""
+    out = format_short_message("SOFI", "BUY", telegraph_url="https://telegra.ph/x")
+    assert "📰" in out, out
+    assert "Read Online (preview)" in out, out
+    # Old label and its emoji must be gone.
+    assert "View Full Report" not in out, out
+    assert "📄" not in out, out
+
+
+def test_full_report_keyboard_callback_data_shape() -> None:
+    """`getmd:<TICKER>:<DATE>` payload + the `📥 Download .md (all
+    sections)` button label is the wire contract — the handler dispatch
+    in button_callback splits on `:` and the user-facing differentiation
+    from the `📰 Read Online` link depends on this exact label."""
+    # Defer the import: tg_bot.handlers.callbacks pulls in PTB on import.
+    from tg_bot.handlers.callbacks import _full_report_keyboard  # noqa: E402
+
+    kb = _full_report_keyboard("BRK-B", "2026-05-10")
+    rows = kb.inline_keyboard
+    assert len(rows) == 1 and len(rows[0]) == 1, rows
+    btn = rows[0][0]
+    assert btn.callback_data == "getmd:BRK-B:2026-05-10", btn.callback_data
+    assert "📥" in btn.text and "Download .md" in btn.text, btn.text
+    # callback_data must stay under Telegram's 64-byte cap.
+    assert len(btn.callback_data.encode("utf-8")) <= 64
+
+
 # ─── Telegraph packer + full .md report ─────────────────────────────────
 
 
@@ -486,6 +517,14 @@ SCENARIOS = [
         test_format_short_message_telegraph_failure_path,
     ),
     ("URL specials escaped in href", test_format_short_message_escapes_url_chars),
+    (
+        "caption Telegraph link uses 📰 Read Online (preview) label",
+        test_format_short_message_uses_read_online_label,
+    ),
+    (
+        "📥 Download .md button payload shape (getmd:<T>:<D>)",
+        test_full_report_keyboard_callback_data_shape,
+    ),
     # Telegraph packer + full .md report
     (
         "full md report emits all 7 sections in priority order",

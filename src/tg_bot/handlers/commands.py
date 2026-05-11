@@ -5,14 +5,12 @@ import logging
 import time
 from datetime import date
 from html import escape as _html_escape
-from io import BytesIO
 
 import markdown
 from telegram import (
     ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    InputFile,
     Update,
 )
 from telegram.ext import ContextTypes
@@ -20,7 +18,7 @@ from telegram.helpers import escape_markdown
 
 from tg_bot.analysis import check_llm_configured, pool_stats
 from tg_bot.digest import build_digest_response, humanize_delta, next_fire, tz_short
-from tg_bot.formatters import format_analysis_result_markdown, format_full_md_report
+from tg_bot.formatters import format_analysis_result_markdown
 from tg_bot.history import (
     list_available_dates,
     list_available_tickers,
@@ -457,9 +455,21 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if len(context.args) >= 2:
         date_str = context.args[1].strip()
         caption, state = await build_history_response(ticker, date_str)
-        await update.message.reply_text(caption, parse_mode="HTML")
+        # Surface the `📥 Download .md` button only when a record exists;
+        # otherwise it would dead-end on the same "unavailable" path.
+        kb = None
         if state is not None:
-            await _send_history_md(update, context, ticker, date_str, state)
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "📥 Download .md (all sections)",
+                            callback_data=f"getmd:{ticker}:{date_str}",
+                        )
+                    ]
+                ]
+            )
+        await update.message.reply_text(caption, parse_mode="HTML", reply_markup=kb)
     else:
         text, kb = build_history_dates_response(ticker)
         if kb is None:
@@ -527,31 +537,6 @@ def build_history_dates_response(
     )
 
 
-async def _send_history_md(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    ticker: str,
-    date_str: str,
-    state: dict,
-) -> None:
-    """Attach the full `.md` report alongside the /history caption.
-
-    Mirrors `_send_full_md_attachment` from callbacks.py but lives here
-    because it routes through `update.message.reply_document` for the
-    plain /history command. `config_summary=None` because tradingagents
-    on-disk logs don't record the producing LLM config."""
-    try:
-        gen_date = date.fromisoformat(date_str)
-    except ValueError:
-        gen_date = None
-    try:
-        md = format_full_md_report(ticker, state, generated_at=gen_date)
-        doc = InputFile(BytesIO(md.encode("utf-8")), filename=f"{ticker}_{date_str}.md")
-        await update.message.reply_document(doc)
-    except Exception as e:
-        logger.warning("history: send_document(.md) failed for %s: %s", ticker, e)
-
-
 async def build_history_response(ticker: str, date_str: str) -> tuple[str, dict | None]:
     """Load + publish a historical analysis.
 
@@ -585,9 +570,9 @@ async def build_history_response(ticker: str, date_str: str) -> tuple[str, dict 
     msg = f"📜 <b>{safe_ticker}</b> — {safe_date}\n\n"
     if telegraph_url:
         href = _html_escape(telegraph_url, quote=True)
-        msg += f'📄 <a href="{href}">View Full Report</a>'
+        msg += f'📰 <a href="{href}">Read Online (preview)</a>'
     else:
-        msg += "⚠️ Full report unavailable (Telegraph publish failed)."
+        msg += "⚠️ Online report unavailable (Telegraph publish failed)."
     return msg, state
 
 

@@ -43,6 +43,7 @@ from tg_bot.handlers.commands import (
     build_history_tickers_response,
     build_watchlist_response,
 )
+from tg_bot.history import load_historical_state
 from tg_bot.progress import (
     TOTAL_STEPS,
     CancelledByUserError,
@@ -71,36 +72,63 @@ def _get_run_semaphore() -> asyncio.Semaphore:
     return _run_semaphore
 
 
-async def _send_full_md_attachment(
-    bot,
-    chat_id: int,
-    ticker: str,
-    date_iso: str,
-    final_state: dict,
-    config: dict,
-    generated_at: date | datetime | None,
-) -> None:
-    """Build and send the full unbounded `.md` report as a document.
+def _full_report_keyboard(ticker: str, date_iso: str) -> InlineKeyboardMarkup:
+    """Inline keyboard for the `📥 Download .md (all sections)` button.
 
-    Telegraph publishes a packed subset (priority sections, ≤64 KB HTML);
-    this attachment carries everything (all 7 sections, no cap) so users
-    who want raw archival content aren't paying the Telegraph cap-tax.
-    Best-effort: failures are logged but don't propagate — the user
-    already has the photo + caption + Telegraph link by this point."""
+    Posted on the photo+caption so users opt in to the `.md` instead of
+    seeing it auto-attached. Pairs with the Telegraph `Read Online`
+    link — the web preview is curated (drops sections to fit Telegraph's
+    64 KB cap) while the `.md` is the unbounded archival download.
+    `getmd:<TICKER>:<DATE>` stays well under Telegram's 64-byte
+    callback_data cap."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "📥 Download .md (all sections)",
+                    callback_data=f"getmd:{ticker}:{date_iso}",
+                )
+            ]
+        ]
+    )
+
+
+async def _handle_get_full_md(
+    query, context: ContextTypes.DEFAULT_TYPE, ticker: str, date_str: str
+) -> None:
+    """Build and send the full `.md` report for (ticker, date) on demand.
+
+    Sources `final_state` from tradingagents' on-disk logs (durable, kept
+    forever) — not from `result_cache`, which is same-day only and would
+    miss for older photo+caption messages. Sends as a reply to the photo
+    so the pairing stays visually anchored. Falls back to a brief inline
+    text when the log file is missing (e.g. ephemeral Docker filesystem
+    after restart without TRADINGAGENTS_RESULTS_DIR persistence)."""
+    state = load_historical_state(ticker, date_str)
+    if state is None:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"📥 Markdown report unavailable for {ticker} on {date_str}.",
+            reply_to_message_id=query.message.message_id,
+            allow_sending_without_reply=True,
+            disable_notification=True,
+        )
+        return
     try:
-        md = format_full_md_report(
-            ticker,
-            final_state,
-            config_summary=build_config_summary(config),
-            generated_at=generated_at,
+        gen_date = date.fromisoformat(date_str)
+    except ValueError:
+        gen_date = None
+    try:
+        md = format_full_md_report(ticker, state, generated_at=gen_date)
+        doc = InputFile(BytesIO(md.encode("utf-8")), filename=f"{ticker}_{date_str}.md")
+        await query.message.chat.send_document(
+            document=doc,
+            reply_to_message_id=query.message.message_id,
+            allow_sending_without_reply=True,
+            disable_notification=True,
         )
-        doc = InputFile(
-            BytesIO(md.encode("utf-8")),
-            filename=f"{ticker}_{date_iso}.md",
-        )
-        await bot.send_document(chat_id=chat_id, document=doc)
     except Exception as e:
-        logger.warning("[%s] send_document(.md) failed: %s", ticker, e)
+        logger.warning("getmd: send_document(.md) failed for %s: %s", ticker, e)
 
 
 def _try_acquire_nonblocking(sem: asyncio.Semaphore) -> bool:
@@ -371,29 +399,21 @@ async def _run_analysis_for_ticker(
             config_summary=build_config_summary(config),
             generated_at=result_cache.parse_generated_at(cached.get("generated_at")),
         )
+        # `today_iso` is the cache lookup key AND matches tradingagents'
+        # on-disk log filename (`full_states_log_<local-date>.json`).
+        # Using the cached `generated_at` UTC stamp would drift a day
+        # for late-night runs from negative-UTC zones (e.g. 23:00 PDT →
+        # 06:00 UTC next day → button looks for tomorrow's log → 404).
         try:
             await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=chart_url,
                 caption=caption,
                 parse_mode="HTML",
+                reply_markup=_full_report_keyboard(ticker, today_iso),
             )
         except Exception as e:
             logger.warning("[%s] cache-hit send_photo failed: %s", ticker, e)
-        # Use the cached `generated_at` (when the LLM run actually happened)
-        # rather than `date.today()` so the .md filename matches the
-        # decision's origin date, not today's wall clock.
-        cached_at = result_cache.parse_generated_at(cached.get("generated_at"))
-        doc_date = (cached_at or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
-        await _send_full_md_attachment(
-            context.bot,
-            chat_id,
-            ticker,
-            doc_date,
-            cached["final_state"],
-            config,
-            cached_at,
-        )
         return "completed"
 
     cancel_registry = context.chat_data.setdefault("analysis_cancels", {})
@@ -658,7 +678,7 @@ async def _run_analysis_for_ticker(
             message_id=progress_msg.message_id,
             caption=caption,
             parse_mode="HTML",
-            reply_markup=None,
+            reply_markup=_full_report_keyboard(ticker, today_iso),
         )
         # Persist for the rest of today so the next /watch tap or digest
         # fire on this ticker (any user with the same config) hits the
@@ -674,19 +694,6 @@ async def _run_analysis_for_ticker(
             signal,
             telegraph_url,
             **cache_kwargs,
-        )
-        # Full unbounded report as a .md attachment alongside the photo
-        # — users get the analyst sections that didn't fit in the
-        # Telegraph cap. Sent after `result_cache.store` so a publish
-        # failure here doesn't roll back the cache entry.
-        await _send_full_md_attachment(
-            context.bot,
-            chat_id,
-            ticker,
-            today_iso,
-            final_state,
-            config,
-            datetime.now(timezone.utc),
         )
         return "completed"
     except CancelledByUserError:
@@ -926,26 +933,23 @@ async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) 
 async def _handle_history(query, ticker: str, date_str: str) -> None:
     """Render a historical analysis selected via the date-picker keyboard."""
     caption, state = await build_history_response(ticker, date_str)
-    back_kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("← Back", callback_data=f"hist_back:dates:{ticker}")]]
-    )
-    await query.edit_message_text(caption, parse_mode="HTML", reply_markup=back_kb)
-    # Attach the full .md alongside the republished caption (matches the
-    # live /watch flow). state is None when the historical record was
-    # missing — caption already says so, no doc to send.
+    # Pair the Back nav with the `📥 Download .md` button when a
+    # record exists (state is None for missing logs — no doc to fetch).
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("← Back", callback_data=f"hist_back:dates:{ticker}")]
+    ]
     if state is not None:
-        try:
-            gen_date = date.fromisoformat(date_str)
-        except ValueError:
-            gen_date = None
-        try:
-            md = format_full_md_report(ticker, state, generated_at=gen_date)
-            doc = InputFile(
-                BytesIO(md.encode("utf-8")), filename=f"{ticker}_{date_str}.md"
-            )
-            await query.message.chat.send_document(document=doc)
-        except Exception as e:
-            logger.warning("history: send_document(.md) failed for %s: %s", ticker, e)
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "📥 Download .md (all sections)",
+                    callback_data=f"getmd:{ticker}:{date_str}",
+                )
+            ]
+        )
+    await query.edit_message_text(
+        caption, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows)
+    )
 
 
 async def _handle_history_ticker(query, ticker: str) -> None:
@@ -1969,3 +1973,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data.startswith("hist:"):
         _, ticker, date_str = data.split(":", 2)
         await _handle_history(query, ticker, date_str)
+    elif data.startswith("getmd:"):
+        _, ticker, date_str = data.split(":", 2)
+        await _handle_get_full_md(query, context, ticker, date_str)

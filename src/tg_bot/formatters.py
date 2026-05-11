@@ -464,8 +464,8 @@ def format_short_message(
 
     if telegraph_url:
         href = _html_lib.escape(telegraph_url, quote=True)
-        parts.append(f'📄 <a href="{href}">View Full Report</a>')
+        parts.append(f'📰 <a href="{href}">Read Online (preview)</a>')
     else:
-        parts.append("⚠️ Full report unavailable (Telegraph publish failed).")
+        parts.append("⚠️ Online report unavailable (Telegraph publish failed).")
 
     return "\n".join(parts)
