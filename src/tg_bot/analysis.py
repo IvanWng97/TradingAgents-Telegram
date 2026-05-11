@@ -32,9 +32,16 @@ PROVIDER_ENV_KEYS: dict[str, Optional[str]] = {
     "qwen": "DASHSCOPE_API_KEY",
     "glm": "ZHIPUAI_API_KEY",
     "ollama": None,  # local; no key needed
-    # openrouter / azure intentionally absent — their /config selection
-    # short-circuits with a notice and the run falls back to DEFAULT_CONFIG,
-    # which the no-provider branch below already flags.
+    # openrouter has no MODEL_OPTIONS catalog yet so the /config picker
+    # still short-circuits (run falls back to DEFAULT_CONFIG models, which
+    # openrouter happens to accept), but tradingagents' OpenAIClient
+    # natively supports the provider — reads OPENROUTER_API_KEY + routes
+    # to https://openrouter.ai/api/v1. Listing the env key here makes the
+    # precheck surface "openrouter picked but OPENROUTER_API_KEY not set"
+    # instead of the cryptic downstream "OPENAI_API_KEY missing" error
+    # from the openai SDK when the env isn't loaded.
+    "openrouter": "OPENROUTER_API_KEY",
+    # azure: intentionally absent — no native tradingagents support yet.
 }
 
 
@@ -162,6 +169,36 @@ TradingAgentsGraph = None
 DEFAULT_CONFIG = None
 MODEL_OPTIONS: dict = {}
 
+
+# Curated starter catalog for openrouter. tradingagents' upstream
+# `MODEL_OPTIONS` doesn't yet ship openrouter; we patch it in at import
+# time below so /config can let users actually pick a model instead of
+# silently falling back to DEFAULT_CONFIG (the openai catalog — works
+# today against openrouter's permissive routing, but accidental and
+# fragile). Mix of free + paid + reasoning so the first entry (default
+# fallback) is a free model good for testing.
+_OPENROUTER_MODELS: dict[str, list[tuple[str, str]]] = {
+    "quick": [
+        (
+            "Llama 3.3 70B (free, rate-limited)",
+            "meta-llama/llama-3.3-70b-instruct:free",
+        ),
+        ("GPT-4o Mini — Fast, cheap", "openai/gpt-4o-mini"),
+        ("Claude 3.5 Haiku — Fast", "anthropic/claude-3.5-haiku"),
+        ("DeepSeek v3 — Cheap, capable", "deepseek/deepseek-chat"),
+    ],
+    "deep": [
+        (
+            "Llama 3.3 70B (free, rate-limited)",
+            "meta-llama/llama-3.3-70b-instruct:free",
+        ),
+        ("Claude 3.5 Sonnet — Strong reasoning", "anthropic/claude-3.5-sonnet"),
+        ("GPT-4o — Reliable, multimodal", "openai/gpt-4o"),
+        ("DeepSeek R1 — Cheap reasoning", "deepseek/deepseek-r1"),
+    ],
+}
+
+
 try:
     from tradingagents.graph.trading_graph import (
         TradingAgentsGraph as _TradingAgentsGraph,
@@ -171,7 +208,12 @@ try:
 
     TradingAgentsGraph = _TradingAgentsGraph
     DEFAULT_CONFIG = _DEFAULT_CONFIG
-    MODEL_OPTIONS = _MODEL_OPTIONS
+    # Defensive copy + augment with openrouter so a future upstream that
+    # ships its own openrouter entry takes precedence (we only fill the
+    # gap when the key is absent).
+    MODEL_OPTIONS = dict(_MODEL_OPTIONS)
+    if "openrouter" not in MODEL_OPTIONS:
+        MODEL_OPTIONS["openrouter"] = _OPENROUTER_MODELS
     TRADINGAGENTS_AVAILABLE = True
 except ImportError as e:
     logger.warning("TradingAgents not available: %s", e)
@@ -180,7 +222,8 @@ except ImportError as e:
 def get_model_options(provider: str, mode: str) -> list[tuple[str, str]]:
     """Return [(label, model_id), ...] for provider+mode, excluding 'custom' sentinels.
 
-    Returns an empty list for providers not in the catalog (openrouter, azure).
+    Returns an empty list for providers not in the catalog (azure only —
+    openrouter is patched in above with a curated starter list).
     """
     options = MODEL_OPTIONS.get(provider, {}).get(mode, [])
     return [(label, value) for label, value in options if value != "custom"]

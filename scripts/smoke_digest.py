@@ -1594,6 +1594,46 @@ async def test_llm_precheck_ok() -> None:
         os.environ.pop("DEEPSEEK_API_KEY", None)
 
 
+async def test_llm_precheck_openrouter_missing_env_key() -> None:
+    """openrouter is in PROVIDER_ENV_KEYS so the precheck names
+    OPENROUTER_API_KEY when unset, instead of the user hitting the
+    cryptic 'OPENAI_API_KEY missing' from the openai SDK at LLM-init
+    time."""
+    from tg_bot.analysis import check_llm_configured
+
+    s, _ = fresh_storage()
+    await s.set_llm_provider("42", "openrouter")
+    saved = os.environ.pop("OPENROUTER_API_KEY", None)
+    try:
+        reason = check_llm_configured("42", s)
+        assert reason is not None and "OPENROUTER_API_KEY" in reason, reason
+    finally:
+        if saved is not None:
+            os.environ["OPENROUTER_API_KEY"] = saved
+
+
+async def test_openrouter_model_catalog_patched_in() -> None:
+    """tradingagents doesn't ship openrouter in its MODEL_OPTIONS catalog;
+    `analysis.py` patches it in at import so /config doesn't short-circuit.
+    Without this, runs silently use DEFAULT_CONFIG (the openai catalog) —
+    works against openrouter today but accidental + fragile if openrouter
+    tightens model-ID validation."""
+    from tg_bot.analysis import get_model_options, has_model_catalog
+
+    assert has_model_catalog("openrouter"), (
+        "openrouter must have a catalog so /config can pick models"
+    )
+    quick = get_model_options("openrouter", "quick")
+    deep = get_model_options("openrouter", "deep")
+    assert len(quick) >= 3 and len(deep) >= 3, (quick, deep)
+    # Slugs must be `vendor/model[:variant]` — openrouter rejects bare ids.
+    for label, slug in quick + deep:
+        assert "/" in slug, f"openrouter slug {slug!r} missing vendor prefix"
+    # Free tier must be reachable (default fallback = first entry).
+    assert ":free" in quick[0][1], f"first quick entry should be free: {quick[0]}"
+    assert ":free" in deep[0][1], f"first deep entry should be free: {deep[0]}"
+
+
 # --- Runner ----------------------------------------------------------------
 
 
@@ -1681,6 +1721,14 @@ SCENARIOS = [
     ("precheck flags missing /config", test_llm_precheck_no_provider),
     ("precheck flags missing API key", test_llm_precheck_missing_env_key),
     ("precheck passes when provider+key set", test_llm_precheck_ok),
+    (
+        "precheck names OPENROUTER_API_KEY for openrouter users",
+        test_llm_precheck_openrouter_missing_env_key,
+    ),
+    (
+        "openrouter model catalog patched into MODEL_OPTIONS",
+        test_openrouter_model_catalog_patched_in,
+    ),
 ]
 
 
