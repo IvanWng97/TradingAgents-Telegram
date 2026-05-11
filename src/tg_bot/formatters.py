@@ -1,9 +1,12 @@
 """Pure formatting helpers — no I/O, no globals."""
 
+import html as _html_lib
 import re
 from datetime import date, datetime, timezone
+from html.parser import HTMLParser
+from typing import Optional
 
-from telegram.helpers import escape_markdown
+import markdown as _markdown_lib
 
 
 _MD_V2_URL_ESCAPE = re.compile(r"([\\)])")
@@ -14,6 +17,193 @@ def escape_md_v2_url(url: str) -> str:
     target `[text](url)`. Other characters don't need escaping per
     Telegram's spec, so we deliberately leave them alone."""
     return _MD_V2_URL_ESCAPE.sub(r"\\\1", url)
+
+
+# ─── HTML sanitization for Telegram captions ─────────────────────────────
+#
+# The analysis-output captions (format_short_message, /history republish,
+# digest summary) run LLM markdown through markdown.markdown(...) and then
+# this sanitizer so the output stays within Telegram's HTML whitelist.
+# Telegram silently rejects messages containing tags it doesn't recognize
+# ("Bad Request: can't parse entities"), so the sanitizer is load-bearing.
+#
+# Telegram's allowed HTML tags (per core.telegram.org/bots/api#html-style):
+#   <b>, <strong>, <i>, <em>, <u>, <ins>, <s>, <strike>, <del>,
+#   <a href="…">, <code>, <pre>, <blockquote>, <blockquote expandable>,
+#   <span class="tg-spoiler">, <tg-spoiler>, <tg-emoji emoji-id="…">
+#
+# Anything else (h1-h6, p, br, hr, ul, ol, li, table, …) must be either
+# stripped or converted to allowed equivalents before sending.
+
+_TELEGRAM_INLINE_TAGS = {
+    "b",
+    "strong",
+    "i",
+    "em",
+    "u",
+    "ins",
+    "s",
+    "strike",
+    "del",
+    "code",
+}
+_TELEGRAM_BLOCK_TAGS = {"pre", "blockquote", "tg-spoiler"}
+_TAG_REWRITE = {"strong": "b", "em": "i", "ins": "u", "strike": "s", "del": "s"}
+# Tags whose content gets dropped entirely (not just the tag): tables blow
+# the caption budget and don't render usefully inline; images aren't
+# expressible in a text caption at all. Users see these via Telegraph.
+_DROP_WITH_CONTENT = {"table", "img"}
+
+
+class _TelegramHtmlSanitizer(HTMLParser):
+    """Walk HTML via stdlib html.parser and rebuild a Telegram-safe string.
+
+    Strategy:
+      - Allowed inline tags pass through (`strong`→`b`, etc.).
+      - Headers `<h1>`-`<h6>` become `<b>…</b>` + blank line.
+      - `<p>`/`<br>` drop the tag but emit appropriate newlines.
+      - `<hr>` emits a blank line.
+      - `<ul>`/`<ol>`/`<li>` flatten to bulleted lines (`• `).
+      - `<table>` and `<img>` are dropped with their content (see
+        `_DROP_WITH_CONTENT`). Captions have a 1024-char budget and
+        tables don't render usefully inline; users get them in Telegraph.
+      - `<a href="…">` passes through with the href re-escaped via html.escape.
+      - `<blockquote>` and `<blockquote expandable>` pass through (the
+        latter is what powers the collapsible analysis summary).
+      - Unknown tags: tag dropped, inner text preserved (never silently
+        lose content).
+      - Inner text is re-escaped via html.escape (the parser decodes entities
+        as it walks, so emitting raw would corrupt `<`/`&`/etc).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._parts: list[str] = []
+        # Increment when we enter a tag whose entire subtree is dropped
+        # (tables, images). All data + nested tags are suppressed until
+        # the matching close decrements back to 0.
+        self._skip_depth = 0
+
+    def _emit_block_break(self, count: int = 2) -> None:
+        # Don't stack multiple blank lines on top of each other.
+        existing = "".join(self._parts[-3:])
+        trailing_nl = len(existing) - len(existing.rstrip("\n"))
+        needed = max(0, count - trailing_nl)
+        if needed:
+            self._parts.append("\n" * needed)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        if tag in _DROP_WITH_CONTENT or self._skip_depth > 0:
+            if tag in _DROP_WITH_CONTENT:
+                self._skip_depth += 1
+            return
+        if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            self._parts.append("<b>")
+            return
+        if tag == "p":
+            return
+        if tag == "br":
+            self._emit_block_break(1)
+            return
+        if tag == "hr":
+            self._emit_block_break(2)
+            return
+        if tag in {"ul", "ol"}:
+            self._emit_block_break(1)
+            return
+        if tag == "li":
+            self._parts.append("• ")
+            return
+        if tag == "a":
+            href = next((v for k, v in attrs if k == "href" and v), None)
+            if not href:
+                # bare <a>; drop the tag, keep inner text
+                return
+            self._parts.append(f'<a href="{_html_lib.escape(href, quote=True)}">')
+            return
+        if tag == "blockquote":
+            expandable = any(k == "expandable" for k, _ in attrs)
+            self._parts.append(
+                "<blockquote expandable>" if expandable else "<blockquote>"
+            )
+            return
+        out = _TAG_REWRITE.get(tag, tag)
+        if out in _TELEGRAM_INLINE_TAGS or out in _TELEGRAM_BLOCK_TAGS:
+            self._parts.append(f"<{out}>")
+            return
+        # Unknown tag — drop, preserve children.
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._skip_depth > 0:
+            if tag in _DROP_WITH_CONTENT:
+                self._skip_depth -= 1
+            return
+        if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            self._parts.append("</b>")
+            self._emit_block_break(2)
+            return
+        if tag == "p":
+            self._emit_block_break(2)
+            return
+        if tag in {"br", "hr"}:
+            return
+        if tag in {"ul", "ol"}:
+            self._emit_block_break(1)
+            return
+        if tag == "li":
+            self._parts.append("\n")
+            return
+        if tag == "a":
+            # Close only if we actually opened a tag (skipped bare <a>).
+            if self._parts and self._parts[-1].startswith('<a href="'):
+                # nothing was emitted inside — drop the unclosed open tag
+                self._parts.pop()
+                return
+            self._parts.append("</a>")
+            return
+        if tag == "blockquote":
+            self._parts.append("</blockquote>")
+            return
+        out = _TAG_REWRITE.get(tag, tag)
+        if out in _TELEGRAM_INLINE_TAGS or out in _TELEGRAM_BLOCK_TAGS:
+            self._parts.append(f"</{out}>")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth > 0:
+            return
+        # `html.parser` decodes entities as it walks (so `&amp;` arrives
+        # as `&`). We must re-escape on emit to avoid corrupting captions.
+        self._parts.append(_html_lib.escape(data, quote=False))
+
+    def result(self) -> str:
+        # Collapse runs of >2 consecutive newlines that crept in across
+        # block boundaries.
+        joined = "".join(self._parts)
+        return re.sub(r"\n{3,}", "\n\n", joined).strip()
+
+
+def sanitize_html_for_telegram(html_in: str) -> str:
+    """Strip / rewrite HTML so only Telegram's allowed tag set remains.
+
+    Idempotent on already-clean input. Used by `markdown_to_telegram_html`
+    to ensure LLM-produced markdown is renderable in Telegram captions
+    (and by callers that already hold HTML)."""
+    parser = _TelegramHtmlSanitizer()
+    parser.feed(html_in)
+    parser.close()
+    return parser.result()
+
+
+def markdown_to_telegram_html(text: str) -> str:
+    """Convert markdown to Telegram-flavor HTML.
+
+    Pipeline: `markdown.markdown(text, extensions=["tables"])` produces
+    full HTML (with `<h1>`, `<table>`, `<p>`, `<ul>`, etc.); the
+    sanitizer rewrites that to Telegram's allowed tag set."""
+    if not text:
+        return ""
+    rendered = _markdown_lib.markdown(text, extensions=["tables"])
+    return sanitize_html_for_telegram(rendered)
 
 
 # MarkdownV2-aware emoji prefix per decision verb. Public — reused by the
@@ -105,9 +295,16 @@ def format_analysis_result_markdown(
     )
 
 
-def extract_summary(decision_text: str, max_len: int = 280) -> str:
+def extract_summary(decision_text: str, max_len: int = 700) -> str:
     """Word-boundary preview of the decision text — first `max_len` chars,
     clamped at the last space so the slice doesn't end mid-word.
+
+    Default 700 sized for HTML-mode captions: the summary is wrapped in a
+    `<blockquote expandable>` inside a 1024-char-budget photo caption.
+    After fixed overhead (signal line, timestamp, config trace, Telegraph
+    link, blockquote tags) and ~10-15% HTML escaping bloat from
+    `markdown_to_telegram_html`, 700 raw-markdown chars lands the caption
+    comfortably under the limit.
 
     Agents emit `final_trade_decision` in inconsistent formats (sometimes
     leading with a markdown header, sometimes a field list, sometimes prose).
@@ -135,43 +332,54 @@ def format_short_message(
     config_summary: str | None = None,
     generated_at: datetime | None = None,
 ) -> str:
-    """MarkdownV2 caption shown alongside the chart in the Telegram message.
+    """HTML caption shown alongside the chart in the Telegram message.
 
-    `generated_at` defaults to "now" for fresh runs. Cache-hit paths pass
-    the original analysis time so users see when the cached decision was
-    actually made, not the moment they tapped the button.
+    **HTML, not MarkdownV2** — call sites must pass `parse_mode="HTML"`.
+    The caption used to be MarkdownV2 but LLM agents emit markdown
+    (`**bold**`, `## headers`, `[links](url)`) that `escape_markdown`
+    flattened to literal characters; users saw raw `**Bear Case**`
+    instead of formatted text. HTML mode lets us convert the markdown
+    via `markdown_to_telegram_html` so the inline formatting renders.
+
+    The summary is wrapped in `<blockquote expandable>`: collapsed
+    preview is ~3 lines on mobile, tap to expand to ~700 chars of
+    formatted rationale (bold/italic/links/code).
+
+    `generated_at` defaults to "now" for fresh runs. Cache-hit paths
+    pass the original analysis time so users see when the cached
+    decision was made, not the moment they tapped.
 
     `config_summary` (optional) renders a one-line trace of the LLM
-    config that produced this analysis — provider/deep-model plus
-    rounds/effort suffix when the user customized them via /config.
+    config — provider/deep-model plus rounds/effort suffix when
+    customized via /config.
 
-    All user-supplied text is escaped via `telegram.helpers.escape_markdown`
-    so a stray `.` `-` `!` `(` doesn't break parsing.
+    All user-supplied strings are escaped via `html.escape`; LLM
+    markdown is run through `markdown_to_telegram_html` which whitelists
+    Telegram's allowed tag set and drops everything else.
     """
     emoji = DECISION_EMOJI.get(signal.strip().upper(), "📊")
-    safe_ticker = escape_markdown(ticker, version=2)
-    safe_signal = escape_markdown(signal, version=2)
+    safe_ticker = _html_lib.escape(ticker)
+    safe_signal = _html_lib.escape(signal)
     when = generated_at if generated_at else datetime.now(timezone.utc)
-    timestamp = escape_markdown(when.strftime("%Y-%m-%d %H:%M UTC"), version=2)
+    timestamp = _html_lib.escape(when.strftime("%Y-%m-%d %H:%M UTC"))
 
-    lines = [
-        f"{emoji} *{safe_ticker}* — *{safe_signal}*",
-        "",
-    ]
+    parts = [f"{emoji} <b>{safe_ticker}</b> — <b>{safe_signal}</b>", ""]
     if summary:
-        lines.append(escape_markdown(summary, version=2))
-        lines.append("")
-    lines.append(f"_Generated {timestamp}_")
+        # Run the (markdown) summary through markdown→HTML + Telegram-
+        # whitelist sanitizer, then wrap in expandable blockquote.
+        summary_html = markdown_to_telegram_html(summary)
+        if summary_html:
+            parts.append(f"<blockquote expandable>{summary_html}</blockquote>")
+            parts.append("")
+    parts.append(f"<i>Generated {timestamp}</i>")
     if config_summary:
-        lines.append(f"_via {escape_markdown(config_summary, version=2)}_")
-    lines.append("")
+        parts.append(f"<i>via {_html_lib.escape(config_summary)}</i>")
+    parts.append("")
 
     if telegraph_url:
-        lines.append(f"📄 [View Full Report]({escape_md_v2_url(telegraph_url)})")
+        href = _html_lib.escape(telegraph_url, quote=True)
+        parts.append(f'📄 <a href="{href}">View Full Report</a>')
     else:
-        lines.append(
-            "⚠️ Full report unavailable "
-            + escape_markdown("(Telegraph publish failed).", version=2)
-        )
+        parts.append("⚠️ Full report unavailable (Telegraph publish failed).")
 
-    return "\n".join(lines)
+    return "\n".join(parts)

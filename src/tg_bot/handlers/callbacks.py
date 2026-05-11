@@ -12,6 +12,8 @@ import markdown
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import Forbidden
 from telegram.ext import ContextTypes
+from html import escape as _html_escape
+
 from telegram.helpers import escape_markdown
 
 from tg_bot import cache as result_cache
@@ -29,7 +31,6 @@ from tg_bot.digest import build_digest_response
 from tg_bot.formatters import (
     DECISION_EMOJI,
     build_config_summary,
-    escape_md_v2_url,
     extract_summary,
     format_analysis_result_markdown,
     format_short_message,
@@ -335,7 +336,7 @@ async def _run_analysis_for_ticker(
                 chat_id=chat_id,
                 photo=chart_url,
                 caption=caption,
-                parse_mode="MarkdownV2",
+                parse_mode="HTML",
             )
         except Exception as e:
             logger.warning("[%s] cache-hit send_photo failed: %s", ticker, e)
@@ -599,7 +600,7 @@ async def _run_analysis_for_ticker(
             chat_id=chat_id,
             message_id=progress_msg.message_id,
             caption=caption,
-            parse_mode="MarkdownV2",
+            parse_mode="HTML",
             reply_markup=None,
         )
         # Persist for the rest of today so the next /watch tap or digest
@@ -858,9 +859,7 @@ async def _handle_history(query, ticker: str, date_str: str) -> None:
     back_kb = InlineKeyboardMarkup(
         [[InlineKeyboardButton("← Back", callback_data=f"hist_back:dates:{ticker}")]]
     )
-    await query.edit_message_text(
-        caption, parse_mode="MarkdownV2", reply_markup=back_kb
-    )
+    await query.edit_message_text(caption, parse_mode="HTML", reply_markup=back_kb)
 
 
 async def _handle_history_ticker(query, ticker: str) -> None:
@@ -1357,18 +1356,20 @@ async def _analyze_one_for_digest(
 _DIGEST_PROGRESS_INTERVAL = 2.0  # min seconds between progressive edits
 
 
-def _completed_digest_row(ticker_v2: str, result: dict) -> str:
-    """One MarkdownV2-safe row for a completed ticker. Used by both the
+def _completed_digest_row(ticker_h: str, result: dict) -> str:
+    """One HTML-safe row for a completed ticker. Used by both the
     progress view and the final summary so a row's appearance is stable
     once analysis lands — no jump from generic ✅ to a signal-coloured
-    emoji at the final-edit boundary."""
+    emoji at the final-edit boundary.
+
+    `ticker_h` is pre-escaped (html.escape) by the caller."""
     signal = (result.get("signal") or "—").strip()
     emoji = DECISION_EMOJI.get(signal.upper(), "📊")
-    signal_v2 = escape_markdown(signal, version=2)
+    signal_h = _html_escape(signal)
     if result.get("telegraph_url"):
-        url = escape_md_v2_url(result["telegraph_url"])
-        return f"{emoji} *{ticker_v2}* — *{signal_v2}* [📄]({url})"
-    return f"{emoji} *{ticker_v2}* — *{signal_v2}*"
+        href = _html_escape(result["telegraph_url"], quote=True)
+        return f'{emoji} <b>{ticker_h}</b> — <b>{signal_h}</b> <a href="{href}">📄</a>'
+    return f"{emoji} <b>{ticker_h}</b> — <b>{signal_h}</b>"
 
 
 def _format_digest_progress(
@@ -1376,7 +1377,7 @@ def _format_digest_progress(
     status: dict[str, object],
     safe_date: str,
 ) -> str:
-    """In-progress view. `status[ticker]` is one of:
+    """In-progress view (HTML). `status[ticker]` is one of:
       - "pending"           → ⏳ TICKER
       - ("analyzing", friendly, ordinal) → 📊 TICKER — Friendly (n/M)
       - "cancelled"         → ⛔ TICKER — cancelled
@@ -1384,30 +1385,32 @@ def _format_digest_progress(
       - None                → ❌ TICKER — error
     Watchlist order is preserved so the user can see exactly where the
     fan-out is at any point.
+
+    `safe_date` is pre-escaped (html.escape) by the caller.
     """
     done = sum(1 for s in status.values() if not (s == "pending" or _is_analyzing(s)))
     n = len(watchlist)
-    lines = [f"🌙 *Daily Digest* — {safe_date}  \\({done}/{n}\\)\n"]
+    lines = [f"🌙 <b>Daily Digest</b> — {safe_date}  ({done}/{n})\n"]
     for ticker in watchlist:
         s = status[ticker]
-        ticker_v2 = escape_markdown(ticker, version=2)
+        ticker_h = _html_escape(ticker)
         if s == "pending":
-            lines.append(f"⏳ {ticker_v2}")
+            lines.append(f"⏳ {ticker_h}")
         elif _is_analyzing(s):
             _, friendly, ordinal = s  # type: ignore[misc]
-            friendly_v2 = escape_markdown(friendly, version=2)
+            friendly_h = _html_escape(friendly)
             if ordinal is not None:
                 lines.append(
-                    f"📊 *{ticker_v2}* — {friendly_v2} \\({ordinal}/{TOTAL_STEPS}\\)"
+                    f"📊 <b>{ticker_h}</b> — {friendly_h} ({ordinal}/{TOTAL_STEPS})"
                 )
             else:
-                lines.append(f"📊 *{ticker_v2}* — {friendly_v2}")
+                lines.append(f"📊 <b>{ticker_h}</b> — {friendly_h}")
         elif s == "cancelled":
-            lines.append(f"⛔ *{ticker_v2}* — cancelled")
+            lines.append(f"⛔ <b>{ticker_h}</b> — cancelled")
         elif s is None:
-            lines.append(f"❌ *{ticker_v2}* — error")
+            lines.append(f"❌ <b>{ticker_h}</b> — error")
         else:
-            lines.append(_completed_digest_row(ticker_v2, s))  # type: ignore[arg-type]
+            lines.append(_completed_digest_row(ticker_h, s))  # type: ignore[arg-type]
     return "\n".join(lines)
 
 
@@ -1420,32 +1423,35 @@ def _format_digest_summary(
     status: dict[str, object],
     safe_date: str,
 ) -> str:
-    """Final view: signal-emoji per row + Telegraph link, watchlist order."""
-    lines = [f"🌙 *Daily Digest* — {safe_date}\n"]
+    """Final view (HTML): signal-emoji per row + Telegraph link,
+    watchlist order.
+
+    `safe_date` is pre-escaped (html.escape) by the caller."""
+    lines = [f"🌙 <b>Daily Digest</b> — {safe_date}\n"]
     failed = cancelled = 0
     n = len(watchlist)
     for ticker in watchlist:
         s = status[ticker]
-        ticker_v2 = escape_markdown(ticker, version=2)
+        ticker_h = _html_escape(ticker)
         if s == "cancelled":
-            lines.append(f"⛔ *{ticker_v2}* — cancelled")
+            lines.append(f"⛔ <b>{ticker_h}</b> — cancelled")
             cancelled += 1
             continue
         # Anything else (None from a real failure, or — much more rarely —
         # leftover "pending"/"analyzing" from an interruption that didn't
         # route through the cancel path) renders as ❓ and counts as failed.
         if not isinstance(s, dict):
-            lines.append(f"❓ *{ticker_v2}* — error")
+            lines.append(f"❓ <b>{ticker_h}</b> — error")
             failed += 1
             continue
-        lines.append(_completed_digest_row(ticker_v2, s))
+        lines.append(_completed_digest_row(ticker_h, s))
     tally_parts: list[str] = []
     if cancelled:
         tally_parts.append(f"{cancelled} cancelled")
     if failed:
         tally_parts.append(f"{failed} failed")
     if tally_parts:
-        lines.append(f"\n_{', '.join(tally_parts)} of {n}_")
+        lines.append(f"\n<i>{', '.join(tally_parts)} of {n}</i>")
     return "\n".join(lines)
 
 
@@ -1485,7 +1491,8 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
     """
     full_watchlist = watchlist_storage.get_watchlist(user_id)
     today = date.today().isoformat()
-    safe_date = escape_markdown(today, version=2)
+    # All digest captions are HTML mode now — escape for HTML, not MarkdownV2.
+    safe_date = _html_escape(today)
 
     if not full_watchlist:
         logger.info("digest: skipping user %s — empty watchlist", user_id)
@@ -1543,11 +1550,11 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
             await application.bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    f"🌙 *Daily Digest* — {safe_date}\n\n"
-                    "_No tickers selected\\. Open /digest and tap "
-                    "📋 Tickers to pick what to include\\._"
+                    f"🌙 <b>Daily Digest</b> — {safe_date}\n\n"
+                    "<i>No tickers selected. Open /digest and tap "
+                    "📋 Tickers to pick what to include.</i>"
                 ),
-                parse_mode="MarkdownV2",
+                parse_mode="HTML",
             )
         except Forbidden:
             logger.warning(
@@ -1581,7 +1588,7 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
         header = await application.bot.send_message(
             chat_id=chat_id,
             text=_format_digest_progress(watchlist, status, safe_date),
-            parse_mode="MarkdownV2",
+            parse_mode="HTML",
         )
     except Forbidden:
         logger.warning("digest: user %s blocked the bot, disabling", user_id)
@@ -1645,7 +1652,7 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
                     chat_id=chat_id,
                     message_id=header.message_id,
                     text=text,
-                    parse_mode="MarkdownV2",
+                    parse_mode="HTML",
                     reply_markup=cancel_kb,
                 )
             except Forbidden:
@@ -1718,7 +1725,7 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
             chat_id=chat_id,
             message_id=header.message_id,
             text=_format_digest_summary(watchlist, status, safe_date),
-            parse_mode="MarkdownV2",
+            parse_mode="HTML",
             reply_markup=None,
         )
     except Forbidden:
