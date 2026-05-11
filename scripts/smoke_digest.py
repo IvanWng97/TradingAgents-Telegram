@@ -1594,6 +1594,25 @@ async def test_llm_precheck_ok() -> None:
         os.environ.pop("DEEPSEEK_API_KEY", None)
 
 
+async def test_llm_precheck_openrouter_missing_env_key() -> None:
+    """openrouter is in PROVIDER_ENV_KEYS even though it has no
+    MODEL_OPTIONS catalog (picker short-circuits → DEFAULT_CONFIG models).
+    Listing it here makes the precheck name OPENROUTER_API_KEY when
+    unset, instead of the user hitting the cryptic 'OPENAI_API_KEY
+    missing' from the openai SDK at LLM-init time."""
+    from tg_bot.analysis import check_llm_configured
+
+    s, _ = fresh_storage()
+    await s.set_llm_provider("42", "openrouter")
+    saved = os.environ.pop("OPENROUTER_API_KEY", None)
+    try:
+        reason = check_llm_configured("42", s)
+        assert reason is not None and "OPENROUTER_API_KEY" in reason, reason
+    finally:
+        if saved is not None:
+            os.environ["OPENROUTER_API_KEY"] = saved
+
+
 # --- Runner ----------------------------------------------------------------
 
 
@@ -1681,6 +1700,10 @@ SCENARIOS = [
     ("precheck flags missing /config", test_llm_precheck_no_provider),
     ("precheck flags missing API key", test_llm_precheck_missing_env_key),
     ("precheck passes when provider+key set", test_llm_precheck_ok),
+    (
+        "precheck names OPENROUTER_API_KEY for openrouter users",
+        test_llm_precheck_openrouter_missing_env_key,
+    ),
 ]
 
 

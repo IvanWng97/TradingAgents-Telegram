@@ -32,9 +32,16 @@ PROVIDER_ENV_KEYS: dict[str, Optional[str]] = {
     "qwen": "DASHSCOPE_API_KEY",
     "glm": "ZHIPUAI_API_KEY",
     "ollama": None,  # local; no key needed
-    # openrouter / azure intentionally absent — their /config selection
-    # short-circuits with a notice and the run falls back to DEFAULT_CONFIG,
-    # which the no-provider branch below already flags.
+    # openrouter has no MODEL_OPTIONS catalog yet so the /config picker
+    # still short-circuits (run falls back to DEFAULT_CONFIG models, which
+    # openrouter happens to accept), but tradingagents' OpenAIClient
+    # natively supports the provider — reads OPENROUTER_API_KEY + routes
+    # to https://openrouter.ai/api/v1. Listing the env key here makes the
+    # precheck surface "openrouter picked but OPENROUTER_API_KEY not set"
+    # instead of the cryptic downstream "OPENAI_API_KEY missing" error
+    # from the openai SDK when the env isn't loaded.
+    "openrouter": "OPENROUTER_API_KEY",
+    # azure: intentionally absent — no native tradingagents support yet.
 }
 
 
