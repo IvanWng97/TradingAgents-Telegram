@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from tg_bot.formatters import (  # noqa: E402
     format_analysis_result_markdown,
+    format_full_md_report,
     format_short_message,
     markdown_to_telegram_html,
     sanitize_html_for_telegram,
@@ -74,10 +75,13 @@ def test_config_summary_only_no_timestamp() -> None:
 
 def test_no_args_no_header() -> None:
     """Backward compat: bare callers (none currently in-tree, but the
-    formatter must still accept legacy 3-arg invocations) get no header."""
+    formatter must still accept legacy 3-arg invocations) get no
+    blockquote header. Section dividers (`## Title`) are unconditional
+    now — they help readers parse a multi-section Telegraph page even
+    when no config/timestamp is available."""
     out = format_analysis_result_markdown("SOFI", _STATE, "BUY")
-    assert not out.startswith(">"), out
-    assert out.startswith("HOLD - sample."), out
+    assert not out.startswith(">"), out  # no blockquote header
+    assert out.startswith("## Final Trading Decision\n\nHOLD - sample."), out
 
 
 def test_datetime_subclass_check_picks_full_format() -> None:
@@ -276,6 +280,160 @@ def test_format_short_message_escapes_url_chars() -> None:
     assert 'a=1&b="2"' not in out, 'raw `&` or `"` leaked into href'
 
 
+# ─── Telegraph packer + full .md report ─────────────────────────────────
+
+
+_FULL_STATE = {
+    "final_trade_decision": "**Final Trading Decision: SOFI**\n\n**Rating: HOLD**\n\nLong synthesis...",
+    "trader_investment_plan": "I recommend **HOLD** for SOFI. Reasoning: ...",
+    "investment_plan": "### Research Manager's Evaluation\n\nBull/bear synthesis...",
+    "market_report": "# Technical Analysis\n\nMA, RSI, MACD discussion...",
+    "fundamentals_report": "# Fundamental Analysis\n\nValuation, balance sheet...",
+    "news_report": "# News Roundup\n\nWeekly events...",
+    "sentiment_report": "# Sentiment Analysis\n\nSocial + news sentiment...",
+}
+
+
+def test_full_md_report_emits_all_seven_sections() -> None:
+    """The .md attachment carries every populated section in priority
+    order — no budget cap, no truncation."""
+    out = format_full_md_report("SOFI", _FULL_STATE)
+    for title in (
+        "## Final Trading Decision",
+        "## Trader's Recommendation",
+        "## Research Manager Synthesis",
+        "## Market Analysis",
+        "## Fundamentals",
+        "## News",
+        "## Sentiment",
+    ):
+        assert title in out, (
+            f"section {title!r} missing from full md report:\n{out[:200]}"
+        )
+    # Section order matches the priority list.
+    indices = [
+        out.index(t)
+        for t in (
+            "## Final Trading Decision",
+            "## Trader's Recommendation",
+            "## Research Manager Synthesis",
+            "## Market Analysis",
+            "## Fundamentals",
+            "## News",
+            "## Sentiment",
+        )
+    ]
+    assert indices == sorted(indices), "sections out of priority order"
+
+
+def test_full_md_report_skips_empty_sections() -> None:
+    """Missing or empty fields must drop out cleanly — no `## Sentiment\\n\\n\\n`
+    artifacts that look like a stub section to a reader."""
+    partial = {
+        "final_trade_decision": "x",
+        "trader_investment_plan": "y",
+        "sentiment_report": "",  # explicitly empty
+        # other keys absent
+    }
+    out = format_full_md_report("SOFI", partial)
+    assert "## Final Trading Decision" in out
+    assert "## Trader's Recommendation" in out
+    assert "## Sentiment" not in out
+    assert "## Market Analysis" not in out
+
+
+def test_full_md_report_includes_header_when_provided() -> None:
+    out = format_full_md_report(
+        "SOFI",
+        _FULL_STATE,
+        config_summary="openai · gpt-4o/o4-mini",
+        generated_at=datetime(2026, 5, 10, 12, 34, tzinfo=timezone.utc),
+    )
+    assert out.startswith(
+        "> Generated 2026-05-10 12:34 UTC · openai · gpt-4o/o4-mini\n\n---\n\n"
+    ), out[:200]
+
+
+def test_telegraph_packer_drops_trailing_section_when_over_budget() -> None:
+    """A realistic full final_state with all 7 sections renders to ~73k
+    HTML — over Telegraph's 65k cap. The packer must drop the
+    lowest-priority section (sentiment_report) and bring HTML under the
+    64k internal budget."""
+    import markdown
+
+    # Each section sized so the assembled HTML lands above the 65k cap
+    # with all 7 included but under it after dropping the last.
+    big_section = "Lorem ipsum dolor sit amet. " * 400  # ~11 KB
+    state = {
+        "final_trade_decision": big_section,
+        "trader_investment_plan": big_section,
+        "investment_plan": big_section,
+        "market_report": big_section,
+        "fundamentals_report": big_section,
+        "news_report": big_section,
+        "sentiment_report": big_section,
+    }
+    out = format_analysis_result_markdown("SOFI", state, "HOLD")
+    rendered = markdown.markdown(out, extensions=["tables"])
+    assert len(rendered) <= 65536, f"packer let HTML exceed limit: {len(rendered)}"
+    # At least one section should be missing — packer dropped to fit.
+    sections_present = sum(
+        out.count(f"## {t}")
+        for t in (
+            "Final Trading Decision",
+            "Trader's Recommendation",
+            "Research Manager Synthesis",
+            "Market Analysis",
+            "Fundamentals",
+            "News",
+            "Sentiment",
+        )
+    )
+    assert sections_present < 7, "packer should have dropped at least one section"
+    # The highest-priority sections must still be present.
+    assert "## Final Trading Decision" in out
+    assert "## Trader's Recommendation" in out
+
+
+def test_telegraph_packer_keeps_all_sections_when_under_budget() -> None:
+    """Small content → all 7 sections fit, no dropping."""
+    state = {
+        k: f"section content {k}"
+        for k, _ in [
+            ("final_trade_decision", None),
+            ("trader_investment_plan", None),
+            ("investment_plan", None),
+            ("market_report", None),
+            ("fundamentals_report", None),
+            ("news_report", None),
+            ("sentiment_report", None),
+        ]
+    }
+    # Rename keys correctly
+    state = {
+        "final_trade_decision": "tiny",
+        "trader_investment_plan": "tiny",
+        "investment_plan": "tiny",
+        "market_report": "tiny",
+        "fundamentals_report": "tiny",
+        "news_report": "tiny",
+        "sentiment_report": "tiny",
+    }
+    out = format_analysis_result_markdown("SOFI", state, "HOLD")
+    for title in (
+        "## Final Trading Decision",
+        "## Trader's Recommendation",
+        "## Research Manager Synthesis",
+        "## Market Analysis",
+        "## Fundamentals",
+        "## News",
+        "## Sentiment",
+    ):
+        assert title in out, (
+            f"under-budget run should keep all sections; missing {title!r}"
+        )
+
+
 SCENARIOS = [
     ("fresh run prepends full ts + config header", test_fresh_run_prepends_full_header),
     ("history prepends date-only header", test_history_prepends_date_only_header),
@@ -328,6 +486,24 @@ SCENARIOS = [
         test_format_short_message_telegraph_failure_path,
     ),
     ("URL specials escaped in href", test_format_short_message_escapes_url_chars),
+    # Telegraph packer + full .md report
+    (
+        "full md report emits all 7 sections in priority order",
+        test_full_md_report_emits_all_seven_sections,
+    ),
+    ("full md report skips empty sections", test_full_md_report_skips_empty_sections),
+    (
+        "full md report includes header when provided",
+        test_full_md_report_includes_header_when_provided,
+    ),
+    (
+        "Telegraph packer drops trailing section when over budget",
+        test_telegraph_packer_drops_trailing_section_when_over_budget,
+    ),
+    (
+        "Telegraph packer keeps all sections when under budget",
+        test_telegraph_packer_keeps_all_sections_when_under_budget,
+    ),
 ]
 
 

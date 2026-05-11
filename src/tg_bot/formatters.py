@@ -247,6 +247,76 @@ def build_config_summary(config: dict) -> str:
     return " · ".join(parts)
 
 
+# Report sections in decision-relevance order. The Telegraph packer adds
+# sections from the top until the rendered HTML approaches the 64 KB cap;
+# the full .md attachment emits all of them unconditionally. Keys map to
+# `final_state` fields populated by tradingagents.
+_REPORT_SECTIONS: list[tuple[str, str]] = [
+    ("Final Trading Decision", "final_trade_decision"),
+    ("Trader's Recommendation", "trader_investment_plan"),
+    ("Research Manager Synthesis", "investment_plan"),
+    ("Market Analysis", "market_report"),
+    ("Fundamentals", "fundamentals_report"),
+    ("News", "news_report"),
+    ("Sentiment", "sentiment_report"),
+]
+
+# Telegraph hard-rejects pages over 65,536 HTML characters. Pack the
+# markdown source to a budget that, after `markdown.markdown(...)` bloat
+# (10–44% depending on table density), comfortably lands under the cap.
+# We don't *measure* HTML size to decide what to include — we convert the
+# whole assembled markdown once and drop trailing sections if it's too big.
+_TELEGRAPH_HTML_LIMIT = 65536
+_TELEGRAPH_HTML_BUDGET = 64000  # leave 1.5 KB of headroom for tags we don't account for
+
+
+def _build_header(
+    config_summary: str | None, generated_at: date | datetime | None
+) -> str:
+    """The `> Generated … · <config>` blockquote prepended to both the
+    Telegraph body and the full .md attachment so a recipient sharing
+    either format can tell who/when/what produced the analysis."""
+    if not (config_summary or generated_at is not None):
+        return ""
+    bits = []
+    if isinstance(generated_at, datetime):
+        bits.append(f"Generated {generated_at.strftime('%Y-%m-%d %H:%M UTC')}")
+    elif isinstance(generated_at, date):
+        bits.append(f"Generated {generated_at.isoformat()}")
+    if config_summary:
+        bits.append(config_summary)
+    # `---` is a hard separator: without it, a body whose first line
+    # starts with `> ` (LLM agents occasionally quote a thesis or risk
+    # warning) gets pulled into the header blockquote across the blank
+    # line, fusing them visually. The horizontal rule renders as <hr/>
+    # in Telegraph and forces a fresh blockquote for the body's `> ` lines.
+    return f"> {' · '.join(bits)}\n\n---\n\n"
+
+
+def _iter_section_blocks(final_state: dict) -> list[tuple[str, str]]:
+    """Yield (title, content) pairs from `_REPORT_SECTIONS`, skipping
+    empty/missing fields. Used by both the Telegraph packer and the full
+    .md report so section order/labels stay in lockstep."""
+    blocks: list[tuple[str, str]] = []
+    for title, key in _REPORT_SECTIONS:
+        value = final_state.get(key) or ""
+        value = value.strip()
+        if value:
+            blocks.append((title, value))
+    return blocks
+
+
+def _assemble_report(header: str, blocks: list[tuple[str, str]]) -> str:
+    """Concatenate the header + each (title, content) block as `## Title`
+    sections separated by blank lines."""
+    parts = []
+    if header:
+        parts.append(header)
+    for title, content in blocks:
+        parts.append(f"## {title}\n\n{content}\n")
+    return "\n".join(parts)
+
+
 def format_analysis_result_markdown(
     ticker: str,
     final_state: dict,
@@ -256,43 +326,59 @@ def format_analysis_result_markdown(
 ) -> str:
     """Markdown body for the Telegraph page.
 
-    Telegraph URLs are public-by-default and frequently shared bare; the
-    in-Telegram caption carries the `via <provider>...` config trace but
-    the Telegraph page itself was contextless. When `config_summary` or
-    `generated_at` is provided, prepend a blockquote header with the
-    timestamp and config so readers of a shared link can tell which model
-    + run produced the analysis.
+    Packs analyst sections in priority order (`_REPORT_SECTIONS`) until
+    the rendered HTML approaches Telegraph's 65,536-char cap, then stops
+    — *drops* the would-overflow section rather than truncating it (the
+    full content is available in the .md document attachment, so partial
+    sections in Telegraph just create the impression that something was
+    cut off). The dropped sections are still in `final_state` and visible
+    via `format_full_md_report`.
 
-    `generated_at` accepts `datetime` for fresh runs (full UTC stamp) and
-    `date` for /history republishes (date only — historical logs don't
-    record the analysis time of day). datetime is checked first because
-    it's a subclass of date.
-
-    Currently emits final_trade_decision + trader_investment_plan; other
-    final_state sections (analyst reports, debate verdicts) can be
-    appended later.
+    Header is prepended when `config_summary` or `generated_at` is set so
+    a shared Telegraph URL self-documents who/when/what (datetime gets a
+    full UTC stamp; date gets day-only — historical logs don't record
+    time of day).
     """
-    header = ""
-    if config_summary or generated_at is not None:
-        bits = []
-        if isinstance(generated_at, datetime):
-            bits.append(f"Generated {generated_at.strftime('%Y-%m-%d %H:%M UTC')}")
-        elif isinstance(generated_at, date):
-            bits.append(f"Generated {generated_at.isoformat()}")
-        if config_summary:
-            bits.append(config_summary)
-        # `---` is a hard separator: without it, a body whose first line
-        # starts with `> ` (LLM agents occasionally quote a thesis or risk
-        # warning) gets pulled into the header blockquote across the
-        # blank line, fusing them visually. The horizontal rule renders
-        # as <hr/> in Telegraph and forces a fresh blockquote for the
-        # body's `> ` lines.
-        header = f"> {' · '.join(bits)}\n\n---\n\n"
-    return (
-        f"{header}"
-        f"{final_state.get('final_trade_decision', 'N/A')}\n\n"
-        f"{final_state.get('trader_investment_plan', '')}\n"
-    )
+    header = _build_header(config_summary, generated_at)
+    blocks = _iter_section_blocks(final_state)
+    if not blocks:
+        # Edge case: empty final_state. Preserve the header so the
+        # Telegraph page isn't completely empty.
+        return header or "_(no analysis content)_"
+
+    # Pack from the top, dropping trailing sections that push the
+    # rendered HTML over budget. Conversion isn't free but only runs
+    # once per analysis; the typical case (all 7 sections + tables) is
+    # 72k HTML, ~8k over — one drop iteration usually suffices.
+    for limit in range(len(blocks), 0, -1):
+        md = _assemble_report(header, blocks[:limit])
+        rendered = _markdown_lib.markdown(md, extensions=["tables"])
+        if len(rendered) <= _TELEGRAPH_HTML_BUDGET:
+            return md
+    # Even the first section alone exceeds the cap — extremely unlikely,
+    # but fall through to first section as-is rather than returning an
+    # empty body. Telegraph will reject if it's truly too large, and
+    # `publish_to_telegraph` already logs/handles the failure.
+    return _assemble_report(header, blocks[:1])
+
+
+def format_full_md_report(
+    ticker: str,
+    final_state: dict,
+    config_summary: str | None = None,
+    generated_at: date | datetime | None = None,
+) -> str:
+    """Full markdown report for the `.md` document attachment.
+
+    No size cap — every section in `_REPORT_SECTIONS` that's present and
+    non-empty gets emitted. This is the archival "give me everything"
+    artifact users get alongside the photo + caption + Telegraph link.
+    Mirrors the priority order of the Telegraph packer so when users
+    compare the two, the on-Telegraph subset is the leading prefix of
+    the full .md.
+    """
+    header = _build_header(config_summary, generated_at)
+    return _assemble_report(header, _iter_section_blocks(final_state))
 
 
 def extract_summary(decision_text: str, max_len: int = 700) -> str:

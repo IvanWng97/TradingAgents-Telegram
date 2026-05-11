@@ -5,15 +5,22 @@ import logging
 import time
 from datetime import date
 from html import escape as _html_escape
+from io import BytesIO
 
 import markdown
-from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    ForceReply,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputFile,
+    Update,
+)
 from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
 from tg_bot.analysis import check_llm_configured, pool_stats
 from tg_bot.digest import build_digest_response, humanize_delta, next_fire, tz_short
-from tg_bot.formatters import format_analysis_result_markdown
+from tg_bot.formatters import format_analysis_result_markdown, format_full_md_report
 from tg_bot.history import (
     list_available_dates,
     list_available_tickers,
@@ -448,8 +455,11 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if len(context.args) >= 2:
-        caption = await build_history_response(ticker, context.args[1].strip())
+        date_str = context.args[1].strip()
+        caption, state = await build_history_response(ticker, date_str)
         await update.message.reply_text(caption, parse_mode="HTML")
+        if state is not None:
+            await _send_history_md(update, context, ticker, date_str, state)
     else:
         text, kb = build_history_dates_response(ticker)
         if kb is None:
@@ -517,20 +527,46 @@ def build_history_dates_response(
     )
 
 
-async def build_history_response(ticker: str, date_str: str) -> str:
-    """Load + publish a historical analysis. Returns an **HTML** caption
-    — callers must pass `parse_mode="HTML"`.
+async def _send_history_md(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    ticker: str,
+    date_str: str,
+    state: dict,
+) -> None:
+    """Attach the full `.md` report alongside the /history caption.
 
-    Shared by the /history command and the `hist:` inline-button callback so
-    both surfaces produce identical output. HTML (not MarkdownV2) so the
-    output stays consistent with the migrated analysis-result caption flow.
+    Mirrors `_send_full_md_attachment` from callbacks.py but lives here
+    because it routes through `update.message.reply_document` for the
+    plain /history command. `config_summary=None` because tradingagents
+    on-disk logs don't record the producing LLM config."""
+    try:
+        gen_date = date.fromisoformat(date_str)
+    except ValueError:
+        gen_date = None
+    try:
+        md = format_full_md_report(ticker, state, generated_at=gen_date)
+        doc = InputFile(BytesIO(md.encode("utf-8")), filename=f"{ticker}_{date_str}.md")
+        await update.message.reply_document(doc)
+    except Exception as e:
+        logger.warning("history: send_document(.md) failed for %s: %s", ticker, e)
+
+
+async def build_history_response(ticker: str, date_str: str) -> tuple[str, dict | None]:
+    """Load + publish a historical analysis.
+
+    Returns `(html_caption, final_state)`. The caption uses HTML (callers
+    must pass `parse_mode="HTML"`); `final_state` is the raw on-disk
+    tradingagents log or `None` if no record exists. Callers use
+    `final_state` to send the full `.md` document attachment alongside
+    the caption — same dual-output as the live `/watch` flow.
     """
     safe_ticker = _html_escape(ticker)
     safe_date = _html_escape(date_str)
 
     state = load_historical_state(ticker, date_str)
     if state is None:
-        return f"No analysis found for {safe_ticker} on {safe_date}."
+        return f"No analysis found for {safe_ticker} on {safe_date}.", None
 
     # Pass the historical date so the Telegraph page leads with a
     # "Generated YYYY-MM-DD" header. config is unknown for /history (the
@@ -552,7 +588,7 @@ async def build_history_response(ticker: str, date_str: str) -> str:
         msg += f'📄 <a href="{href}">View Full Report</a>'
     else:
         msg += "⚠️ Full report unavailable (Telegraph publish failed)."
-    return msg
+    return msg, state
 
 
 async def config_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
