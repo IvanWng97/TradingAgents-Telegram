@@ -564,7 +564,16 @@ async def build_history_response(
         ticker, state, signal="historical", generated_at=gen_date
     )
     html = markdown.markdown(md_body, extensions=["tables"])
-    telegraph_url = await publish_to_telegraph(f"{ticker} {date_str}", html)
+    # `/history` republishes a snapshot of a past analysis whose original
+    # config is unknown (tradingagents' on-disk log doesn't record it), so
+    # we can't use `AnalysisConfigKey.telegraph_title()` here. The bare
+    # title pattern previously used (`f"{ticker} {date_str}"`) collided
+    # across multiple `/history` invocations of the same (ticker, date)
+    # and Telegraph appended `-2`/`-3` to disambiguate — defeating URL
+    # stability the way PR #30 fixed for `/watch`. The `Historical` token
+    # both differentiates from the live `<TICKER> Analysis · ...` titles
+    # and makes the URL self-document as a republished snapshot.
+    telegraph_url = await publish_to_telegraph(f"{ticker} Historical {date_str}", html)
 
     msg = f"📜 <b>{safe_ticker}</b> — {safe_date}"
     if not telegraph_url:
@@ -600,12 +609,14 @@ async def config_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         for i in range(0, len(providers), 2)
     ]
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel:config")])
-    # Provider/model strings inside `…` code spans need no escaping.
+    # MarkdownV2 code spans suppress most escaping but NOT backticks
+    # inside the value — a backtick would close the span and break parsing.
+    # Defensive escape so an exotic provider/model ID can't break /config.
     message = (
         "*LLM Configuration*\n\n"
-        f"Provider: `{current_provider}`\n"
-        f"Deep: `{current_deep}`\n"
-        f"Quick: `{current_quick}`\n\n"
+        f"Provider: `{escape_markdown(current_provider, version=2)}`\n"
+        f"Deep: `{escape_markdown(current_deep, version=2)}`\n"
+        f"Quick: `{escape_markdown(current_quick, version=2)}`\n\n"
         "Pick a provider — you'll then choose deep and quick models\\."
     )
     await update.message.reply_text(
@@ -686,8 +697,13 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         except Exception:
             pass
 
-    # Numbers + simple ASCII labels are MarkdownV2-safe; user-facing values
-    # go inside `…` code spans (no escape needed).
+    # MarkdownV2 code spans (backtick-wrapped) suppress most escaping, but
+    # a backtick *in the value itself* would break out of the span and
+    # cause `Bad Request: can't parse entities`. Provider/model strings
+    # come from user config (set via picker) so today never contain
+    # backticks — but a future provider name or custom model ID could.
+    # Defensive escape for any string that could carry user-influenced
+    # content. Numeric values stay un-escaped.
     message = (
         "*Bot status*\n"
         f"• Uptime: `{escape_markdown(uptime_str, version=2)}`\n"
@@ -695,9 +711,9 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"• Graph pool: `{pool_keys}` keys, `{pool_instances}` instances\n"
         f"{digest_line}\n"
         "*Your LLM config*\n"
-        f"• Provider: `{provider}`\n"
-        f"• Deep: `{deep}`\n"
-        f"• Quick: `{quick}`"
+        f"• Provider: `{escape_markdown(provider, version=2)}`\n"
+        f"• Deep: `{escape_markdown(deep, version=2)}`\n"
+        f"• Quick: `{escape_markdown(quick, version=2)}`"
     )
     if setup_reason is not None:
         message += f"\n\n⚠️ `{escape_markdown(setup_reason, version=2)}`"

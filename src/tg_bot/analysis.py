@@ -254,9 +254,9 @@ def _resolve_models(
 # differs. Providers absent from this map have no effort knob — we
 # silently skip applying it.
 #
-# Public — `cache.cache_key_extras` and `formatters.build_config_summary`
-# both iterate `.values()` to find which key is set on a resolved config
-# dict, so this is the single source of truth.
+# Single source of truth for which provider stores effort where.
+# `AnalysisConfigKey.from_config` iterates `.values()` so a new provider
+# adding a thinking knob only needs to register its key here.
 EFFORT_KEY_BY_PROVIDER = {
     "openai": "openai_reasoning_effort",
     "anthropic": "anthropic_effort",

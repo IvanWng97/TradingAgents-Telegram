@@ -7,7 +7,7 @@ Covers:
 - build_user_config merges rounds + effort and maps effort to the
   provider-specific key (openai_reasoning_effort / anthropic_effort /
   google_thinking_level)
-- formatters.build_config_summary line shape
+- AnalysisConfigKey.caption() line shape
 
 Run with: .venv/bin/python3 scripts/smoke_user_config.py
 """
@@ -180,34 +180,34 @@ async def test_build_user_config_writes_rounds_even_without_provider() -> None:
     assert config["max_debate_rounds"] == 1
 
 
-# ─── config_summary rendering ─────────────────────────────────────────
+# ─── caption rendering (via AnalysisConfigKey) ─────────────────────────
 
 
 async def test_config_summary_default() -> None:
-    from tg_bot.formatters import build_config_summary
+    from tg_bot.config_key import AnalysisConfigKey
 
-    out = build_config_summary(
+    out = AnalysisConfigKey.from_config(
         {
             "llm_provider": "openai",
             "deep_think_llm": "gpt-4o",
             "quick_think_llm": "o4-mini",
             "max_debate_rounds": 1,
         }
-    )
+    ).caption()
     assert out == "openai · gpt-4o/o4-mini", out
 
 
 async def test_config_summary_custom_rounds() -> None:
-    from tg_bot.formatters import build_config_summary
+    from tg_bot.config_key import AnalysisConfigKey
 
-    out = build_config_summary(
+    out = AnalysisConfigKey.from_config(
         {
             "llm_provider": "deepseek",
             "deep_think_llm": "deepseek-v4-pro",
             "quick_think_llm": "deepseek-v4-flash",
             "max_debate_rounds": 2,
         }
-    )
+    ).caption()
     # Both models present, rounds suffix appended, no effort marker.
     assert "deepseek-v4-pro/deepseek-v4-flash" in out, out
     assert "· r2" in out, out
@@ -215,9 +215,9 @@ async def test_config_summary_custom_rounds() -> None:
 
 
 async def test_config_summary_with_effort() -> None:
-    from tg_bot.formatters import build_config_summary
+    from tg_bot.config_key import AnalysisConfigKey
 
-    out = build_config_summary(
+    out = AnalysisConfigKey.from_config(
         {
             "llm_provider": "anthropic",
             "deep_think_llm": "claude-sonnet-4",
@@ -225,7 +225,7 @@ async def test_config_summary_with_effort() -> None:
             "max_debate_rounds": 2,
             "anthropic_effort": "high",
         }
-    )
+    ).caption()
     assert "claude-sonnet-4/claude-haiku-4" in out, out
     assert "· r2 · e=high" in out, out
 

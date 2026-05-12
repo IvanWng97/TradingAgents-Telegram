@@ -138,7 +138,9 @@ def fake_raising_analysis(ticker, *a, **kw):
     raise RuntimeError(f"propagate failed for {ticker}")
 
 
-async def fake_publish(title, content):
+async def fake_publish(title, content, edit_path=None):
+    # `edit_path` is accepted (kwarg-only in callsite) so the publish path
+    # actually exercises here instead of TypeError-ing into the catch-all.
     return f"https://telegra.ph/{title.replace(' ', '-')}-test"
 
 
@@ -222,7 +224,7 @@ def _trigger_cancel(context: FakeContext, ticker: str) -> None:
 
         safe = escape_markdown(ticker, version=2)
         if ticker in cap or safe in cap:
-            entry["event"].set()
+            entry["cancel_event"].set()
             ae = entry.get("async_event")
             if ae is not None:
                 ae.set()
@@ -461,7 +463,7 @@ async def test_graceful_shutdown_signals_all() -> None:
     registry = ctx.chat_data.get("analysis_cancels") or {}
     assert len(registry) == 7, f"expected 7 in-flight, got {len(registry)}"
     for entry in registry.values():
-        entry["event"].set()
+        entry["cancel_event"].set()
         if entry.get("async_event"):
             entry["async_event"].set()
 
@@ -493,7 +495,7 @@ async def test_cancel_post_completion_race() -> None:
     # At this point, to_thread has just returned. Set the cancel event.
     registry = ctx.chat_data.get("analysis_cancels") or {}
     for entry in registry.values():
-        entry["event"].set()
+        entry["cancel_event"].set()
         if entry.get("async_event"):
             entry["async_event"].set()
 

@@ -117,18 +117,17 @@ async def _post_stop(application: Application) -> None:
     digest_cancelled = 0
     try:
         for _chat_id, cd in application.chat_data.items():
+            # Both registries now use the same key `cancel_event` for the
+            # threading.Event — the digest registry adds `tasks` for the
+            # pending-task `.cancel()` pass; the analysis registry adds
+            # `async_event` (for queue-wait wake) and `message_id`.
             registry = cd.get("analysis_cancels") or {}
             for entry in registry.values():
-                entry["event"].set()
+                entry["cancel_event"].set()
                 async_event = entry.get("async_event")
                 if async_event is not None:
                     async_event.set()
                 cancelled += 1
-            # Digest fan-outs have their own cancel registry — different
-            # value shape ({"cancel_event", "tasks"}) and the cancel_event
-            # is shared across all tickers in the fan-out, but the
-            # rationale is identical: signal mid-run cancellation so
-            # in-flight tickers unwind cleanly before the SIGKILL hits.
             digest_registry = cd.get("digest_cancels") or {}
             for entry in digest_registry.values():
                 entry["cancel_event"].set()

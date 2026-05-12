@@ -28,10 +28,13 @@ logger = logging.getLogger(__name__)
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 
-# Same regex as history.normalize_ticker — alnum groups separated by single
-# `.` or `-`. Rejects "..", ".A", "A.", "A..B" so the ticker can't smuggle
-# path-traversal sequences past validation.
-_TICKER_RE = re.compile(r"^[A-Z0-9]+(?:[.\-][A-Z0-9]+)*$")
+# Ticker shape validator — alnum groups separated by single `.` or `-`.
+# Rejects "..", ".A", "A.", "A..B" so a fat-fingered or hostile input
+# can't smuggle path-traversal sequences past validation. Imported by
+# `history.normalize_ticker` to ensure the storage-write side and the
+# disk-read side agree on what counts as a valid ticker — divergence
+# would silently re-open the path-traversal hole the regex closes.
+TICKER_RE = re.compile(r"^[A-Z0-9]+(?:[.\-][A-Z0-9]+)*$")
 
 # US class-share pattern: alphanumerics + a single trailing letter after a dot
 # (BRK.B, BF.B, RDS.A). Doesn't match international tickers like 0700.HK or
@@ -50,7 +53,7 @@ _CACHE_MAX = 1024
 def _normalize(raw: str) -> Optional[str]:
     """Uppercase + regex-validate. Returns None for unsafe input."""
     t = raw.strip().upper()
-    return t if _TICKER_RE.match(t) else None
+    return t if TICKER_RE.match(t) else None
 
 
 def _class_share_alt(symbol: str) -> Optional[str]:
