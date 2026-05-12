@@ -38,6 +38,7 @@ from tg_bot.analysis import (
     TRADINGAGENTS_AVAILABLE,
     build_user_config,
     check_llm_configured,
+    llm_setup_error_message,
     run_trading_analysis,
 )
 from tg_bot.config import Config
@@ -179,15 +180,26 @@ def _try_acquire_nonblocking(sem: asyncio.Semaphore) -> bool:
 # seconds ago, then executes. Effectively a FIFO queue with rate-aware
 # pacing — toasts already covered the user's immediate feedback, this
 # just lands the persistent "Cancelling…" caption one by one.
-_cancel_edit_lock = asyncio.Lock()
+#
+# Lazy-init the lock on first use so we bind it to the running loop, not
+# the module-import loop. `asyncio.Lock()` at module-level deprecates
+# under 3.10+ and raises in 3.12+ when no loop is running.
+_cancel_edit_lock: "asyncio.Lock | None" = None
 _last_cancel_edit_at: float = 0.0
 _MIN_CANCEL_INTERVAL = 1.1  # safe margin under Telegram's per-chat limit
+
+
+def _get_cancel_edit_lock() -> asyncio.Lock:
+    global _cancel_edit_lock
+    if _cancel_edit_lock is None:
+        _cancel_edit_lock = asyncio.Lock()
+    return _cancel_edit_lock
 
 
 async def _queued_cancel_edit(bot, chat_id: int, message_id: int) -> None:
     """Lock-serialized variant of `edit_message_caption` for cancel-ack."""
     global _last_cancel_edit_at
-    async with _cancel_edit_lock:
+    async with _get_cancel_edit_lock():
         now = time.monotonic()
         wait = _MIN_CANCEL_INTERVAL - (now - _last_cancel_edit_at)
         if wait > 0:
@@ -978,18 +990,13 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
     # a stale .env) would otherwise see a wall of identical 401 errors.
     reason = check_llm_configured(user_id, user_config_storage)
     if reason is not None:
-        # Late import: callbacks.py imports from us, so a top-level import
-        # would cycle. The helper renders a MarkdownV2 string from the
-        # precheck reason — no shared state needed.
-        from tg_bot.handlers.callbacks import _llm_setup_error_message
-
         logger.info(
             "digest: skipping user %s — LLM not configured (%s)", user_id, reason
         )
         try:
             await application.bot.send_message(
                 chat_id=chat_id,
-                text=_llm_setup_error_message(reason),
+                text=llm_setup_error_message(reason),
                 parse_mode="MarkdownV2",
             )
         except Forbidden:

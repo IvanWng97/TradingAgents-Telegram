@@ -18,6 +18,7 @@ from tg_bot.analysis import (
     check_llm_configured,
     get_model_options,
     has_model_catalog,
+    llm_setup_error_message,
 )
 from tg_bot.digest import build_digest_response
 from tg_bot.handlers.analysis_runner import (
@@ -41,24 +42,6 @@ from tg_bot.storage.user_config import UserConfigStorage
 
 
 logger = logging.getLogger(__name__)
-
-
-def _llm_setup_error_message(reason: str) -> str:
-    """Render the short reason from `check_llm_configured` as a friendly
-    MarkdownV2 message for the user, including the next-step hint. Two
-    flavors based on which failure mode we hit."""
-    if reason.startswith("no provider"):
-        return (
-            "⚠️ *No LLM provider configured*\\.\n\n"
-            "Tap /config to pick a provider \\+ deep/quick models, then try again\\."
-        )
-    # Mode B: provider picked, but matching env var missing. Format is
-    # "deepseek picked but DEEPSEEK_API_KEY not set in .env".
-    return (
-        f"⚠️ *LLM key missing*\\.\n\n"
-        f"`{escape_markdown(reason, version=2)}`\n\n"
-        "Add the key to your `\\.env` and restart the bot \\(`docker\\-compose up \\-d`\\)\\."
-    )
 
 
 def _model_keyboard(mode: str, provider: str) -> InlineKeyboardMarkup:
@@ -310,7 +293,7 @@ async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) 
     reason = check_llm_configured(user_id, user_config_storage)
     if reason is not None:
         await query.edit_message_text(
-            _llm_setup_error_message(reason), parse_mode="MarkdownV2"
+            llm_setup_error_message(reason), parse_mode="MarkdownV2"
         )
         return
 
@@ -678,7 +661,7 @@ async def _handle_digest(
             try:
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=_llm_setup_error_message(reason),
+                    text=llm_setup_error_message(reason),
                     parse_mode="MarkdownV2",
                 )
             except Exception as e:

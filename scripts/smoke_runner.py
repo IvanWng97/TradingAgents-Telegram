@@ -107,6 +107,11 @@ def reset_state() -> None:
     _STOP_SIGNAL = threading.Event()
     runner._STOP_SIGNAL = _STOP_SIGNAL  # not used, but keep symmetry
     runner._run_semaphore = None
+    # Cancel-ack edit pacing is also module-level state; without a reset the
+    # second scenario's first cancel can stall 1.1s waiting for the prior
+    # scenario's "last edit" timestamp to age out.
+    runner._cancel_edit_lock = None
+    runner._last_cancel_edit_at = 0.0
     analysis_mod._graph_pool.clear()
     with _BUILD_LOCK:
         _BUILD_COUNT = 0
@@ -474,12 +479,12 @@ TESTS = [
 
 async def main() -> None:
     # Silence the deliberate-exception trace from test_propagate_raises
-    # — the tg_bot.handlers.callbacks logger emits a stacktrace via
+    # — `tg_bot.handlers.analysis_runner` emits a stacktrace via
     # logger.exception() which clutters test output.
     import logging
 
     logging.getLogger("tg_bot").setLevel(logging.CRITICAL)
-    logging.getLogger("tg_bot.handlers.callbacks").setLevel(logging.CRITICAL)
+    logging.getLogger("tg_bot.handlers.analysis_runner").setLevel(logging.CRITICAL)
 
     passed = 0
     failed = 0
