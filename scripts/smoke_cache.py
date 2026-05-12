@@ -140,7 +140,7 @@ async def test_invalidate_removes_entry() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "BUY",
-        None,
+        "https://telegra.ph/test-placeholder",
     )
     assert cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09") is not None
     assert cache.invalidate("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09") is True
@@ -166,7 +166,7 @@ async def test_lazy_eviction_drops_old_dates() -> None:
         "2026-05-08",
         SAMPLE_STATE,
         "BUY",
-        None,
+        "https://telegra.ph/test-placeholder",
     )
     yesterday_path = (
         Path(os.environ["TG_BOT_DATA_DIR"])
@@ -186,7 +186,7 @@ async def test_lazy_eviction_drops_old_dates() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "HOLD",
-        None,
+        "https://telegra.ph/test-placeholder",
     )
     assert not yesterday_path.is_file(), "yesterday's entry should be evicted"
     today_path = yesterday_path.with_name("2026-05-09.json")
@@ -206,7 +206,7 @@ async def test_corrupt_file_returns_none() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "BUY",
-        None,
+        "https://telegra.ph/test-placeholder",
     )
     # Stomp the file with garbage.
     path = (
@@ -234,7 +234,7 @@ async def test_slug_handles_special_chars() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "BUY",
-        None,
+        "https://telegra.ph/test-placeholder",
     )
     got = cache.lookup(
         "openrouter/anthropic",
@@ -282,7 +282,7 @@ async def test_non_serializable_objects_in_state() -> None:
         "2026-05-09",
         state,
         "BUY",
-        None,
+        "https://telegra.ph/test-placeholder",
     )
     got = cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09")
     assert got is not None, "store must not fail on LangChain-style messages"
@@ -315,7 +315,7 @@ async def test_default_rounds_effort_keeps_slug() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "BUY",
-        None,
+        "https://telegra.ph/test-placeholder",
     )
     expected = (
         Path(os.environ["TG_BOT_DATA_DIR"])
@@ -341,7 +341,7 @@ async def test_custom_rounds_isolate_slot() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "BUY",
-        None,
+        "https://telegra.ph/test-placeholder",
         rounds=1,
     )
     cache.store(
@@ -352,7 +352,7 @@ async def test_custom_rounds_isolate_slot() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "SELL",
-        None,
+        "https://telegra.ph/test-placeholder",
         rounds=2,
     )
     a = cache.lookup(
@@ -388,7 +388,7 @@ async def test_custom_effort_isolates_slot() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "HOLD",
-        None,
+        "https://telegra.ph/test-placeholder",
         effort="high",
     )
     # Default effort=None lookup should miss high-effort entry.
@@ -419,7 +419,7 @@ async def test_generated_at_persisted() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "BUY",
-        None,
+        "https://telegra.ph/test-placeholder",
     )
     got = cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09")
     ts = got.get("generated_at")
@@ -460,6 +460,63 @@ async def test_atomic_write_is_complete_json() -> None:
     assert leftover == [], f"unexpected leftover tempfiles: {leftover}"
 
 
+async def test_lookup_heals_legacy_poisoned_entry() -> None:
+    """Read-time cache-hygiene gate: entries with `telegraph_url=None`
+    are treated as a miss so legacy poisoned entries from before the
+    write-time gate shipped heal transparently on next tap.
+
+    Write directly via `cache.store(..., telegraph_url=None)` to simulate
+    a legacy entry written without the write-time gate — `lookup` should
+    then return None so the analysis handler runs fresh + retries the
+    publish."""
+    _fresh_data_dir()
+    from tg_bot import cache
+
+    # Write a poisoned entry directly (bypassing the write-time gate to
+    # simulate the legacy condition).
+    cache.store(
+        "openai",
+        "gpt-4o",
+        "o4-mini",
+        "INTU",
+        "2026-05-11",
+        SAMPLE_STATE,
+        "HOLD",
+        None,  # poisoned: publish failed, telegraph_url is None
+    )
+    # The file is on disk —
+    from pathlib import Path
+    import os
+
+    path = (
+        Path(os.environ["TG_BOT_DATA_DIR"])
+        / "result_cache"
+        / "openai__gpt-4o__o4-mini"
+        / "INTU"
+        / "2026-05-11.json"
+    )
+    assert path.is_file(), "poisoned entry must be on disk for the gate to heal it"
+
+    # — but lookup heals on read: returns None, triggering a re-run.
+    got = cache.lookup("openai", "gpt-4o", "o4-mini", "INTU", "2026-05-11")
+    assert got is None, f"expected None (poisoned entry treated as miss), got {got}"
+
+    # Sanity: a healthy entry still returns normally.
+    cache.store(
+        "openai",
+        "gpt-4o",
+        "o4-mini",
+        "NVDA",
+        "2026-05-11",
+        SAMPLE_STATE,
+        "BUY",
+        "https://telegra.ph/NVDA-05-11",
+    )
+    got = cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-11")
+    assert got is not None
+    assert got["telegraph_url"] == "https://telegra.ph/NVDA-05-11"
+
+
 async def test_should_cache_publish_skips_none() -> None:
     """Cache-hygiene gate enforced by `_should_cache_publish` in
     `tg_bot.handlers.callbacks`. The analysis handlers gate every
@@ -494,6 +551,10 @@ SCENARIOS = [
     ("custom rounds isolate cache slot", test_custom_rounds_isolate_slot),
     ("custom effort isolate cache slot", test_custom_effort_isolates_slot),
     ("generated_at stored on every write", test_generated_at_persisted),
+    (
+        "lookup heals legacy poisoned entry (telegraph_url=None)",
+        test_lookup_heals_legacy_poisoned_entry,
+    ),
     (
         "_should_cache_publish gates None telegraph_url out of cache",
         test_should_cache_publish_skips_none,
