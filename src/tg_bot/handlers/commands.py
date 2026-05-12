@@ -16,7 +16,8 @@ from telegram import (
 from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
-from tg_bot.analysis import check_llm_configured, pool_stats
+from tg_bot.analysis import check_llm_configured, llm_setup_error_message, pool_stats
+from tg_bot.handlers.analysis_runner import _run_analysis_for_ticker
 from tg_bot.digest import build_digest_response, humanize_delta, next_fire, tz_short
 from tg_bot.formatters import format_analysis_result_markdown
 from tg_bot.history import (
@@ -347,14 +348,7 @@ async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
       - `/refresh` (no args) → paginated multi-select picker like `/watch`,
         but tapping Done invalidates today's cache for each selected
         ticker before launching the analyses
-
-    Late-imports the analysis runner + the picker error helper to avoid
-    a module-import cycle (`callbacks.py` and `analysis_runner.py` both
-    import from `commands.py` at top level for their picker helpers).
     """
-    from tg_bot.handlers.analysis_runner import _run_analysis_for_ticker
-    from tg_bot.handlers.callbacks import _llm_setup_error_message
-
     user_id = update.effective_user.id
     args = context.args or []
 
@@ -404,7 +398,7 @@ async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     setup_reason = check_llm_configured(user_id, user_config_storage)
     if setup_reason is not None:
         await update.message.reply_text(
-            _llm_setup_error_message(setup_reason), parse_mode="MarkdownV2"
+            llm_setup_error_message(setup_reason), parse_mode="MarkdownV2"
         )
         return
 

@@ -9,6 +9,8 @@ from collections import OrderedDict
 from datetime import date
 from typing import Optional
 
+from telegram.helpers import escape_markdown
+
 from tg_bot.config import Config
 from tg_bot.progress import (
     ProgressReporter,
@@ -56,6 +58,31 @@ def check_llm_configured(user_id, user_config_storage) -> Optional[str]:
     if env_var and not os.environ.get(env_var):
         return f"{provider} picked but {env_var} not set in .env"
     return None
+
+
+def llm_setup_error_message(reason: str) -> str:
+    """Render the short reason from `check_llm_configured` as a friendly
+    MarkdownV2 message for the user, including the next-step hint.
+
+    Lives next to `check_llm_configured` so both halves of the LLM-setup
+    precheck (the check + the user-facing render) stay in one module —
+    previously this lived in `handlers/callbacks.py`, which forced
+    `handlers/analysis_runner.run_user_digest` to late-import it
+    (cycle: callbacks → analysis_runner → callbacks). Moving it here
+    breaks the cycle so both call sites can import at the top level.
+    """
+    if reason.startswith("no provider"):
+        return (
+            "⚠️ *No LLM provider configured*\\.\n\n"
+            "Tap /config to pick a provider \\+ deep/quick models, then try again\\."
+        )
+    # Mode B: provider picked, but matching env var missing. Format is
+    # "deepseek picked but DEEPSEEK_API_KEY not set in .env".
+    return (
+        f"⚠️ *LLM key missing*\\.\n\n"
+        f"`{escape_markdown(reason, version=2)}`\n\n"
+        "Add the key to your `\\.env` and restart the bot \\(`docker\\-compose up \\-d`\\)\\."
+    )
 
 
 # Pool of TradingAgentsGraph instances keyed by (provider, deep, quick).

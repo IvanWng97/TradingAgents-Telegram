@@ -24,6 +24,7 @@ SUITES=(
   runner
   runner_parallel
   telegraph
+  auth
 )
 
 # Color helpers — degrade to plain text when stdout isn't a TTY (CI logs).
