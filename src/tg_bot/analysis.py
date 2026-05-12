@@ -219,10 +219,14 @@ _OPENROUTER_MODELS: dict[str, list[tuple[str, str]]] = {
             "Llama 3.3 70B (free, rate-limited)",
             "meta-llama/llama-3.3-70b-instruct:free",
         ),
-        ("Claude 3.5 Sonnet — Strong reasoning", "anthropic/claude-3.5-sonnet"),
+        ("Claude Sonnet 4.5 — Strong reasoning", "anthropic/claude-sonnet-4.5"),
         ("GPT-4o — Reliable, multimodal", "openai/gpt-4o"),
         ("DeepSeek R1 — Cheap reasoning", "deepseek/deepseek-r1"),
     ],
+}
+
+_OPENROUTER_MODEL_MIGRATIONS = {
+    "anthropic/claude-3.5-sonnet": "anthropic/claude-sonnet-4.5",
 }
 
 
@@ -264,9 +268,16 @@ def _resolve_models(
     user_id, user_config_storage, provider
 ) -> tuple[Optional[str], Optional[str]]:
     """Pick (deep, quick) for this user+provider; falls back to the catalog's
-    first entry when unset. (None, None) for providers without a catalog."""
+    first entry when unset. (None, None) for providers without a catalog.
+
+    Also rewrites known-stale OpenRouter model IDs so existing saved user
+    configs survive provider-side slug retirements.
+    """
     deep = user_config_storage.get_llm_model(user_id, "deep")
     quick = user_config_storage.get_llm_model(user_id, "quick")
+    if provider == "openrouter":
+        deep = _OPENROUTER_MODEL_MIGRATIONS.get(deep, deep)
+        quick = _OPENROUTER_MODEL_MIGRATIONS.get(quick, quick)
     if not deep:
         deep_options = get_model_options(provider, "deep")
         deep = deep_options[0][1] if deep_options else None
