@@ -1,0 +1,45 @@
+name: Smoke
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+# Cancel an in-flight run when a new commit lands on the same ref — saves
+# CI minutes when you push a fixup right after the previous push. Mirrors
+# lint.yml's pattern.
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege: smoke reads code, writes nothing.
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + runtime deps
+        # Full `pip install -e .` so dependabot bumps to tradingagents,
+        # python-telegram-bot, langchain (transitive), etc. actually get
+        # smoke-tested against this PR. Cold cache ~3-4 min; warm ~30s.
+        # `--no-deps` would skip the install path we want to validate.
+        run: pip install -e .
+
+      - name: Run all smoke suites
+        env:
+          # run_smoke.sh defaults to `.venv/bin/python3` for local dev;
+          # CI uses the GitHub-managed interpreter from setup-python.
+          PYTHON: python
+        run: bash scripts/run_smoke.sh
