@@ -15,7 +15,7 @@ mocked TradingAgents, and asserts the orchestration behaves correctly:
   - Single ticker (cap=5): no queueing, just runs.
   - Graceful shutdown: post_stop signals every in-flight analysis.
 
-Run with: .venv/bin/python3 scripts/smoke_concurrent.py
+Run with: .venv/bin/python3 scripts/smoke_runner.py
 """
 
 from __future__ import annotations
@@ -32,75 +32,21 @@ from typing import Callable
 
 # Cap=5 across all tests. Individual tests vary ticker count.
 os.environ["TG_BOT_MAX_CONCURRENT_ANALYSES"] = "5"
-# Isolate from any real on-disk cache: a same-day result cache hit would
-# short-circuit `_run_analysis_for_ticker` before the cancel registry +
-# semaphore plumbing fires, defeating the orchestration assertions.
-os.environ["TG_BOT_DATA_DIR"] = tempfile.mkdtemp(prefix="smoke_concurrent_")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from tg_bot.handlers import callbacks  # noqa: E402
+# Module-level: arm the env-var BEFORE importing the bot — `cache.py` reads
+# `TG_BOT_DATA_DIR` on every call but other modules cache it at import.
+from _smoke_helpers import (  # noqa: E402
+    FakeBot,
+    FakeContext,
+    set_smoke_data_dir,
+)
+
+set_smoke_data_dir("smoke_runner_")
+
+from tg_bot.handlers import analysis_runner as runner  # noqa: E402
 from tg_bot import analysis as analysis_mod  # noqa: E402
-
-
-# --- Mocks -----------------------------------------------------------------
-
-
-class FakeTimedOut(Exception):
-    """Stand-in for telegram.error.TimedOut so the retry path catches it."""
-
-    def __init__(self, msg: str = "Timed out"):
-        super().__init__(msg)
-
-
-# Make the type name "TimedOut" so the retry's `type(e).__name__` check fires.
-FakeTimedOut.__name__ = "TimedOut"
-
-
-class FakeBot:
-    """Records every call. Optionally fails send_photo on the first N attempts."""
-
-    def __init__(self, send_photo_failures: int = 0) -> None:
-        self.captions: dict[int, str] = {}
-        self._next_id = 1000
-        self._lock = asyncio.Lock()
-        self._send_photo_attempts: dict[int, int] = defaultdict(int)
-        self._send_photo_failures = send_photo_failures
-
-    async def send_photo(self, chat_id, photo, caption, parse_mode, reply_markup):
-        # Identify which logical "send" this is via the caption (contains ticker).
-        key = hash(caption)
-        self._send_photo_attempts[key] += 1
-        if self._send_photo_attempts[key] <= self._send_photo_failures:
-            raise FakeTimedOut(
-                f"fake timeout (attempt {self._send_photo_attempts[key]})"
-            )
-        async with self._lock:
-            mid = self._next_id
-            self._next_id += 1
-        self.captions[mid] = caption
-        return SimpleNamespace(message_id=mid)
-
-    async def edit_message_caption(
-        self, chat_id, message_id, caption, parse_mode=None, reply_markup=None
-    ):
-        self.captions[message_id] = caption
-
-    async def edit_message_reply_markup(self, chat_id, message_id, reply_markup):
-        pass
-
-    async def edit_message_text(self, chat_id, message_id, text, parse_mode=None):
-        pass
-
-    async def send_message(self, chat_id, text, parse_mode=None):
-        pass
-
-
-class FakeContext:
-    def __init__(self, bot: FakeBot) -> None:
-        self.bot = bot
-        self.chat_data: dict = {}
-        self.bot_data: dict = {}
 
 
 # --- Mock analysis function ------------------------------------------------
@@ -128,7 +74,7 @@ def fake_busy_analysis(ticker, user_id, user_config_storage, reporter=None, **kw
     with pool.acquire() as _ta:
         while not _STOP_SIGNAL.is_set():
             if reporter and reporter.cancel_event and reporter.cancel_event.is_set():
-                raise callbacks.CancelledByUserError("fake cancel")
+                raise runner.CancelledByUserError("fake cancel")
             time.sleep(0.02)
     return ({"final_trade_decision": f"Decision for {ticker}: HOLD"}, "HOLD")
 
@@ -159,12 +105,12 @@ def reset_state() -> None:
     """
     global _STOP_SIGNAL, _BUILD_COUNT
     _STOP_SIGNAL = threading.Event()
-    callbacks._STOP_SIGNAL = _STOP_SIGNAL  # not used, but keep symmetry
-    callbacks._run_semaphore = None
+    runner._STOP_SIGNAL = _STOP_SIGNAL  # not used, but keep symmetry
+    runner._run_semaphore = None
     analysis_mod._graph_pool.clear()
     with _BUILD_LOCK:
         _BUILD_COUNT = 0
-    os.environ["TG_BOT_DATA_DIR"] = tempfile.mkdtemp(prefix="smoke_concurrent_")
+    os.environ["TG_BOT_DATA_DIR"] = tempfile.mkdtemp(prefix="smoke_runner_")
 
 
 def install_mocks(
@@ -172,9 +118,9 @@ def install_mocks(
     bot_send_photo_failures: int = 0,
     analysis_func: Callable = fake_busy_analysis,
 ) -> tuple[FakeBot, FakeContext]:
-    callbacks.run_trading_analysis = analysis_func
-    callbacks.publish_to_telegraph = fake_publish
-    callbacks.TRADINGAGENTS_AVAILABLE = True
+    runner.run_trading_analysis = analysis_func
+    runner.publish_to_telegraph = fake_publish
+    runner.TRADINGAGENTS_AVAILABLE = True
 
     # Track build count by wrapping the real builder via the pool.
     original_get_or_create = analysis_mod._get_or_create_pool
@@ -241,7 +187,7 @@ async def test_basic_queue() -> None:
     bot, ctx = install_mocks()
     tickers = [f"TKR{i:02d}" for i in range(10)]
     tasks = [
-        asyncio.create_task(callbacks._run_analysis_for_ticker(ctx, 1, 1, t))
+        asyncio.create_task(runner._run_analysis_for_ticker(ctx, 1, 1, t))
         for t in tickers
     ]
     await asyncio.sleep(0.3)
@@ -269,7 +215,7 @@ async def test_cancel_running_promotes_queued() -> None:
     bot, ctx = install_mocks()
     tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "AMZN", "META"]
     tasks = [
-        asyncio.create_task(callbacks._run_analysis_for_ticker(ctx, 1, 1, t))
+        asyncio.create_task(runner._run_analysis_for_ticker(ctx, 1, 1, t))
         for t in tickers
     ]
     await asyncio.sleep(0.3)
@@ -300,19 +246,19 @@ async def test_cancel_queued_never_takes_slot() -> None:
     bot, ctx = install_mocks()
     tickers = [f"TKR{i:02d}" for i in range(7)]
     tasks = [
-        asyncio.create_task(callbacks._run_analysis_for_ticker(ctx, 1, 1, t))
+        asyncio.create_task(runner._run_analysis_for_ticker(ctx, 1, 1, t))
         for t in tickers
     ]
     await asyncio.sleep(0.3)
 
-    sem = callbacks._get_run_semaphore()
-    in_flight_before = callbacks.Config.MAX_CONCURRENT_ANALYSES - sem._value
+    sem = runner._get_run_semaphore()
+    in_flight_before = runner.Config.MAX_CONCURRENT_ANALYSES - sem._value
     assert in_flight_before == 5
 
     _trigger_cancel(ctx, "TKR06")  # last queued
     await asyncio.sleep(0.2)
 
-    in_flight_after = callbacks.Config.MAX_CONCURRENT_ANALYSES - sem._value
+    in_flight_after = runner.Config.MAX_CONCURRENT_ANALYSES - sem._value
     assert in_flight_after == 5, f"queued cancel changed slot count: {in_flight_after}"
 
     final = bot.captions.get(_msg_id_for(bot, "TKR06"))
@@ -330,7 +276,7 @@ async def test_multi_cancel_burst() -> None:
     bot, ctx = install_mocks()
     tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL"]
     tasks = [
-        asyncio.create_task(callbacks._run_analysis_for_ticker(ctx, 1, 1, t))
+        asyncio.create_task(runner._run_analysis_for_ticker(ctx, 1, 1, t))
         for t in tickers
     ]
     await asyncio.sleep(0.3)
@@ -358,7 +304,7 @@ async def test_pool_reuse_no_rebuild() -> None:
 
     # Batch 1: 3 tickers (under cap=5, all start)
     batch1 = [
-        asyncio.create_task(callbacks._run_analysis_for_ticker(ctx, 1, 1, t))
+        asyncio.create_task(runner._run_analysis_for_ticker(ctx, 1, 1, t))
         for t in ["AAA", "BBB", "CCC"]
     ]
     await asyncio.sleep(0.3)
@@ -370,7 +316,7 @@ async def test_pool_reuse_no_rebuild() -> None:
     # Batch 2: 3 different tickers (same LLM config — same pool key)
     _STOP_SIGNAL.clear()
     batch2 = [
-        asyncio.create_task(callbacks._run_analysis_for_ticker(ctx, 1, 1, t))
+        asyncio.create_task(runner._run_analysis_for_ticker(ctx, 1, 1, t))
         for t in ["DDD", "EEE", "FFF"]
     ]
     await asyncio.sleep(0.3)
@@ -388,7 +334,7 @@ async def test_send_photo_retry_succeeds() -> None:
     reset_state()
     bot, ctx = install_mocks(bot_send_photo_failures=1)
 
-    task = asyncio.create_task(callbacks._run_analysis_for_ticker(ctx, 1, 1, "AAPL"))
+    task = asyncio.create_task(runner._run_analysis_for_ticker(ctx, 1, 1, "AAPL"))
     await asyncio.sleep(1.5)  # give time for retry (1s backoff + jitter)
     _STOP_SIGNAL.set()
     result = await task
@@ -403,9 +349,9 @@ async def test_send_photo_failure_cleanup() -> None:
     reset_state()
     bot, ctx = install_mocks(bot_send_photo_failures=10)  # always fails
 
-    sem = callbacks._get_run_semaphore()
+    sem = runner._get_run_semaphore()
     starting_value = sem._value
-    task = asyncio.create_task(callbacks._run_analysis_for_ticker(ctx, 1, 1, "AAPL"))
+    task = asyncio.create_task(runner._run_analysis_for_ticker(ctx, 1, 1, "AAPL"))
     result = await task
 
     assert result == "completed", result  # "failed" path returns "completed"
@@ -421,10 +367,10 @@ async def test_propagate_raises_non_cancel() -> None:
     """propagate() raises generic exception; rendered as error, slot released."""
     reset_state()
     bot, ctx = install_mocks(analysis_func=fake_raising_analysis)
-    sem = callbacks._get_run_semaphore()
+    sem = runner._get_run_semaphore()
     starting_value = sem._value
 
-    task = asyncio.create_task(callbacks._run_analysis_for_ticker(ctx, 1, 1, "AAPL"))
+    task = asyncio.create_task(runner._run_analysis_for_ticker(ctx, 1, 1, "AAPL"))
     result = await task
 
     assert result == "completed", result  # error path returns "completed"
@@ -437,7 +383,7 @@ async def test_single_ticker_no_queueing() -> None:
     """1 ticker (cap=5) — runs immediately, no queue overhead."""
     reset_state()
     bot, ctx = install_mocks()
-    task = asyncio.create_task(callbacks._run_analysis_for_ticker(ctx, 1, 1, "AAPL"))
+    task = asyncio.create_task(runner._run_analysis_for_ticker(ctx, 1, 1, "AAPL"))
     await asyncio.sleep(0.2)
 
     cap = bot.captions.get(_msg_id_for(bot, "AAPL"))
@@ -454,7 +400,7 @@ async def test_graceful_shutdown_signals_all() -> None:
     bot, ctx = install_mocks()
     tickers = [f"TKR{i:02d}" for i in range(7)]
     tasks = [
-        asyncio.create_task(callbacks._run_analysis_for_ticker(ctx, 1, 1, t))
+        asyncio.create_task(runner._run_analysis_for_ticker(ctx, 1, 1, t))
         for t in tickers
     ]
     await asyncio.sleep(0.3)
@@ -487,7 +433,7 @@ async def test_cancel_post_completion_race() -> None:
         return ({"final_trade_decision": f"{ticker}: HOLD"}, "HOLD")
 
     bot, ctx = install_mocks(analysis_func=quick_analysis)
-    task = asyncio.create_task(callbacks._run_analysis_for_ticker(ctx, 1, 1, "AAPL"))
+    task = asyncio.create_task(runner._run_analysis_for_ticker(ctx, 1, 1, "AAPL"))
 
     # Wait for analysis to complete, then race cancel.
     while not completion_event.is_set():
@@ -502,8 +448,8 @@ async def test_cancel_post_completion_race() -> None:
     result = await task
     # Either path is acceptable; what we're verifying is no slot leak.
     assert result in ("cancelled", "completed"), result
-    sem = callbacks._get_run_semaphore()
-    assert sem._value == callbacks.Config.MAX_CONCURRENT_ANALYSES, (
+    sem = runner._get_run_semaphore()
+    assert sem._value == runner.Config.MAX_CONCURRENT_ANALYSES, (
         f"slot leaked after race: {sem._value}"
     )
 
@@ -560,6 +506,6 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    print("=== smoke_concurrent: scenario coverage ===\n")
+    print("=== smoke_runner: scenario coverage ===\n")
     asyncio.run(main())
     print("\nALL CHECKS PASSED ✅")

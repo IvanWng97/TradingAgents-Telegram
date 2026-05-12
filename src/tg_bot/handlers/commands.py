@@ -348,14 +348,12 @@ async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         but tapping Done invalidates today's cache for each selected
         ticker before launching the analyses
 
-    Late-imports `_run_analysis_for_ticker` and the cache helpers to
-    avoid a module-import cycle (callbacks.py already imports from
-    commands.py at top level).
+    Late-imports the analysis runner + the picker error helper to avoid
+    a module-import cycle (`callbacks.py` and `analysis_runner.py` both
+    import from `commands.py` at top level for their picker helpers).
     """
-    from tg_bot.handlers.callbacks import (
-        _llm_setup_error_message,
-        _run_analysis_for_ticker,
-    )
+    from tg_bot.handlers.analysis_runner import _run_analysis_for_ticker
+    from tg_bot.handlers.callbacks import _llm_setup_error_message
 
     user_id = update.effective_user.id
     args = context.args or []
