@@ -562,12 +562,16 @@ def format_short_message(
     parts.append(f"<i>Generated {timestamp}</i>")
     if config_summary:
         parts.append(f"<i>via {_html_lib.escape(config_summary)}</i>")
-    parts.append("")
 
-    if telegraph_url:
-        href = _html_lib.escape(telegraph_url, quote=True)
-        parts.append(f'📰 <a href="{href}">Read Online (preview)</a>')
-    else:
-        parts.append("⚠️ Online report unavailable (Telegraph publish failed).")
+    # When Telegraph publishing fails, callers still set up the keyboard
+    # (download-only — `_full_report_keyboard` drops the IV button if
+    # url is None) but the user has no signal that the Telegraph route
+    # is unavailable. Surface the warning in the caption so the missing
+    # button isn't a silent failure. On success the caption stays clean
+    # (no inline `<a href>` line) — the `📰 Instant View` keyboard
+    # button is the canonical entry point.
+    if not telegraph_url:
+        parts.append("")
+        parts.append("⚠️ Instant View unavailable (Telegraph publish failed).")
 
     return "\n".join(parts)

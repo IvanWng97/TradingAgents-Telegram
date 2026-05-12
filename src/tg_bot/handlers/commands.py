@@ -454,21 +454,23 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if len(context.args) >= 2:
         date_str = context.args[1].strip()
-        caption, state = await build_history_response(ticker, date_str)
-        # Surface the `📥 Download .md` button only when a record exists;
-        # otherwise it would dead-end on the same "unavailable" path.
+        caption, state, telegraph_url = await build_history_response(ticker, date_str)
+        # Surface the action buttons only when a record exists; otherwise
+        # they'd dead-end on the same "unavailable" path.
         kb = None
         if state is not None:
-            kb = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "📥 Download .md (all sections)",
-                            callback_data=f"getmd:{ticker}:{date_str}",
-                        )
-                    ]
-                ]
+            buttons = []
+            if telegraph_url:
+                buttons.append(
+                    InlineKeyboardButton("📰 Instant View", url=telegraph_url)
+                )
+            buttons.append(
+                InlineKeyboardButton(
+                    "📥 Download .md",
+                    callback_data=f"getmd:{ticker}:{date_str}",
+                )
             )
+            kb = InlineKeyboardMarkup([buttons])
         await update.message.reply_text(caption, parse_mode="HTML", reply_markup=kb)
     else:
         text, kb = build_history_dates_response(ticker)
@@ -537,21 +539,26 @@ def build_history_dates_response(
     )
 
 
-async def build_history_response(ticker: str, date_str: str) -> tuple[str, dict | None]:
+async def build_history_response(
+    ticker: str, date_str: str
+) -> tuple[str, dict | None, str | None]:
     """Load + publish a historical analysis.
 
-    Returns `(html_caption, final_state)`. The caption uses HTML (callers
-    must pass `parse_mode="HTML"`); `final_state` is the raw on-disk
-    tradingagents log or `None` if no record exists. Callers use
-    `final_state` to send the full `.md` document attachment alongside
-    the caption — same dual-output as the live `/watch` flow.
+    Returns `(html_caption, final_state, telegraph_url)`. Caption is
+    HTML (callers must pass `parse_mode="HTML"`). `final_state` is the
+    raw on-disk tradingagents log or None if no record exists.
+    `telegraph_url` is the published page URL, or None if publish failed.
+    Callers pass `telegraph_url` to `_full_report_keyboard` so the
+    `📰 Instant View` button links to the right page; the inline `<a>`
+    Telegraph link was removed from the caption when the two-button
+    keyboard replaced it.
     """
     safe_ticker = _html_escape(ticker)
     safe_date = _html_escape(date_str)
 
     state = load_historical_state(ticker, date_str)
     if state is None:
-        return f"No analysis found for {safe_ticker} on {safe_date}.", None
+        return f"No analysis found for {safe_ticker} on {safe_date}.", None, None
 
     # Pass the historical date so the Telegraph page leads with a
     # "Generated YYYY-MM-DD" header. config is unknown for /history (the
@@ -567,13 +574,10 @@ async def build_history_response(ticker: str, date_str: str) -> tuple[str, dict 
     html = markdown.markdown(md_body, extensions=["tables"])
     telegraph_url = await publish_to_telegraph(f"{ticker} {date_str}", html)
 
-    msg = f"📜 <b>{safe_ticker}</b> — {safe_date}\n\n"
-    if telegraph_url:
-        href = _html_escape(telegraph_url, quote=True)
-        msg += f'📰 <a href="{href}">Read Online (preview)</a>'
-    else:
-        msg += "⚠️ Online report unavailable (Telegraph publish failed)."
-    return msg, state
+    msg = f"📜 <b>{safe_ticker}</b> — {safe_date}"
+    if not telegraph_url:
+        msg += "\n\n⚠️ Instant View unavailable (Telegraph publish failed)."
+    return msg, state, telegraph_url
 
 
 async def config_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

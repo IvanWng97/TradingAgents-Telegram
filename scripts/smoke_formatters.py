@@ -223,7 +223,8 @@ def test_format_short_message_emits_html_structure() -> None:
     assert "<b>SOFI</b>" in out and "<b>SELL</b>" in out, out
     assert "<blockquote expandable>" in out and "</blockquote>" in out, out
     assert "<b>bold</b>" in out, out  # summary markdown was converted
-    assert '<a href="https://telegra.ph/SOFI-Analysis-05-10">' in out, out
+    # Inline Telegraph link removed — `📰 Instant View` button owns the action now.
+    assert "<a href=" not in out, out
     # No MarkdownV2 escape sequences leaked through.
     for marker in ("\\.", "\\!", "\\("):
         assert marker not in out, f"MarkdownV2 escape leaked: {marker!r} in {out!r}"
@@ -259,11 +260,12 @@ def test_format_short_message_caption_fits_under_telegram_limit() -> None:
 
 def test_format_short_message_no_summary_still_works() -> None:
     """Missing summary kwarg: caption omits the blockquote but the
-    signal/timestamp/link still render."""
+    signal badge + timestamp still render. The Telegraph link is now
+    surfaced via the inline-keyboard button, not the caption body."""
     out = format_short_message("SOFI", "BUY", telegraph_url="https://telegra.ph/x")
     assert "<b>SOFI</b>" in out and "<b>BUY</b>" in out
     assert "<blockquote" not in out, out
-    assert '<a href="https://telegra.ph/x">' in out
+    assert "Generated" in out
 
 
 def test_format_short_message_telegraph_failure_path() -> None:
@@ -273,27 +275,37 @@ def test_format_short_message_telegraph_failure_path() -> None:
     assert "<a href" not in out
 
 
-def test_format_short_message_escapes_url_chars() -> None:
-    """A URL containing `&` or `"` must be html-escaped in the href
-    attribute or it'll break the tag."""
-    url = 'https://example.com/path?a=1&b="2"'
-    out = format_short_message("SOFI", "BUY", telegraph_url=url)
-    assert "&amp;" in out, out
-    assert "&quot;" in out, out
-    assert 'a=1&b="2"' not in out, 'raw `&` or `"` leaked into href'
+def test_full_report_keyboard_passes_url_verbatim() -> None:
+    """URL buttons receive the URL verbatim — PTB and Telegram handle
+    encoding internally for the Bot API call. The earlier escaping test
+    targeted the inline `<a href>` in the caption (no longer there)."""
+    from tg_bot.handlers.callbacks import _full_report_keyboard  # noqa: E402
+
+    url = "https://example.com/path?a=1&b=2"
+    kb = _full_report_keyboard("SOFI", "2026-05-10", telegraph_url=url)
+    assert kb.inline_keyboard[0][0].url == url
 
 
-def test_format_short_message_uses_read_online_label() -> None:
-    """Caption labels the Telegraph link as `📰 Read Online (preview)`
-    to disambiguate it from the `📥 Download .md (all sections)` button
-    that sits below the photo. Both said "Full Report" before — confusing
-    when paired."""
+def test_format_short_message_omits_inline_telegraph_link_when_button_owns_it() -> None:
+    """Two-button keyboard owns both actions (`📰 Instant View` URL +
+    `📥 Download .md` callback). The inline `<a href>` Telegraph link
+    inside the caption was removed — it duplicated the button and read
+    as documentation rather than a primary action."""
     out = format_short_message("SOFI", "BUY", telegraph_url="https://telegra.ph/x")
-    assert "📰" in out, out
-    assert "Read Online (preview)" in out, out
-    # Old label and its emoji must be gone.
+    # No inline anchor + no old labels in the caption.
+    assert "<a href" not in out, out
+    assert "Read Online" not in out, out
     assert "View Full Report" not in out, out
-    assert "📄" not in out, out
+    # Header still renders the signal badge.
+    assert "<b>SOFI</b>" in out and "<b>BUY</b>" in out, out
+
+
+def test_format_short_message_warns_when_telegraph_publish_fails() -> None:
+    """When `telegraph_url` is None the keyboard drops the IV button; the
+    caption surfaces a warning so the missing button isn't a silent failure."""
+    out = format_short_message("SOFI", "BUY", telegraph_url=None)
+    assert "⚠️" in out and "Telegraph publish failed" in out, out
+    assert "Instant View unavailable" in out, out
 
 
 def test_normalize_indents_bullets_under_numbered_item() -> None:
@@ -441,22 +453,40 @@ def test_caption_summary_aligns_with_badge_after_strip() -> None:
     assert "Rating: UNDERWEIGHT" not in out, out
 
 
-def test_full_report_keyboard_callback_data_shape() -> None:
-    """`getmd:<TICKER>:<DATE>` payload + the `📥 Download .md (all
-    sections)` button label is the wire contract — the handler dispatch
-    in button_callback splits on `:` and the user-facing differentiation
-    from the `📰 Read Online` link depends on this exact label."""
-    # Defer the import: tg_bot.handlers.callbacks pulls in PTB on import.
+def test_full_report_keyboard_two_button_shape_with_url() -> None:
+    """When `telegraph_url` is set, the keyboard exposes both actions
+    side-by-side: a URL button (`📰 Instant View`) opening Telegraph IV
+    + a callback button (`📥 Download .md`) firing the `getmd:` flow."""
     from tg_bot.handlers.callbacks import _full_report_keyboard  # noqa: E402
 
-    kb = _full_report_keyboard("BRK-B", "2026-05-10")
+    kb = _full_report_keyboard(
+        "BRK-B", "2026-05-10", telegraph_url="https://telegra.ph/BRK-B-Analysis-05-10"
+    )
+    rows = kb.inline_keyboard
+    assert len(rows) == 1 and len(rows[0]) == 2, rows
+    iv_btn, md_btn = rows[0]
+    # URL button: no callback_data, has url set.
+    assert iv_btn.url == "https://telegra.ph/BRK-B-Analysis-05-10", iv_btn.url
+    assert iv_btn.callback_data is None
+    assert "📰" in iv_btn.text and "Instant View" in iv_btn.text, iv_btn.text
+    # Callback button: no url, has callback_data.
+    assert md_btn.url is None
+    assert md_btn.callback_data == "getmd:BRK-B:2026-05-10", md_btn.callback_data
+    assert "📥" in md_btn.text and "Download .md" in md_btn.text, md_btn.text
+    assert len(md_btn.callback_data.encode("utf-8")) <= 64
+
+
+def test_full_report_keyboard_drops_iv_button_when_url_missing() -> None:
+    """Telegraph publish failed (no url) → IV button omitted, only the
+    download-callback button remains. Caller surfaces a warning in the
+    caption so users know the IV route is unavailable."""
+    from tg_bot.handlers.callbacks import _full_report_keyboard  # noqa: E402
+
+    kb = _full_report_keyboard("BRK-B", "2026-05-10", telegraph_url=None)
     rows = kb.inline_keyboard
     assert len(rows) == 1 and len(rows[0]) == 1, rows
-    btn = rows[0][0]
-    assert btn.callback_data == "getmd:BRK-B:2026-05-10", btn.callback_data
-    assert "📥" in btn.text and "Download .md" in btn.text, btn.text
-    # callback_data must stay under Telegram's 64-byte cap.
-    assert len(btn.callback_data.encode("utf-8")) <= 64
+    assert rows[0][0].callback_data == "getmd:BRK-B:2026-05-10"
+    assert rows[0][0].url is None
 
 
 # ─── Telegraph packer + full .md report ─────────────────────────────────
@@ -664,14 +694,25 @@ SCENARIOS = [
         "Telegraph publish failure path",
         test_format_short_message_telegraph_failure_path,
     ),
-    ("URL specials escaped in href", test_format_short_message_escapes_url_chars),
     (
-        "caption Telegraph link uses 📰 Read Online (preview) label",
-        test_format_short_message_uses_read_online_label,
+        "URL button passes telegraph_url verbatim (PTB handles encoding)",
+        test_full_report_keyboard_passes_url_verbatim,
     ),
     (
-        "📥 Download .md button payload shape (getmd:<T>:<D>)",
-        test_full_report_keyboard_callback_data_shape,
+        "caption drops inline Telegraph link when button owns the action",
+        test_format_short_message_omits_inline_telegraph_link_when_button_owns_it,
+    ),
+    (
+        "caption surfaces warning when telegraph_url is None",
+        test_format_short_message_warns_when_telegraph_publish_fails,
+    ),
+    (
+        "two-button keyboard exposes IV url + .md callback when url present",
+        test_full_report_keyboard_two_button_shape_with_url,
+    ),
+    (
+        "keyboard drops IV button when telegraph_url is None",
+        test_full_report_keyboard_drops_iv_button_when_url_missing,
     ),
     # Markdown nested-bullet normalization
     (

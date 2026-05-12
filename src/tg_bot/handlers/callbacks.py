@@ -72,25 +72,35 @@ def _get_run_semaphore() -> asyncio.Semaphore:
     return _run_semaphore
 
 
-def _full_report_keyboard(ticker: str, date_iso: str) -> InlineKeyboardMarkup:
-    """Inline keyboard for the `📥 Download .md (all sections)` button.
+def _full_report_keyboard(
+    ticker: str, date_iso: str, telegraph_url: str | None = None
+) -> InlineKeyboardMarkup:
+    """Two-button inline keyboard for the analysis output.
 
-    Posted on the photo+caption so users opt in to the `.md` instead of
-    seeing it auto-attached. Pairs with the Telegraph `Read Online`
-    link — the web preview is curated (drops sections to fit Telegraph's
-    64 KB cap) while the `.md` is the unbounded archival download.
-    `getmd:<TICKER>:<DATE>` stays well under Telegram's 64-byte
-    callback_data cap."""
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "📥 Download .md (all sections)",
-                    callback_data=f"getmd:{ticker}:{date_iso}",
-                )
-            ]
-        ]
+    Row 1: `📰 Instant View` (URL button → Telegraph IV) +
+           `📥 Download .md` (callback → `getmd:<TICKER>:<DATE>`).
+
+    Replaces the previous single-button keyboard + inline `<a>` link
+    inside the caption. Two equal-weight buttons read as primary actions;
+    the inline link was reading as documentation. Tapping the URL button
+    opens Telegraph's Instant View directly inside Telegram — no
+    intermediate photo, no in-app browser detour. Telegraph URLs are
+    first-class IV-eligible.
+
+    The IV button is omitted (single-button keyboard) when `telegraph_url`
+    is None — typically a publish failure where there's nothing to link.
+    `getmd:` payload stays well under Telegram's 64-byte callback_data
+    cap (max ~25 bytes for sane ticker + ISO date)."""
+    buttons: list[InlineKeyboardButton] = []
+    if telegraph_url:
+        buttons.append(InlineKeyboardButton("📰 Instant View", url=telegraph_url))
+    buttons.append(
+        InlineKeyboardButton(
+            "📥 Download .md",
+            callback_data=f"getmd:{ticker}:{date_iso}",
+        )
     )
+    return InlineKeyboardMarkup([buttons])
 
 
 async def _handle_get_full_md(
@@ -408,7 +418,9 @@ async def _run_analysis_for_ticker(
                 photo=chart_url,
                 caption=caption,
                 parse_mode="HTML",
-                reply_markup=_full_report_keyboard(ticker, today_iso),
+                reply_markup=_full_report_keyboard(
+                    ticker, today_iso, cached.get("telegraph_url")
+                ),
             )
         except Exception as e:
             logger.warning("[%s] cache-hit send_photo failed: %s", ticker, e)
@@ -676,7 +688,7 @@ async def _run_analysis_for_ticker(
             message_id=progress_msg.message_id,
             caption=caption,
             parse_mode="HTML",
-            reply_markup=_full_report_keyboard(ticker, today_iso),
+            reply_markup=_full_report_keyboard(ticker, today_iso, telegraph_url),
         )
         # Persist for the rest of today so the next /watch tap or digest
         # fire on this ticker (any user with the same config) hits the
@@ -930,21 +942,25 @@ async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) 
 
 async def _handle_history(query, ticker: str, date_str: str) -> None:
     """Render a historical analysis selected via the date-picker keyboard."""
-    caption, state = await build_history_response(ticker, date_str)
-    # Pair the Back nav with the `📥 Download .md` button when a
-    # record exists (state is None for missing logs — no doc to fetch).
+    caption, state, telegraph_url = await build_history_response(ticker, date_str)
+    # Row 1: ← Back nav. Row 2 (only when a record exists): the action
+    # buttons. State is None for missing logs — caption already says so.
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton("← Back", callback_data=f"hist_back:dates:{ticker}")]
     ]
     if state is not None:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "📥 Download .md (all sections)",
-                    callback_data=f"getmd:{ticker}:{date_str}",
-                )
-            ]
+        action_row: list[InlineKeyboardButton] = []
+        if telegraph_url:
+            action_row.append(
+                InlineKeyboardButton("📰 Instant View", url=telegraph_url)
+            )
+        action_row.append(
+            InlineKeyboardButton(
+                "📥 Download .md",
+                callback_data=f"getmd:{ticker}:{date_str}",
+            )
         )
+        rows.append(action_row)
     await query.edit_message_text(
         caption, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows)
     )
