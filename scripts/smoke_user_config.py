@@ -180,6 +180,54 @@ async def test_build_user_config_writes_rounds_even_without_provider() -> None:
     assert config["max_debate_rounds"] == 1
 
 
+# ─── OpenRouter stale-slug migration ──────────────────────────────────
+
+
+async def test_openrouter_migration_rewrites_stale_sonnet_slug() -> None:
+    """A user who picked `anthropic/claude-3.5-sonnet` weeks ago via
+    /config has it in their saved storage; OpenRouter has since retired
+    that slug. `_resolve_models` rewrites on read so the analysis runs
+    against the current `anthropic/claude-sonnet-4.5` slug without
+    needing the user to rerun /config."""
+    s = _make_storage()
+    await s.set_llm_provider("u1", "openrouter")
+    await s.set_llm_model("u1", "deep", "anthropic/claude-3.5-sonnet")
+    from tg_bot.analysis import _resolve_models
+
+    deep, _quick = _resolve_models("u1", s, "openrouter")
+    assert deep == "anthropic/claude-sonnet-4.5", deep
+
+
+async def test_openrouter_migration_scoped_to_openrouter_provider() -> None:
+    """Migration only fires for `provider == "openrouter"`. A user on a
+    different provider whose stored model ID happens to collide with a
+    stale openrouter slug (highly unlikely but defensive) is not rewritten."""
+    s = _make_storage()
+    await s.set_llm_provider("u1", "anthropic")
+    await s.set_llm_model("u1", "deep", "anthropic/claude-3.5-sonnet")
+    from tg_bot.analysis import _resolve_models
+
+    deep, _quick = _resolve_models("u1", s, "anthropic")
+    # Migration is openrouter-only — the value passes through unchanged.
+    # (Anthropic's own catalog uses bare model IDs like "claude-sonnet-4",
+    # not the slash-prefixed openrouter form, so this collision is
+    # synthetic; the assertion pins the scope guard.)
+    assert deep == "anthropic/claude-3.5-sonnet", deep
+
+
+async def test_openrouter_migration_passes_through_unknown_slugs() -> None:
+    """Slugs not in the migration map (current models, custom IDs) pass
+    through unchanged — the map is opt-in by entry, not opt-out by
+    pattern."""
+    s = _make_storage()
+    await s.set_llm_provider("u1", "openrouter")
+    await s.set_llm_model("u1", "deep", "meta-llama/llama-3.3-70b-instruct:free")
+    from tg_bot.analysis import _resolve_models
+
+    deep, _quick = _resolve_models("u1", s, "openrouter")
+    assert deep == "meta-llama/llama-3.3-70b-instruct:free", deep
+
+
 # ─── caption rendering (via AnalysisConfigKey) ─────────────────────────
 
 
@@ -255,6 +303,18 @@ SCENARIOS = [
     (
         "build_user_config writes rounds even without provider",
         test_build_user_config_writes_rounds_even_without_provider,
+    ),
+    (
+        "openrouter migration rewrites stale sonnet slug",
+        test_openrouter_migration_rewrites_stale_sonnet_slug,
+    ),
+    (
+        "openrouter migration scoped to openrouter provider",
+        test_openrouter_migration_scoped_to_openrouter_provider,
+    ),
+    (
+        "openrouter migration passes through unknown slugs",
+        test_openrouter_migration_passes_through_unknown_slugs,
     ),
     ("config_summary default", test_config_summary_default),
     ("config_summary with custom rounds", test_config_summary_custom_rounds),
