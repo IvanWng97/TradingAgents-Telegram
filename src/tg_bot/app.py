@@ -31,7 +31,7 @@ from tg_bot.handlers import (
     start,
     status_cmd,
 )
-from tg_bot.handlers.callbacks import register_digest_job
+from tg_bot.handlers.analysis_runner import register_digest_job
 from tg_bot.storage import user_config_storage, watchlist_storage
 
 

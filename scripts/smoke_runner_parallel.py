@@ -9,7 +9,7 @@ records its actual start/end wall-clock window. After gather, we check:
   2. All 5 (start, end) windows overlap — a single instant exists when
      every run was in flight.
 
-Run with: .venv/bin/python3 scripts/smoke_parallel.py
+Run with: .venv/bin/python3 scripts/smoke_runner_parallel.py
 """
 
 from __future__ import annotations
@@ -17,22 +17,20 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-import tempfile
 import threading
 import time
-from types import SimpleNamespace
 
 # Match cap to ticker count so no runs are queued — we want all 5 to
 # enter the work phase simultaneously.
 os.environ["TG_BOT_MAX_CONCURRENT_ANALYSES"] = "5"
-# Isolate from any real on-disk cache: the same-day result cache would
-# short-circuit our fake_busy_analysis (no LLM call, no WINDOWS entry,
-# `KeyError` later). A fresh tempdir guarantees every lookup misses.
-os.environ["TG_BOT_DATA_DIR"] = tempfile.mkdtemp(prefix="smoke_parallel_")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from tg_bot.handlers import callbacks  # noqa: E402
+from _smoke_helpers import FakeBot, FakeContext, set_smoke_data_dir  # noqa: E402
+
+set_smoke_data_dir("smoke_runner_parallel_")
+
+from tg_bot.handlers import analysis_runner as runner  # noqa: E402
 
 
 # How long each fake run takes (seconds). Big enough to make GIL/serialization
@@ -43,38 +41,6 @@ RUN_DURATION = 1.0
 # analysis function from worker threads — guarded by a lock.
 WINDOWS: dict[str, tuple[float, float]] = {}
 _WINDOWS_LOCK = threading.Lock()
-
-
-# --- Mocks (same shape as smoke_concurrent.py) -----------------------------
-
-
-class FakeBot:
-    def __init__(self) -> None:
-        self.captions: dict[int, str] = {}
-        self._next_id = 1000
-        self._lock = asyncio.Lock()
-
-    async def send_photo(self, chat_id, photo, caption, parse_mode, reply_markup):
-        async with self._lock:
-            mid = self._next_id
-            self._next_id += 1
-        self.captions[mid] = caption
-        return SimpleNamespace(message_id=mid)
-
-    async def edit_message_caption(
-        self, chat_id, message_id, caption, parse_mode=None, reply_markup=None
-    ):
-        self.captions[message_id] = caption
-
-    async def edit_message_reply_markup(self, chat_id, message_id, reply_markup):
-        pass
-
-
-class FakeContext:
-    def __init__(self, bot: FakeBot) -> None:
-        self.bot = bot
-        self.chat_data: dict = {}
-        self.bot_data: dict = {}
 
 
 def fake_busy_analysis(ticker, user_id, user_config_storage, reporter=None, **kw):
@@ -95,10 +61,10 @@ async def fake_publish(title, content):
 
 
 async def run() -> None:
-    callbacks.run_trading_analysis = fake_busy_analysis
-    callbacks.publish_to_telegraph = fake_publish
-    callbacks.TRADINGAGENTS_AVAILABLE = True
-    callbacks._run_semaphore = None  # reset lazy-init
+    runner.run_trading_analysis = fake_busy_analysis
+    runner.publish_to_telegraph = fake_publish
+    runner.TRADINGAGENTS_AVAILABLE = True
+    runner._run_semaphore = None  # reset lazy-init
 
     bot = FakeBot()
     context = FakeContext(bot)
@@ -111,7 +77,7 @@ async def run() -> None:
     launched_at = time.monotonic()
     tasks = {
         t: asyncio.create_task(
-            callbacks._run_analysis_for_ticker(context, chat_id, user_id, t)
+            runner._run_analysis_for_ticker(context, chat_id, user_id, t)
         )
         for t in tickers
     }

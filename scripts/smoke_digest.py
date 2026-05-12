@@ -489,12 +489,20 @@ def _disable_llm_precheck_globally() -> None:
 
     The precheck has dedicated coverage in `test_llm_precheck_*`; the
     fan-out / cancel / progress tests below should not have to also arm
-    a provider + matching env var. Patches the import in callbacks so
-    every `run_user_digest` / `_handle_done` call sees the no-op.
+    a provider + matching env var. Patches the import in both modules
+    that bind to it — `callbacks` (for `_handle_digest`'s `digest:run`
+    branch) and `analysis_runner` (for `run_user_digest`'s entry guard).
     """
-    from tg_bot.handlers import callbacks as cbmod
+    # Patch both modules that bind `check_llm_configured`:
+    # - `callbacks` (used by `_handle_digest`'s `digest:run` branch)
+    # - `analysis_runner` (used by `run_user_digest`'s entry guard)
+    from tg_bot.handlers import analysis_runner, callbacks
 
-    cbmod.check_llm_configured = lambda *_a, **_kw: None
+    def noop(*_a, **_kw):
+        return None
+
+    callbacks.check_llm_configured = noop
+    analysis_runner.check_llm_configured = noop
 
 
 class _FakeJob:
@@ -578,7 +586,7 @@ class _ChatDataDict(dict):
 
 
 async def test_register_adds_job() -> None:
-    from tg_bot.handlers.callbacks import register_digest_job
+    from tg_bot.handlers.analysis_runner import register_digest_job
 
     app = _FakeFanOutApp()
     digest = {
@@ -596,7 +604,7 @@ async def test_register_adds_job() -> None:
 
 
 async def test_register_replaces_existing() -> None:
-    from tg_bot.handlers.callbacks import register_digest_job
+    from tg_bot.handlers.analysis_runner import register_digest_job
 
     app = _FakeFanOutApp()
     digest = {
@@ -613,7 +621,7 @@ async def test_register_replaces_existing() -> None:
 
 
 async def test_cancel_removes_jobs() -> None:
-    from tg_bot.handlers.callbacks import cancel_digest_job, register_digest_job
+    from tg_bot.handlers.analysis_runner import cancel_digest_job, register_digest_job
 
     app = _FakeFanOutApp()
     digest = {
@@ -629,7 +637,7 @@ async def test_cancel_removes_jobs() -> None:
 
 
 async def test_register_noop_on_incomplete() -> None:
-    from tg_bot.handlers.callbacks import register_digest_job
+    from tg_bot.handlers.analysis_runner import register_digest_job
 
     app = _FakeFanOutApp()
     # Disabled.
@@ -660,26 +668,26 @@ async def test_register_noop_on_incomplete() -> None:
 
 async def test_fanout_empty_watchlist_silent() -> None:
     """User with empty watchlist: no header sent, no edits, returns cleanly."""
-    from tg_bot.handlers import callbacks as cbmod
+    from tg_bot.handlers import analysis_runner as runner
 
     # Patch in an empty watchlist storage.
     class _W:
         def get_watchlist(self, _uid):
             return []
 
-    original = cbmod.watchlist_storage
-    cbmod.watchlist_storage = _W()
+    original = runner.watchlist_storage
+    runner.watchlist_storage = _W()
     try:
         app = _FakeFanOutApp()
-        await cbmod.run_user_digest(app, 42, 999)
+        await runner.run_user_digest(app, 42, 999)
         assert app.bot.sent == [] and app.bot.edits == []
     finally:
-        cbmod.watchlist_storage = original
+        runner.watchlist_storage = original
 
 
 async def test_fanout_forbidden_disables() -> None:
     """Header send fails with Forbidden → digest disabled + job cancelled."""
-    from tg_bot.handlers import callbacks as cbmod
+    from tg_bot.handlers import analysis_runner as runner
 
     s, _ = fresh_storage()
     await s.set_digest_tz("42", "America/Los_Angeles")
@@ -689,17 +697,17 @@ async def test_fanout_forbidden_disables() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    orig_w = cbmod.watchlist_storage
-    orig_uc = cbmod.user_config_storage
-    cbmod.watchlist_storage = _W()
-    cbmod.user_config_storage = s
+    orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
+    runner.watchlist_storage = _W()
+    runner.user_config_storage = s
     try:
         app = _FakeFanOutApp(forbidden=True)
         # Pre-register a job to verify it gets cancelled.
-        cbmod.register_digest_job(app, 42, s.get_digest("42"))
+        runner.register_digest_job(app, 42, s.get_digest("42"))
         assert len(app.job_queue.get_jobs_by_name("digest:42")) == 1
 
-        await cbmod.run_user_digest(app, 42, 999)
+        await runner.run_user_digest(app, 42, 999)
 
         d = s.get_digest("42")
         assert d["enabled"] is False, "digest should auto-disable on Forbidden"
@@ -707,14 +715,14 @@ async def test_fanout_forbidden_disables() -> None:
             "job should be cancelled"
         )
     finally:
-        cbmod.watchlist_storage = orig_w
-        cbmod.user_config_storage = orig_uc
+        runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
 
 
 async def test_fanout_summary_renders() -> None:
     """Happy path: header sent in pending state, final edit shows the
     signal-emoji summary with Telegraph links + failure tally."""
-    from tg_bot.handlers import callbacks as cbmod
+    from tg_bot.handlers import analysis_runner as runner
 
     class _W:
         def get_watchlist(self, _uid):
@@ -737,13 +745,13 @@ async def test_fanout_summary_renders() -> None:
             await reporter.report("market analyst")
         return canned[ticker]
 
-    orig_w = cbmod.watchlist_storage
-    orig_a = cbmod._analyze_one_for_digest
-    cbmod.watchlist_storage = _W()
-    cbmod._analyze_one_for_digest = _fake_analyze
+    orig_w = runner.watchlist_storage
+    orig_a = runner._analyze_one_for_digest
+    runner.watchlist_storage = _W()
+    runner._analyze_one_for_digest = _fake_analyze
     try:
         app = _FakeFanOutApp()
-        await cbmod.run_user_digest(app, 42, 999)
+        await runner.run_user_digest(app, 42, 999)
 
         # Initial header lists every ticker as ⏳ pending.
         assert len(app.bot.sent) == 1
@@ -763,8 +771,8 @@ async def test_fanout_summary_renders() -> None:
         # Telegraph link in NVDA row.
         assert "📄" in body
     finally:
-        cbmod.watchlist_storage = orig_w
-        cbmod._analyze_one_for_digest = orig_a
+        runner.watchlist_storage = orig_w
+        runner._analyze_one_for_digest = orig_a
 
 
 async def test_render_deferred_captures_latest_state() -> None:
@@ -773,7 +781,7 @@ async def test_render_deferred_captures_latest_state() -> None:
     must paint the latest state once the throttle expires. Patches
     _DIGEST_PROGRESS_INTERVAL down so the test runs in <1s instead of
     >2s."""
-    from tg_bot.handlers import callbacks as cbmod
+    from tg_bot.handlers import analysis_runner as runner
 
     class _W:
         def get_watchlist(self, _u):
@@ -791,15 +799,15 @@ async def test_render_deferred_captures_latest_state() -> None:
         await asyncio.sleep(0.6)
         return {"ticker": ticker, "signal": "BUY", "telegraph_url": None}
 
-    orig_w = cbmod.watchlist_storage
-    orig_a = cbmod._analyze_one_for_digest
-    orig_iv = cbmod._DIGEST_PROGRESS_INTERVAL
-    cbmod.watchlist_storage = _W()
-    cbmod._analyze_one_for_digest = _fake
-    cbmod._DIGEST_PROGRESS_INTERVAL = 0.3
+    orig_w = runner.watchlist_storage
+    orig_a = runner._analyze_one_for_digest
+    orig_iv = runner._DIGEST_PROGRESS_INTERVAL
+    runner.watchlist_storage = _W()
+    runner._analyze_one_for_digest = _fake
+    runner._DIGEST_PROGRESS_INTERVAL = 0.3
     try:
         app = _FakeFanOutApp()
-        await cbmod.run_user_digest(app, 42, 999)
+        await runner.run_user_digest(app, 42, 999)
         # At least one progress edit must contain BOTH tickers in the
         # 📊 state simultaneously — without the deferred-render fix,
         # only the first ticker's transition would ever appear in any
@@ -817,16 +825,16 @@ async def test_render_deferred_captures_latest_state() -> None:
             "deferred render didn't capture the second state change"
         )
     finally:
-        cbmod.watchlist_storage = orig_w
-        cbmod._analyze_one_for_digest = orig_a
-        cbmod._DIGEST_PROGRESS_INTERVAL = orig_iv
+        runner.watchlist_storage = orig_w
+        runner._analyze_one_for_digest = orig_a
+        runner._DIGEST_PROGRESS_INTERVAL = orig_iv
 
 
 async def test_progress_completed_row_matches_summary() -> None:
     """A completed ticker should render identically in the progress
     view and the final summary — same signal emoji + Telegraph link, no
     flash from generic ✅ to coloured 🟢 at the final-edit boundary."""
-    from tg_bot.handlers.callbacks import (
+    from tg_bot.handlers.analysis_runner import (
         _format_digest_progress,
         _format_digest_summary,
     )
@@ -879,7 +887,7 @@ async def test_fanout_cancel_pending_via_task_cancel() -> None:
     Task.cancel."""
     import threading
 
-    from tg_bot.handlers import callbacks as cbmod
+    from tg_bot.handlers import analysis_runner as runner
 
     class _W:
         def get_watchlist(self, _u):
@@ -890,13 +898,13 @@ async def test_fanout_cancel_pending_via_task_cancel() -> None:
     a_b_c_calls: list[str] = []
 
     # Force a fresh sem with cap=1 so only one ticker can be analyzing.
-    orig_sem = cbmod._run_semaphore
-    cbmod._run_semaphore = asyncio.Semaphore(1)
+    orig_sem = runner._run_semaphore
+    runner._run_semaphore = asyncio.Semaphore(1)
 
     async def _slow(_uid, ticker, reporter=None):
         # Mimic _analyze_one_for_digest's sem.acquire so the test
         # actually exercises the pending → cancelled path.
-        sem = cbmod._get_run_semaphore()
+        sem = runner._get_run_semaphore()
         await sem.acquire()
         try:
             a_b_c_calls.append(ticker)
@@ -909,13 +917,13 @@ async def test_fanout_cancel_pending_via_task_cancel() -> None:
         finally:
             sem.release()
 
-    orig_w = cbmod.watchlist_storage
-    orig_a = cbmod._analyze_one_for_digest
-    cbmod.watchlist_storage = _W()
-    cbmod._analyze_one_for_digest = _slow
+    orig_w = runner.watchlist_storage
+    orig_a = runner._analyze_one_for_digest
+    runner.watchlist_storage = _W()
+    runner._analyze_one_for_digest = _slow
     try:
         app = _FakeFanOutApp()
-        run_task = asyncio.create_task(cbmod.run_user_digest(app, 42, 999))
+        run_task = asyncio.create_task(runner.run_user_digest(app, 42, 999))
 
         # Wait for ticker A to be in flight.
         for _ in range(100):
@@ -933,7 +941,7 @@ async def test_fanout_cancel_pending_via_task_cancel() -> None:
             def __init__(self, cd):
                 self.chat_data = cd
 
-        await cbmod._handle_digest_cancel(
+        await runner._handle_digest_cancel(
             _Ctx(app.chat_data[999]), object(), str(msg_id)
         )
         release.set()
@@ -946,9 +954,9 @@ async def test_fanout_cancel_pending_via_task_cancel() -> None:
         body = app.bot.edits[-1]["text"]
         assert "3 cancelled" in body and "of 3" in body
     finally:
-        cbmod.watchlist_storage = orig_w
-        cbmod._analyze_one_for_digest = orig_a
-        cbmod._run_semaphore = orig_sem
+        runner.watchlist_storage = orig_w
+        runner._analyze_one_for_digest = orig_a
+        runner._run_semaphore = orig_sem
 
 
 async def test_fanout_forbidden_during_progress_edit() -> None:
@@ -956,7 +964,7 @@ async def test_fanout_forbidden_during_progress_edit() -> None:
     with Forbidden. Digest must auto-disable, JobQueue job must cancel,
     and the in-flight fan-out must abort (cancel_event set + tasks
     cancelled) instead of grinding through every ticker silently."""
-    from tg_bot.handlers import callbacks as cbmod
+    from tg_bot.handlers import analysis_runner as runner
 
     class _ForbiddenOnFirstEdit(_FakeFanOutBot):
         def __init__(self):
@@ -993,37 +1001,37 @@ async def test_fanout_forbidden_during_progress_edit() -> None:
                 raise CancelledByUserError("forbidden auto-cancel")
         return {"ticker": _t, "signal": "BUY", "telegraph_url": None}
 
-    orig_w = cbmod.watchlist_storage
-    orig_a = cbmod._analyze_one_for_digest
-    orig_uc = cbmod.user_config_storage
-    orig_iv = cbmod._DIGEST_PROGRESS_INTERVAL
-    cbmod.watchlist_storage = _W()
-    cbmod._analyze_one_for_digest = _slow
-    cbmod.user_config_storage = s
-    cbmod._DIGEST_PROGRESS_INTERVAL = 0.1
+    orig_w = runner.watchlist_storage
+    orig_a = runner._analyze_one_for_digest
+    orig_uc = runner.user_config_storage
+    orig_iv = runner._DIGEST_PROGRESS_INTERVAL
+    runner.watchlist_storage = _W()
+    runner._analyze_one_for_digest = _slow
+    runner.user_config_storage = s
+    runner._DIGEST_PROGRESS_INTERVAL = 0.1
     try:
         app = _FakeFanOutApp()
         app.bot = _ForbiddenOnFirstEdit()
         # Pre-register a JobQueue entry so cancel_digest_job has work to do.
-        cbmod.register_digest_job(app, 42, s.get_digest("42"))
+        runner.register_digest_job(app, 42, s.get_digest("42"))
         assert len(app.job_queue.get_jobs_by_name("digest:42")) == 1
 
-        await cbmod.run_user_digest(app, 42, 999)
+        await runner.run_user_digest(app, 42, 999)
 
         # Auto-disabled.
         assert s.get_digest("42")["enabled"] is False
         # JobQueue job cancelled.
         assert app.job_queue.get_jobs_by_name("digest:42") == []
     finally:
-        cbmod.watchlist_storage = orig_w
-        cbmod._analyze_one_for_digest = orig_a
-        cbmod.user_config_storage = orig_uc
-        cbmod._DIGEST_PROGRESS_INTERVAL = orig_iv
+        runner.watchlist_storage = orig_w
+        runner._analyze_one_for_digest = orig_a
+        runner.user_config_storage = orig_uc
+        runner._DIGEST_PROGRESS_INTERVAL = orig_iv
 
 
 async def test_progress_renders_cancelled() -> None:
     """`_format_digest_progress` renders the ⛔ cancelled state."""
-    from tg_bot.handlers.callbacks import _format_digest_progress
+    from tg_bot.handlers.analysis_runner import _format_digest_progress
 
     status = {"NVDA": "cancelled", "AAPL": "pending"}
     out = _format_digest_progress(["NVDA", "AAPL"], status, "2026-05-06")
@@ -1033,7 +1041,7 @@ async def test_progress_renders_cancelled() -> None:
 
 async def test_summary_tally_includes_cancelled() -> None:
     """`_format_digest_summary` shows a 'X cancelled, Y failed of N' tally."""
-    from tg_bot.handlers.callbacks import _format_digest_summary
+    from tg_bot.handlers.analysis_runner import _format_digest_summary
 
     status = {
         "NVDA": {"ticker": "NVDA", "signal": "BUY", "telegraph_url": None},
@@ -1050,7 +1058,7 @@ async def test_handle_digest_cancel_signals_event_and_tasks() -> None:
     """Cancel handler must set the threading event AND cancel each task."""
     import threading
 
-    from tg_bot.handlers import callbacks as cbmod
+    from tg_bot.handlers import analysis_runner as runner
 
     cancel_event = threading.Event()
 
@@ -1076,7 +1084,7 @@ async def test_handle_digest_cancel_signals_event_and_tasks() -> None:
     class _Q:
         pass
 
-    await cbmod._handle_digest_cancel(_Ctx(chat_data), _Q(), "42")
+    await runner._handle_digest_cancel(_Ctx(chat_data), _Q(), "42")
 
     assert cancel_event.is_set()
     assert t1.cancelled() or t1.cancelling()
@@ -1091,7 +1099,7 @@ async def test_handle_digest_cancel_signals_event_and_tasks() -> None:
 
 async def test_handle_digest_cancel_unknown_message_id() -> None:
     """Stale / unknown message_id is a no-op."""
-    from tg_bot.handlers import callbacks as cbmod
+    from tg_bot.handlers import analysis_runner as runner
 
     class _Ctx:
         chat_data = {"digest_cancels": {}}
@@ -1100,8 +1108,8 @@ async def test_handle_digest_cancel_unknown_message_id() -> None:
         pass
 
     # No exception should be raised; nothing to assert beyond that.
-    await cbmod._handle_digest_cancel(_Ctx(), _Q(), "999")
-    await cbmod._handle_digest_cancel(_Ctx(), _Q(), "not-an-int")
+    await runner._handle_digest_cancel(_Ctx(), _Q(), "999")
+    await runner._handle_digest_cancel(_Ctx(), _Q(), "not-an-int")
 
 
 async def test_fanout_cancel_mid_run() -> None:
@@ -1109,7 +1117,7 @@ async def test_fanout_cancel_mid_run() -> None:
     get marked cancelled, the final summary tally reflects it."""
     import threading
 
-    from tg_bot.handlers import callbacks as cbmod
+    from tg_bot.handlers import analysis_runner as runner
 
     started = threading.Event()
     release = threading.Event()
@@ -1134,13 +1142,13 @@ async def test_fanout_cancel_mid_run() -> None:
 
         raise CancelledByUserError("cancelled in test")
 
-    orig_w = cbmod.watchlist_storage
-    orig_a = cbmod._analyze_one_for_digest
-    cbmod.watchlist_storage = _W()
-    cbmod._analyze_one_for_digest = _slow_analyze
+    orig_w = runner.watchlist_storage
+    orig_a = runner._analyze_one_for_digest
+    runner.watchlist_storage = _W()
+    runner._analyze_one_for_digest = _slow_analyze
     try:
         app = _FakeFanOutApp()
-        run_task = asyncio.create_task(cbmod.run_user_digest(app, 42, 999))
+        run_task = asyncio.create_task(runner.run_user_digest(app, 42, 999))
 
         # Wait for the fan-out to be in flight.
         for _ in range(50):
@@ -1157,7 +1165,7 @@ async def test_fanout_cancel_mid_run() -> None:
             def __init__(self, cd):
                 self.chat_data = cd
 
-        await cbmod._handle_digest_cancel(
+        await runner._handle_digest_cancel(
             _Ctx(app.chat_data[999]), object(), str(msg_id)
         )
 
@@ -1170,8 +1178,8 @@ async def test_fanout_cancel_mid_run() -> None:
         assert "⛔" in body
         assert "3 cancelled" in body and "of 3" in body
     finally:
-        cbmod.watchlist_storage = orig_w
-        cbmod._analyze_one_for_digest = orig_a
+        runner.watchlist_storage = orig_w
+        runner._analyze_one_for_digest = orig_a
 
 
 # --- Ticker filter feature ------------------------------------------------
@@ -1373,7 +1381,7 @@ async def test_callback_ttpage() -> None:
 async def test_fanout_filter_intersects() -> None:
     """Filter is intersected with current watchlist: a ticker user removed
     after picking it for the digest is silently dropped, the rest still run."""
-    from tg_bot.handlers import callbacks as cbmod
+    from tg_bot.handlers import analysis_runner as runner
 
     s, _ = fresh_storage()
     await s.set_digest_tz("42", "America/Los_Angeles")
@@ -1391,20 +1399,20 @@ async def test_fanout_filter_intersects() -> None:
         seen.append(ticker)
         return {"ticker": ticker, "signal": "BUY", "telegraph_url": None}
 
-    orig_w = cbmod.watchlist_storage
-    orig_a = cbmod._analyze_one_for_digest
-    orig_uc = cbmod.user_config_storage
-    cbmod.watchlist_storage = _W()
-    cbmod._analyze_one_for_digest = _fake
-    cbmod.user_config_storage = s
+    orig_w = runner.watchlist_storage
+    orig_a = runner._analyze_one_for_digest
+    orig_uc = runner.user_config_storage
+    runner.watchlist_storage = _W()
+    runner._analyze_one_for_digest = _fake
+    runner.user_config_storage = s
     try:
         app = _FakeFanOutApp()
-        await cbmod.run_user_digest(app, 42, 999)
+        await runner.run_user_digest(app, 42, 999)
         assert sorted(seen) == ["AAPL", "NVDA"], seen
     finally:
-        cbmod.watchlist_storage = orig_w
-        cbmod._analyze_one_for_digest = orig_a
-        cbmod.user_config_storage = orig_uc
+        runner.watchlist_storage = orig_w
+        runner._analyze_one_for_digest = orig_a
+        runner.user_config_storage = orig_uc
 
 
 async def test_callback_tt_requires_tz() -> None:
@@ -1517,7 +1525,7 @@ async def test_iter_users_with_digest_includes_disabled() -> None:
 async def test_fanout_empty_filter_reminder() -> None:
     """User with active digest but empty `tickers` filter: fan-out sends
     a one-line reminder, no analyses run."""
-    from tg_bot.handlers import callbacks as cbmod
+    from tg_bot.handlers import analysis_runner as runner
 
     s, _ = fresh_storage()
     await s.set_digest_tz("42", "America/Los_Angeles")
@@ -1535,22 +1543,22 @@ async def test_fanout_empty_filter_reminder() -> None:
         ran.append(ticker)
         return {"ticker": ticker, "signal": "BUY", "telegraph_url": None}
 
-    orig_w = cbmod.watchlist_storage
-    orig_a = cbmod._analyze_one_for_digest
-    orig_uc = cbmod.user_config_storage
-    cbmod.watchlist_storage = _W()
-    cbmod._analyze_one_for_digest = _fake
-    cbmod.user_config_storage = s
+    orig_w = runner.watchlist_storage
+    orig_a = runner._analyze_one_for_digest
+    orig_uc = runner.user_config_storage
+    runner.watchlist_storage = _W()
+    runner._analyze_one_for_digest = _fake
+    runner.user_config_storage = s
     try:
         app = _FakeFanOutApp()
-        await cbmod.run_user_digest(app, 42, 999)
+        await runner.run_user_digest(app, 42, 999)
         assert ran == [], "no analyses should run when filter is empty"
         assert app.bot.sent, "reminder message should be sent"
         assert "no tickers" in app.bot.sent[0]["text"].lower()
     finally:
-        cbmod.watchlist_storage = orig_w
-        cbmod._analyze_one_for_digest = orig_a
-        cbmod.user_config_storage = orig_uc
+        runner.watchlist_storage = orig_w
+        runner._analyze_one_for_digest = orig_a
+        runner.user_config_storage = orig_uc
 
 
 # --- LLM-setup precheck ----------------------------------------------------
