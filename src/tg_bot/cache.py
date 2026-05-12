@@ -41,7 +41,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -96,11 +95,6 @@ def parse_generated_at(s: Optional[str]) -> Optional[datetime]:
 _DATA_DIR_ENV = "TG_BOT_DATA_DIR"
 _CACHE_SUBDIR = "result_cache"
 
-# Provider / model strings can contain "/" or ":" (e.g. `openai/gpt-4o`,
-# `meta:llama3`) — squash to a directory-safe slug. Slug form keeps the
-# tree grep-able when debugging; a hash would be shorter but opaque.
-_SLUG_SAFE = re.compile(r"[^A-Za-z0-9_.-]")
-
 
 def _data_dir() -> Path:
     return Path(os.environ.get(_DATA_DIR_ENV, "data"))
@@ -113,16 +107,15 @@ def _slug(
     rounds: int = 1,
     effort: Optional[str] = None,
 ) -> str:
-    """Cache slug. The `__r{n}` and `__e{level}` suffixes are appended
-    only when the user customized these knobs — default users keep the
-    original `provider__deep__quick` shape so existing cache entries
-    aren't orphaned when this feature ships."""
-    base = _SLUG_SAFE.sub("_", f"{provider}__{deep}__{quick}")
-    if rounds != 1:
-        base += f"__r{rounds}"
-    if effort:
-        base += f"__e{effort}"
-    return base
+    """Cache slug — thin delegator so the caller's positional API stays
+    unchanged. The actual shape lives in `AnalysisConfigKey.slug()` which
+    is the single source of truth shared with the caption "via" line and
+    the Telegraph title suffix (see `config_key.py`)."""
+    from tg_bot.config_key import AnalysisConfigKey
+
+    return AnalysisConfigKey(
+        provider=provider, deep=deep, quick=quick, rounds=rounds, effort=effort
+    ).slug()
 
 
 def _json_default(obj: Any) -> Any:

@@ -218,33 +218,13 @@ DECISION_EMOJI = {
 
 
 def build_config_summary(config: dict) -> str:
-    """One-liner describing the LLM config that produced an analysis —
-    rendered into the caption as `via <summary>`.
+    """Caption "via" line — thin delegator. The shape lives in
+    `AnalysisConfigKey.caption()` which is the single source of truth
+    shared with the cache slug and the Telegraph title suffix (see
+    `config_key.py`)."""
+    from tg_bot.config_key import AnalysisConfigKey
 
-    Layout: `<provider> · <deep>/<quick> · r{n} · e={level}`. Provider
-    and the deep/quick model pair are always shown so users can tell
-    at a glance what produced the result; `r{n}` and `e={level}` are
-    appended only when the user customized those knobs (rounds != 1
-    or effort set), so the line stays tight for the common case."""
-    # Late import to avoid a load-time cycle (analysis → formatters via
-    # config-rendering helpers). EFFORT_KEY_BY_PROVIDER is the single
-    # source of truth for the per-provider key vocabulary.
-    from tg_bot.analysis import EFFORT_KEY_BY_PROVIDER
-
-    provider = config.get("llm_provider", "unknown")
-    deep = config.get("deep_think_llm", "default")
-    quick = config.get("quick_think_llm", "default")
-    parts = [provider, f"{deep}/{quick}"]
-    rounds = config.get("max_debate_rounds", 1)
-    if rounds != 1:
-        parts.append(f"r{rounds}")
-    # Effort lives under different keys per provider; pick whichever is set.
-    for key in EFFORT_KEY_BY_PROVIDER.values():
-        v = config.get(key)
-        if v:
-            parts.append(f"e={v}")
-            break
-    return " · ".join(parts)
+    return AnalysisConfigKey.from_config(config).caption()
 
 
 # Report sections in decision-relevance order. The Telegraph packer adds
@@ -261,13 +241,21 @@ _REPORT_SECTIONS: list[tuple[str, str]] = [
     ("Sentiment", "sentiment_report"),
 ]
 
-# Telegraph hard-rejects pages over 65,536 HTML characters. Pack the
-# markdown source to a budget that, after `markdown.markdown(...)` bloat
-# (10–44% depending on table density), comfortably lands under the cap.
-# We don't *measure* HTML size to decide what to include — we convert the
-# whole assembled markdown once and drop trailing sections if it's too big.
+# Telegraph documents a 65,536 cap on submitted HTML — but the SDK
+# internally parses HTML into a JSON Node tree (every element becomes
+# `{"tag": "...", "children": [...]}`), and Telegraph's CONTENT_TOO_BIG
+# is enforced on *that* serialized size, not the raw HTML chars we send.
+# JSON wrapping + whitespace preservation + the embedded chart `<img>`
+# typically inflate the cleaned HTML 25–40% on Telegraph's side, so the
+# documented 65 KB cap maps to roughly 45–50 KB of our HTML chars.
+#
+# Empirical: INTU 2026-05-11 was rejected with CONTENT_TOO_BIG at
+# 52,991 cleaned HTML chars under the previous 64 KB budget — comfortably
+# under the documented cap but evidently over the practical one. The
+# tightened budget below forces the packer to drop a section earlier
+# rather than ship oversized content and get hard-rejected.
 _TELEGRAPH_HTML_LIMIT = 65536
-_TELEGRAPH_HTML_BUDGET = 64000  # leave 1.5 KB of headroom for tags we don't account for
+_TELEGRAPH_HTML_BUDGET = 40000  # ~25-40% headroom for Telegraph's Node-tree inflation
 
 
 def _build_header(

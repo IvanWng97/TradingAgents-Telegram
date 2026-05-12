@@ -26,6 +26,7 @@ from tg_bot.analysis import (
     run_trading_analysis,
 )
 from tg_bot.config import Config
+from tg_bot.config_key import AnalysisConfigKey
 from tg_bot.chart import finviz_chart_url
 from tg_bot.digest import build_digest_response
 from tg_bot.formatters import (
@@ -710,7 +711,9 @@ async def _run_analysis_for_ticker(
             _path_from_telegraph_url(prev_telegraph_url) if prev_telegraph_url else None
         )
         telegraph_url = await publish_to_telegraph(
-            f"{ticker} Analysis", html_content, edit_path=edit_path
+            AnalysisConfigKey.from_config(config).telegraph_title(ticker),
+            html_content,
+            edit_path=edit_path,
         )
 
         # Re-check cancel flag — Telegraph publish is also a network round-trip
@@ -1473,7 +1476,9 @@ async def _analyze_one_for_digest(
             )
             html = markdown.markdown(md, extensions=["tables"])
             html = f'<img src="{chart_url}"/>{html}'
-            telegraph_url = await publish_to_telegraph(f"{ticker} Analysis", html)
+            telegraph_url = await publish_to_telegraph(
+                AnalysisConfigKey.from_config(config).telegraph_title(ticker), html
+            )
         except Exception as e:
             logger.warning("digest: telegraph publish failed for %s: %s", ticker, e)
             telegraph_url = None
