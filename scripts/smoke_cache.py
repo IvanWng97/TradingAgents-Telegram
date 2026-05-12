@@ -460,20 +460,22 @@ async def test_atomic_write_is_complete_json() -> None:
     assert leftover == [], f"unexpected leftover tempfiles: {leftover}"
 
 
-async def test_lookup_heals_legacy_poisoned_entry() -> None:
-    """Read-time cache-hygiene gate: entries with `telegraph_url=None`
-    are treated as a miss so legacy poisoned entries from before the
-    write-time gate shipped heal transparently on next tap.
+async def test_lookup_returns_poisoned_entry_as_is() -> None:
+    """`cache.lookup` returns poisoned entries (telegraph_url=None) as-is.
+    Earlier iterations of this gate treated poisoned entries as a miss,
+    which triggered a full LLM re-run — wasteful since the cached
+    `final_state` was intact, only the publish failed.
 
-    Write directly via `cache.store(..., telegraph_url=None)` to simulate
-    a legacy entry written without the write-time gate — `lookup` should
-    then return None so the analysis handler runs fresh + retries the
-    publish."""
+    Republish-only policy now lives in
+    `callbacks._run_analysis_for_ticker` and `_analyze_one_for_digest`:
+    they detect the poisoned state and re-publish from the cached
+    `final_state` (no LLM run). Putting that policy in the cache module
+    would conflate storage with rendering."""
     _fresh_data_dir()
     from tg_bot import cache
 
     # Write a poisoned entry directly (bypassing the write-time gate to
-    # simulate the legacy condition).
+    # simulate a legacy condition).
     cache.store(
         "openai",
         "gpt-4o",
@@ -484,37 +486,13 @@ async def test_lookup_heals_legacy_poisoned_entry() -> None:
         "HOLD",
         None,  # poisoned: publish failed, telegraph_url is None
     )
-    # The file is on disk —
-    from pathlib import Path
-    import os
-
-    path = (
-        Path(os.environ["TG_BOT_DATA_DIR"])
-        / "result_cache"
-        / "openai__gpt-4o__o4-mini"
-        / "INTU"
-        / "2026-05-11.json"
-    )
-    assert path.is_file(), "poisoned entry must be on disk for the gate to heal it"
-
-    # — but lookup heals on read: returns None, triggering a re-run.
     got = cache.lookup("openai", "gpt-4o", "o4-mini", "INTU", "2026-05-11")
-    assert got is None, f"expected None (poisoned entry treated as miss), got {got}"
-
-    # Sanity: a healthy entry still returns normally.
-    cache.store(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
-        "NVDA",
-        "2026-05-11",
-        SAMPLE_STATE,
-        "BUY",
-        "https://telegra.ph/NVDA-05-11",
-    )
-    got = cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-11")
-    assert got is not None
-    assert got["telegraph_url"] == "https://telegra.ph/NVDA-05-11"
+    assert got is not None, "lookup must return the poisoned entry, not None"
+    assert got["telegraph_url"] is None
+    assert got["signal"] == "HOLD"
+    # The cached `final_state` is intact — the republish-only path
+    # reuses it without re-running the LLM.
+    assert got["final_state"]["final_trade_decision"].startswith("Final Trading")
 
 
 async def test_should_cache_publish_skips_none() -> None:
@@ -552,8 +530,8 @@ SCENARIOS = [
     ("custom effort isolate cache slot", test_custom_effort_isolates_slot),
     ("generated_at stored on every write", test_generated_at_persisted),
     (
-        "lookup heals legacy poisoned entry (telegraph_url=None)",
-        test_lookup_heals_legacy_poisoned_entry,
+        "lookup returns poisoned entry as-is (republish handled by callers)",
+        test_lookup_returns_poisoned_entry_as_is,
     ),
     (
         "_should_cache_publish gates None telegraph_url out of cache",

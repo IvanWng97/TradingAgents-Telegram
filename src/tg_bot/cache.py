@@ -173,33 +173,22 @@ def lookup(
     collide with default-config runs. Defaults match DEFAULT_CONFIG so
     callers that don't set them keep their existing cache slot.
 
-    **Read-time cache-hygiene gate**: entries with `telegraph_url is None`
-    (or empty string) are treated as a miss. The write-time gate
-    (`callbacks._should_cache_publish`) prevents *new* entries with a
-    failed publish from being stored, but legacy entries from before that
-    gate shipped — or entries written by code paths that bypass the gate
-    — would otherwise keep serving "Instant View unavailable" until
-    midnight rollover. Heal them transparently by re-running on next tap.
-    Logged at info level so the heal is visible in production logs."""
+    **Poisoned entries (`telegraph_url=None`) are returned as-is.** The
+    caller is responsible for the policy: `callbacks._run_analysis_for_ticker`
+    and `_analyze_one_for_digest` detect the poisoned state and re-publish
+    from the cached `final_state` (no LLM run needed — the LLM bill was
+    already paid; only the Telegraph publish needs to retry). Putting
+    this policy in the cache module would conflate storage with
+    rendering."""
     path = _path_for(provider, deep, quick, ticker, date_iso, rounds, effort)
     if not path.is_file():
         return None
     try:
         with path.open("r") as f:
-            entry = json.load(f)
+            return json.load(f)
     except Exception as e:
         logger.warning("result_cache: failed to read %s: %s", path, e)
         return None
-    if not entry.get("telegraph_url"):
-        logger.info(
-            "result_cache: treating poisoned entry (telegraph_url=%r) as miss for "
-            "%s on %s — next run will re-publish",
-            entry.get("telegraph_url"),
-            ticker,
-            date_iso,
-        )
-        return None
-    return entry
 
 
 def store(

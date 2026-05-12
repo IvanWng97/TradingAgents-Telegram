@@ -127,6 +127,64 @@ def _full_report_keyboard(
     return InlineKeyboardMarkup([buttons])
 
 
+async def _republish_from_cached(
+    ticker: str,
+    config: dict,
+    cached: dict,
+    today_iso: str,
+    cache_kwargs: dict,
+) -> str | None:
+    """Retry the Telegraph publish using the cached `final_state` — no
+    LLM run, no debate, no progress flow. The LLM bill was already paid
+    when the entry was first written; only the Telegraph publish failed,
+    and `_should_cache_publish` blocked the entry's `telegraph_url` from
+    being set. This heals the entry on the next tap at near-zero cost
+    (~1 network round-trip).
+
+    Returns the new URL on success (and writes it into the cache via
+    `result_cache.store`, gated by `_should_cache_publish` so a second
+    failure doesn't re-store the same broken state). Returns None on
+    failure — the caller renders with `telegraph_url=None` and surfaces
+    the `⚠️ Instant View unavailable` warning, and the next tap will
+    retry again."""
+    logger.info(
+        "[%s] cached entry has no telegraph_url — republishing only "
+        "(skipping LLM re-run)",
+        ticker,
+    )
+    chart_url = finviz_chart_url(ticker)
+    markdown_content = format_analysis_result_markdown(
+        ticker,
+        cached["final_state"],
+        cached["signal"],
+        config_summary=build_config_summary(config),
+        # Use the cached `generated_at` so the rendered "Generated …"
+        # header reflects when the LLM run actually happened, not the
+        # moment of republish.
+        generated_at=result_cache.parse_generated_at(cached.get("generated_at")),
+    )
+    rendered_md = markdown.markdown(markdown_content, extensions=["tables"])
+    html_content = f'<img src="{chart_url}"/>{rendered_md}'
+    telegraph_url = await publish_to_telegraph(
+        AnalysisConfigKey.from_config(config).telegraph_title(ticker),
+        html_content,
+    )
+    if _should_cache_publish(telegraph_url):
+        result_cache.store(
+            config["llm_provider"],
+            config["deep_think_llm"],
+            config["quick_think_llm"],
+            ticker,
+            today_iso,
+            cached["final_state"],
+            cached["signal"],
+            telegraph_url,
+            **cache_kwargs,
+        )
+        logger.info("[%s] republish succeeded — cache entry healed", ticker)
+    return telegraph_url
+
+
 async def _handle_get_full_md(
     query, context: ContextTypes.DEFAULT_TYPE, ticker: str, date_str: str
 ) -> None:
@@ -431,6 +489,17 @@ async def _run_analysis_for_ticker(
     )
     if cached and force_refresh:
         cached = None
+    if cached and not cached.get("telegraph_url"):
+        # Poisoned entry: LLM output is cached but the publish failed
+        # last time. Retry the publish from the cached final_state —
+        # no LLM re-run needed. On success, the cache is updated in
+        # place; on failure, we render with telegraph_url=None and the
+        # caption surfaces the "Instant View unavailable" warning so
+        # the user knows what happened. Next tap re-tries.
+        new_url = await _republish_from_cached(
+            ticker, config, cached, today_iso, cache_kwargs
+        )
+        cached = {**cached, "telegraph_url": new_url}
     if cached:
         logger.info("[%s] result_cache HIT — skipping LLM run", ticker)
         chart_url = finviz_chart_url(ticker)
@@ -1423,6 +1492,14 @@ async def _analyze_one_for_digest(
         today_iso,
         **cache_kwargs,
     )
+    if cached and not cached.get("telegraph_url"):
+        # Poisoned entry: republish from cached final_state (no LLM run).
+        # Failure here leaves the row without a Telegraph link, same as
+        # any other publish failure in the digest path.
+        new_url = await _republish_from_cached(
+            ticker, config, cached, today_iso, cache_kwargs
+        )
+        cached = {**cached, "telegraph_url": new_url}
     if cached:
         logger.info("digest: result_cache HIT for %s — skipping LLM run", ticker)
         return {
