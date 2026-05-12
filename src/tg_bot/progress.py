@@ -139,15 +139,15 @@ class ProgressReporter:
             )
 
         try:
-            await self.bot.edit_message_caption(
+            await self.bot.edit_message_text(
                 chat_id=self.chat_id,
                 message_id=self.message_id,
-                caption=caption,
+                text=caption,
                 parse_mode="MarkdownV2",
                 reply_markup=reply_markup,
             )
         except Exception as e:
-            # Final result may have already replaced the caption, or Telegram
+            # Final result may have already replaced the text, or Telegram
             # may have rate-limited — neither should crash the analysis.
             logger.debug("Progress edit skipped for %r: %s", raw_node_name, e)
 

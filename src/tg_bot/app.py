@@ -160,13 +160,13 @@ def _build_application() -> Application:
         .concurrent_updates(True)
         # AIORateLimiter throttles outgoing Telegram calls under both the
         # per-bot (~30/s) and per-chat (~1/s) limits. Without it, parallel
-        # send_photo / edit_message_caption bursts see RetryAfter exceptions
+        # send_message / edit_message_text bursts see RetryAfter exceptions
         # that PTB doesn't auto-retry — analyses get silently dropped.
         .rate_limiter(AIORateLimiter())
-        # Default HTTP timeouts in PTB are ~5s; sendPhoto with a finviz URL
-        # routinely exceeds that under burst load (Telegram fetches the
-        # photo server-side). Without this, parallel queue launches see
-        # multiple `TimedOut` errors and silently drop tickers.
+        # Default HTTP timeouts in PTB are ~5s; outgoing Telegram calls
+        # (sendMessage + auto-preview URL fetch, sendDocument) routinely
+        # exceed that under burst load. Without this, parallel queue
+        # launches see multiple `TimedOut` errors and silently drop tickers.
         .read_timeout(30)
         .write_timeout(30)
         .connect_timeout(15)

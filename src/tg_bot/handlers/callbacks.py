@@ -11,7 +11,13 @@ from io import BytesIO
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import markdown
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputFile,
+    LinkPreviewOptions,
+    Update,
+)
 from telegram.error import Forbidden
 from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
@@ -158,7 +164,7 @@ _MIN_CANCEL_INTERVAL = 1.1  # safe margin under Telegram's per-chat limit
 
 
 async def _queued_cancel_edit(bot, chat_id: int, message_id: int) -> None:
-    """Lock-serialized variant of `edit_message_caption` for cancel-ack."""
+    """Lock-serialized variant of `edit_message_text` for cancel-ack."""
     global _last_cancel_edit_at
     async with _cancel_edit_lock:
         now = time.monotonic()
@@ -166,10 +172,10 @@ async def _queued_cancel_edit(bot, chat_id: int, message_id: int) -> None:
         if wait > 0:
             await asyncio.sleep(wait)
         try:
-            await bot.edit_message_caption(
+            await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
-                caption="❌ Cancelling… will stop after the current step finishes\\.",
+                text="❌ Cancelling… will stop after the current step finishes\\.",
                 parse_mode="MarkdownV2",
                 reply_markup=None,
             )
@@ -382,7 +388,6 @@ async def _run_analysis_for_ticker(
     )
     if cached:
         logger.info("[%s] result_cache HIT — skipping LLM run", ticker)
-        chart_url = finviz_chart_url(ticker)
         # final_trade_decision is the source so the expandable prose
         # matches the signal badge by construction (both come from the
         # post-risk-debate synthesis). caption_summary strips the
@@ -402,22 +407,27 @@ async def _run_analysis_for_ticker(
         # Using the cached `generated_at` UTC stamp would drift a day
         # for late-night runs from negative-UTC zones (e.g. 23:00 PDT →
         # 06:00 UTC next day → button looks for tomorrow's log → 404).
+        # IV-link mode: send a text message; the Telegraph URL inside
+        # `caption` triggers Telegram's link-preview card, which renders
+        # the chart embedded at the top of the Telegraph page.
         try:
-            await context.bot.send_photo(
+            await context.bot.send_message(
                 chat_id=chat_id,
-                photo=chart_url,
-                caption=caption,
+                text=caption,
                 parse_mode="HTML",
                 reply_markup=_full_report_keyboard(ticker, today_iso),
+                link_preview_options=LinkPreviewOptions(
+                    is_disabled=False, prefer_large_media=True
+                ),
             )
         except Exception as e:
-            logger.warning("[%s] cache-hit send_photo failed: %s", ticker, e)
+            logger.warning("[%s] cache-hit send_message failed: %s", ticker, e)
         return "completed"
 
     cancel_registry = context.chat_data.setdefault("analysis_cancels", {})
 
     # Per-run UUID is the cancel-callback key. Lets us attach the cancel
-    # button via send_photo's reply_markup (which doesn't yet know the
+    # button via send_message's reply_markup (which doesn't yet know the
     # message_id Telegram will assign), avoiding a second API call. With
     # N parallel queue runs, that second call commonly hit Telegram's
     # per-bot rate limit (~30/s) and silently dropped — leaving later
@@ -447,8 +457,8 @@ async def _run_analysis_for_ticker(
     chart_url = finviz_chart_url(ticker)
     logger.info("[%s] chart_url=%s run_id=%s", ticker, chart_url, run_id)
 
-    # Try to acquire a slot synchronously BEFORE the send_photo. This
-    # determines whether the initial caption should be "Analyzing" (slot
+    # Try to acquire a slot synchronously BEFORE the send_message. This
+    # determines whether the initial text should be "Analyzing" (slot
     # in hand) or "Queued" (will wait). Doing the acquire first is what
     # makes the caption reflect reality — `sem.locked()` checked AFTER
     # all 7 coroutines have entered but BEFORE any have acquired would
@@ -470,24 +480,26 @@ async def _run_analysis_for_ticker(
         else f"⏳ *{escape_markdown(ticker, version=2)}* queued — waiting for slot…"
     )
     logger.debug(
-        "[%s] send_photo START caption=%s",
+        "[%s] send_message START text=%s",
         ticker,
         "Analyzing" if acquired else "Queued",
     )
     progress_msg = None
     last_err: Exception | None = None
-    # Retry once on transient TimedOut. Telegram fetches finviz URLs
-    # server-side and a burst of parallel send_photos against the
-    # per-chat rate limit causes occasional 5–30s tail latencies.
-    # Retrying avoids dropping the ticker entirely on a single flap.
+    # Retry once on transient TimedOut. Telegram occasionally returns
+    # 5-30s tail latencies under burst load; retrying avoids dropping
+    # the ticker entirely on a single flap.
+    # IV-link mode: send text with link preview disabled — the URL
+    # arrives later via edit_message_text on completion, at which point
+    # the preview card replaces the no-preview state.
     for attempt in range(2):
         try:
-            progress_msg = await context.bot.send_photo(
+            progress_msg = await context.bot.send_message(
                 chat_id=chat_id,
-                photo=chart_url,
-                caption=initial_caption,
+                text=initial_caption,
                 parse_mode="MarkdownV2",
                 reply_markup=cancel_kb,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
             break
         except Exception as e:
@@ -495,7 +507,7 @@ async def _run_analysis_for_ticker(
             is_timeout = type(e).__name__ in ("TimedOut", "TimeoutError")
             if is_timeout and attempt == 0:
                 logger.warning(
-                    "[%s] send_photo TimedOut (attempt 1) — retrying", ticker
+                    "[%s] send_message TimedOut (attempt 1) — retrying", ticker
                 )
                 await asyncio.sleep(1.0)
                 continue
@@ -507,17 +519,17 @@ async def _run_analysis_for_ticker(
         # leaks the acquired semaphore slot AND the cancel_registry entry
         # — and the user sees no message at all for this ticker.
         logger.error(
-            "[%s] send_photo FAILED: %s (type=%s)",
+            "[%s] send_message FAILED: %s (type=%s)",
             ticker,
             last_err,
             type(last_err).__name__ if last_err else "unknown",
         )
         if acquired:
             sem.release()
-            logger.debug("[%s] released slot after send_photo failure", ticker)
+            logger.debug("[%s] released slot after send_message failure", ticker)
         cancel_registry.pop(run_id, None)
         return "completed"  # not "cancelled" — counts toward 'failed' tally
-    logger.debug("[%s] send_photo OK message_id=%s", ticker, progress_msg.message_id)
+    logger.debug("[%s] send_message OK message_id=%s", ticker, progress_msg.message_id)
     cancel_registry[run_id]["message_id"] = progress_msg.message_id
 
     if not TRADINGAGENTS_AVAILABLE:
@@ -527,10 +539,10 @@ async def _run_analysis_for_ticker(
         # below — early-returning here would leak the entry written at L358
         # for the chat's lifetime. Pop explicitly.
         cancel_registry.pop(run_id, None)
-        await context.bot.edit_message_caption(
+        await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=progress_msg.message_id,
-            caption="TradingAgents module not available.",
+            text="TradingAgents module not available.",
         )
         return "unavailable"
 
@@ -545,10 +557,10 @@ async def _run_analysis_for_ticker(
     )
 
     async def _render_cancelled() -> None:
-        await context.bot.edit_message_caption(
+        await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=progress_msg.message_id,
-            caption=f"❌ Analysis cancelled for *{escape_markdown(ticker, version=2)}*\\.",
+            text=f"❌ Analysis cancelled for *{escape_markdown(ticker, version=2)}*\\.",
             parse_mode="MarkdownV2",
             reply_markup=None,
         )
@@ -594,17 +606,17 @@ async def _run_analysis_for_ticker(
         # If we showed "Queued" initially, flip the caption to "Analyzing"
         # now that we have the slot. Best-effort — drop on rate-limit.
         if initial_caption.startswith("⏳"):
-            logger.debug("[%s] flipping caption Queued → Analyzing", ticker)
+            logger.debug("[%s] flipping text Queued → Analyzing", ticker)
             try:
-                await context.bot.edit_message_caption(
+                await context.bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=progress_msg.message_id,
-                    caption=f"📊 Analyzing *{escape_markdown(ticker, version=2)}*… please wait\\.",
+                    text=f"📊 Analyzing *{escape_markdown(ticker, version=2)}*… please wait\\.",
                     parse_mode="MarkdownV2",
                     reply_markup=cancel_kb,
                 )
             except Exception as e:
-                logger.warning("[%s] caption flip failed: %s", ticker, e)
+                logger.warning("[%s] text flip failed: %s", ticker, e)
 
         logger.debug("[%s] entering to_thread(run_trading_analysis)", ticker)
         final_state, signal = await asyncio.to_thread(
@@ -630,10 +642,10 @@ async def _run_analysis_for_ticker(
             return "cancelled"
 
         if final_state is None:
-            await context.bot.edit_message_caption(
+            await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=progress_msg.message_id,
-                caption="Analysis failed. TradingAgents module not available.",
+                text="Analysis failed. TradingAgents module not available.",
                 reply_markup=None,
             )
             return "unavailable"
@@ -671,12 +683,18 @@ async def _run_analysis_for_ticker(
             summary=summary,
             config_summary=build_config_summary(config),
         )
-        await context.bot.edit_message_caption(
+        # IV-link mode: enable link preview now that the Telegraph URL
+        # is in the text. Telegram's preview card auto-renders the
+        # chart embedded at the top of the Telegraph page.
+        await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=progress_msg.message_id,
-            caption=caption,
+            text=caption,
             parse_mode="HTML",
             reply_markup=_full_report_keyboard(ticker, today_iso),
+            link_preview_options=LinkPreviewOptions(
+                is_disabled=False, prefer_large_media=True
+            ),
         )
         # Persist for the rest of today so the next /watch tap or digest
         # fire on this ticker (any user with the same config) hits the
@@ -700,10 +718,10 @@ async def _run_analysis_for_ticker(
         return "cancelled"
     except Exception as e:
         logger.exception("Error analyzing %s", ticker)
-        await context.bot.edit_message_caption(
+        await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=progress_msg.message_id,
-            caption=f"Error analyzing {ticker}.\n\nDetails: {str(e)[:200]}",
+            text=f"Error analyzing {ticker}.\n\nDetails: {str(e)[:200]}",
             reply_markup=None,
         )
         return "completed"
