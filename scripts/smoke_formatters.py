@@ -304,7 +304,7 @@ def test_full_report_keyboard_passes_url_verbatim() -> None:
     """URL buttons receive the URL verbatim — PTB and Telegram handle
     encoding internally for the Bot API call. The earlier escaping test
     targeted the inline `<a href>` in the caption (no longer there)."""
-    from tg_bot.handlers.callbacks import _full_report_keyboard  # noqa: E402
+    from tg_bot.handlers.analysis_runner import _full_report_keyboard  # noqa: E402
 
     url = "https://example.com/path?a=1&b=2"
     kb = _full_report_keyboard("SOFI", "2026-05-10", telegraph_url=url)
@@ -482,7 +482,7 @@ def test_full_report_keyboard_two_button_shape_with_url() -> None:
     """When `telegraph_url` is set, the keyboard exposes both actions
     side-by-side: a URL button (`📰 Instant View`) opening Telegraph IV
     + a callback button (`📥 Download .md`) firing the `getmd:` flow."""
-    from tg_bot.handlers.callbacks import _full_report_keyboard  # noqa: E402
+    from tg_bot.handlers.analysis_runner import _full_report_keyboard  # noqa: E402
 
     kb = _full_report_keyboard(
         "BRK-B", "2026-05-10", telegraph_url="https://telegra.ph/BRK-B-Analysis-05-10"
@@ -505,7 +505,7 @@ def test_full_report_keyboard_drops_iv_button_when_url_missing() -> None:
     """Telegraph publish failed (no url) → IV button omitted, only the
     download-callback button remains. Caller surfaces a warning in the
     caption so users know the IV route is unavailable."""
-    from tg_bot.handlers.callbacks import _full_report_keyboard  # noqa: E402
+    from tg_bot.handlers.analysis_runner import _full_report_keyboard  # noqa: E402
 
     kb = _full_report_keyboard("BRK-B", "2026-05-10", telegraph_url=None)
     rows = kb.inline_keyboard
