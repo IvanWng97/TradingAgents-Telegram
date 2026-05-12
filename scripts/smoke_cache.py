@@ -460,6 +460,25 @@ async def test_atomic_write_is_complete_json() -> None:
     assert leftover == [], f"unexpected leftover tempfiles: {leftover}"
 
 
+async def test_should_cache_publish_skips_none() -> None:
+    """Cache-hygiene gate enforced by `_should_cache_publish` in
+    `tg_bot.handlers.callbacks`. The analysis handlers gate every
+    `result_cache.store(...)` call on this predicate so a transient
+    Telegraph publish failure doesn't poison the cache. The
+    `_run_analysis_for_ticker` and `_analyze_one_for_digest` paths both
+    rely on this — if it ever returns True for None, a single bad
+    publish locks the cache slot to 'Instant View unavailable' for the
+    rest of the day."""
+    from tg_bot.handlers.callbacks import _should_cache_publish
+
+    # Real URL → caller stores normally.
+    assert _should_cache_publish("https://telegra.ph/INTU-Analysis-05-11")
+    # None URL → caller skips store, letting next tap re-run + retry publish.
+    assert not _should_cache_publish(None)
+    # Empty string defends against accidental falsy non-None values too.
+    assert not _should_cache_publish("")
+
+
 SCENARIOS = [
     ("lookup miss returns None", test_lookup_miss_returns_none),
     ("store + lookup round-trip", test_store_then_lookup_roundtrip),
@@ -475,6 +494,10 @@ SCENARIOS = [
     ("custom rounds isolate cache slot", test_custom_rounds_isolate_slot),
     ("custom effort isolate cache slot", test_custom_effort_isolates_slot),
     ("generated_at stored on every write", test_generated_at_persisted),
+    (
+        "_should_cache_publish gates None telegraph_url out of cache",
+        test_should_cache_publish_skips_none,
+    ),
 ]
 
 

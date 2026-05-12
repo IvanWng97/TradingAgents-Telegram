@@ -352,8 +352,6 @@ async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     avoid a module-import cycle (callbacks.py already imports from
     commands.py at top level).
     """
-    from tg_bot import cache as result_cache
-    from tg_bot.analysis import build_user_config
     from tg_bot.handlers.callbacks import (
         _llm_setup_error_message,
         _run_analysis_for_ticker,
@@ -412,21 +410,15 @@ async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    # Drop today's cached entry for this (config, ticker, rounds, effort).
-    # Next analysis will miss the cache and pay for the LLM run, then
-    # repopulate.
-    config = build_user_config(user_id, user_config_storage)
-    today_iso = date.today().isoformat()
-    result_cache.invalidate(
-        config["llm_provider"],
-        config["deep_think_llm"],
-        config["quick_think_llm"],
-        ticker,
-        today_iso,
-        **result_cache.cache_key_extras(config),
-    )
+    # `force_refresh=True` — the handler reads the prior Telegraph URL
+    # from the cached entry (so edit_page reuses the same URL), then
+    # bypasses the cache-hit short-circuit so the LLM re-runs and the
+    # Telegraph page is updated in place. `result_cache.store(...)` at
+    # the end of the fresh run overwrites the prior entry.
     chat_id = update.effective_chat.id
-    await _run_analysis_for_ticker(context, chat_id, user_id, ticker)
+    await _run_analysis_for_ticker(
+        context, chat_id, user_id, ticker, force_refresh=True
+    )
 
 
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
