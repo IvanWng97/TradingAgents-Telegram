@@ -41,7 +41,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -96,11 +95,6 @@ def parse_generated_at(s: Optional[str]) -> Optional[datetime]:
 _DATA_DIR_ENV = "TG_BOT_DATA_DIR"
 _CACHE_SUBDIR = "result_cache"
 
-# Provider / model strings can contain "/" or ":" (e.g. `openai/gpt-4o`,
-# `meta:llama3`) — squash to a directory-safe slug. Slug form keeps the
-# tree grep-able when debugging; a hash would be shorter but opaque.
-_SLUG_SAFE = re.compile(r"[^A-Za-z0-9_.-]")
-
 
 def _data_dir() -> Path:
     return Path(os.environ.get(_DATA_DIR_ENV, "data"))
@@ -113,16 +107,15 @@ def _slug(
     rounds: int = 1,
     effort: Optional[str] = None,
 ) -> str:
-    """Cache slug. The `__r{n}` and `__e{level}` suffixes are appended
-    only when the user customized these knobs — default users keep the
-    original `provider__deep__quick` shape so existing cache entries
-    aren't orphaned when this feature ships."""
-    base = _SLUG_SAFE.sub("_", f"{provider}__{deep}__{quick}")
-    if rounds != 1:
-        base += f"__r{rounds}"
-    if effort:
-        base += f"__e{effort}"
-    return base
+    """Cache slug — thin delegator so the caller's positional API stays
+    unchanged. The actual shape lives in `AnalysisConfigKey.slug()` which
+    is the single source of truth shared with the caption "via" line and
+    the Telegraph title suffix (see `config_key.py`)."""
+    from tg_bot.config_key import AnalysisConfigKey
+
+    return AnalysisConfigKey(
+        provider=provider, deep=deep, quick=quick, rounds=rounds, effort=effort
+    ).slug()
 
 
 def _json_default(obj: Any) -> Any:
@@ -178,7 +171,13 @@ def lookup(
 
     `rounds` and `effort` extend the cache key so customized runs don't
     collide with default-config runs. Defaults match DEFAULT_CONFIG so
-    callers that don't set them keep their existing cache slot."""
+    callers that don't set them keep their existing cache slot.
+
+    Poisoned entries (`telegraph_url=None`) are returned as-is — the
+    cache module stays out of the rendering policy. Callers that care
+    about the missing URL handle it however they want (currently the
+    rendering path surfaces `⚠️ Instant View unavailable` and `/refresh`
+    is the recovery path)."""
     path = _path_for(provider, deep, quick, ticker, date_iso, rounds, effort)
     if not path.is_file():
         return None
@@ -206,17 +205,13 @@ def store(
     logged but don't propagate, since the live analysis flow is about
     to render the result regardless."""
     path = _path_for(provider, deep, quick, ticker, date_iso, rounds, effort)
+    # `tmp_path` may be referenced from the rescue branch on a tempfile
+    # constructor failure (e.g., disk full mid-NamedTemporaryFile call).
+    # Initialize before the try so the rescue's `os.unlink(tmp_path)`
+    # doesn't UnboundLocalError-mask the real exception.
+    tmp_path: Optional[str] = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Lazy eviction: while we have the directory open, drop any
-        # stale-date entries for this (config, ticker). Cheap (one
-        # listdir) and bounds disk growth without a separate cron job.
-        for sibling in path.parent.glob("*.json"):
-            if sibling.name != path.name:
-                try:
-                    sibling.unlink()
-                except OSError:
-                    pass
         # Stamp the moment of analysis so cache-hit renders show when the
         # decision was actually generated, not the time the user tapped
         # the button. Caller can override (e.g. for backfilled fixtures);
@@ -250,6 +245,17 @@ def store(
             except OSError:
                 pass
             raise
+        # Lazy eviction runs AFTER the atomic write succeeds — earlier
+        # code swept stale siblings before the write, so a mid-write
+        # failure would orphan yesterday's still-valid entry. The sweep
+        # is best-effort: an unlink error here doesn't roll back the
+        # successful write (the new entry is already on disk).
+        for sibling in path.parent.glob("*.json"):
+            if sibling.name != path.name:
+                try:
+                    sibling.unlink()
+                except OSError:
+                    pass
     except Exception as e:
         logger.warning("result_cache: failed to write %s: %s", path, e)
 

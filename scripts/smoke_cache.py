@@ -140,7 +140,7 @@ async def test_invalidate_removes_entry() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "BUY",
-        None,
+        "https://telegra.ph/test-placeholder",
     )
     assert cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09") is not None
     assert cache.invalidate("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09") is True
@@ -166,7 +166,7 @@ async def test_lazy_eviction_drops_old_dates() -> None:
         "2026-05-08",
         SAMPLE_STATE,
         "BUY",
-        None,
+        "https://telegra.ph/test-placeholder",
     )
     yesterday_path = (
         Path(os.environ["TG_BOT_DATA_DIR"])
@@ -186,7 +186,7 @@ async def test_lazy_eviction_drops_old_dates() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "HOLD",
-        None,
+        "https://telegra.ph/test-placeholder",
     )
     assert not yesterday_path.is_file(), "yesterday's entry should be evicted"
     today_path = yesterday_path.with_name("2026-05-09.json")
@@ -206,7 +206,7 @@ async def test_corrupt_file_returns_none() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "BUY",
-        None,
+        "https://telegra.ph/test-placeholder",
     )
     # Stomp the file with garbage.
     path = (
@@ -234,7 +234,7 @@ async def test_slug_handles_special_chars() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "BUY",
-        None,
+        "https://telegra.ph/test-placeholder",
     )
     got = cache.lookup(
         "openrouter/anthropic",
@@ -282,7 +282,7 @@ async def test_non_serializable_objects_in_state() -> None:
         "2026-05-09",
         state,
         "BUY",
-        None,
+        "https://telegra.ph/test-placeholder",
     )
     got = cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09")
     assert got is not None, "store must not fail on LangChain-style messages"
@@ -315,7 +315,7 @@ async def test_default_rounds_effort_keeps_slug() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "BUY",
-        None,
+        "https://telegra.ph/test-placeholder",
     )
     expected = (
         Path(os.environ["TG_BOT_DATA_DIR"])
@@ -341,7 +341,7 @@ async def test_custom_rounds_isolate_slot() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "BUY",
-        None,
+        "https://telegra.ph/test-placeholder",
         rounds=1,
     )
     cache.store(
@@ -352,7 +352,7 @@ async def test_custom_rounds_isolate_slot() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "SELL",
-        None,
+        "https://telegra.ph/test-placeholder",
         rounds=2,
     )
     a = cache.lookup(
@@ -388,7 +388,7 @@ async def test_custom_effort_isolates_slot() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "HOLD",
-        None,
+        "https://telegra.ph/test-placeholder",
         effort="high",
     )
     # Default effort=None lookup should miss high-effort entry.
@@ -419,7 +419,7 @@ async def test_generated_at_persisted() -> None:
         "2026-05-09",
         SAMPLE_STATE,
         "BUY",
-        None,
+        "https://telegra.ph/test-placeholder",
     )
     got = cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09")
     ts = got.get("generated_at")
@@ -460,6 +460,60 @@ async def test_atomic_write_is_complete_json() -> None:
     assert leftover == [], f"unexpected leftover tempfiles: {leftover}"
 
 
+async def test_lookup_returns_poisoned_entry_as_is() -> None:
+    """`cache.lookup` returns poisoned entries (telegraph_url=None) as-is.
+    Earlier iterations of this gate treated poisoned entries as a miss,
+    which triggered a full LLM re-run — wasteful since the cached
+    `final_state` was intact, only the publish failed.
+
+    Republish-only policy now lives in
+    `callbacks._run_analysis_for_ticker` and `_analyze_one_for_digest`:
+    they detect the poisoned state and re-publish from the cached
+    `final_state` (no LLM run). Putting that policy in the cache module
+    would conflate storage with rendering."""
+    _fresh_data_dir()
+    from tg_bot import cache
+
+    # Write a poisoned entry directly (bypassing the write-time gate to
+    # simulate a legacy condition).
+    cache.store(
+        "openai",
+        "gpt-4o",
+        "o4-mini",
+        "INTU",
+        "2026-05-11",
+        SAMPLE_STATE,
+        "HOLD",
+        None,  # poisoned: publish failed, telegraph_url is None
+    )
+    got = cache.lookup("openai", "gpt-4o", "o4-mini", "INTU", "2026-05-11")
+    assert got is not None, "lookup must return the poisoned entry, not None"
+    assert got["telegraph_url"] is None
+    assert got["signal"] == "HOLD"
+    # The cached `final_state` is intact — the republish-only path
+    # reuses it without re-running the LLM.
+    assert got["final_state"]["final_trade_decision"].startswith("Final Trading")
+
+
+async def test_should_cache_publish_skips_none() -> None:
+    """Cache-hygiene gate enforced by `_should_cache_publish` in
+    `tg_bot.handlers.callbacks`. The analysis handlers gate every
+    `result_cache.store(...)` call on this predicate so a transient
+    Telegraph publish failure doesn't poison the cache. The
+    `_run_analysis_for_ticker` and `_analyze_one_for_digest` paths both
+    rely on this — if it ever returns True for None, a single bad
+    publish locks the cache slot to 'Instant View unavailable' for the
+    rest of the day."""
+    from tg_bot.handlers.callbacks import _should_cache_publish
+
+    # Real URL → caller stores normally.
+    assert _should_cache_publish("https://telegra.ph/INTU-Analysis-05-11")
+    # None URL → caller skips store, letting next tap re-run + retry publish.
+    assert not _should_cache_publish(None)
+    # Empty string defends against accidental falsy non-None values too.
+    assert not _should_cache_publish("")
+
+
 SCENARIOS = [
     ("lookup miss returns None", test_lookup_miss_returns_none),
     ("store + lookup round-trip", test_store_then_lookup_roundtrip),
@@ -475,6 +529,14 @@ SCENARIOS = [
     ("custom rounds isolate cache slot", test_custom_rounds_isolate_slot),
     ("custom effort isolate cache slot", test_custom_effort_isolates_slot),
     ("generated_at stored on every write", test_generated_at_persisted),
+    (
+        "lookup returns poisoned entry as-is (republish handled by callers)",
+        test_lookup_returns_poisoned_entry_as_is,
+    ),
+    (
+        "_should_cache_publish gates None telegraph_url out of cache",
+        test_should_cache_publish_skips_none,
+    ),
 ]
 
 

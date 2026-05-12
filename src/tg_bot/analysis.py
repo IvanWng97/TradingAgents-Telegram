@@ -358,22 +358,18 @@ def _get_or_create_pool(config: dict) -> GraphPool:
     LRU-evicts the oldest key when GRAPH_CACHE_MAX is exceeded — that drops
     all instances for that key (each pinned an LLM client + ChromaDB).
     """
-    # Same effort-key resolution as `cache.cache_key_extras` so the pool
-    # key and the cache key disambiguate the same set of inputs.
-    effort = next(
-        (config[k] for k in EFFORT_KEY_BY_PROVIDER.values() if config.get(k)),
-        None,
-    )
-    key = (
-        config.get("llm_provider", ""),
-        config.get("deep_think_llm", ""),
-        config.get("quick_think_llm", ""),
-        config.get("max_debate_rounds", 1),
-        effort,
-    )
+    # `AnalysisConfigKey` is the single source of truth for the
+    # (provider, deep, quick, rounds, effort) tuple — same dataclass the
+    # cache uses for its slug and the formatters use for the caption.
+    # Using it here keeps invariant #1 enforced structurally: any future
+    # knob added to the dataclass flows into the pool key automatically,
+    # so there's no manual sync risk.
+    from tg_bot.config_key import AnalysisConfigKey
+
+    key = AnalysisConfigKey.from_config(config)
 
     def _builder():
-        logger.info("Building TradingAgentsGraph for %s", key)
+        logger.info("Building TradingAgentsGraph for %s", key.slug())
         return TradingAgentsGraph(
             debug=Config.TA_DEBUG,
             config=config,
@@ -387,7 +383,7 @@ def _get_or_create_pool(config: dict) -> GraphPool:
             _graph_pool[key] = pool
             while len(_graph_pool) > GRAPH_CACHE_MAX:
                 evicted_key, _ = _graph_pool.popitem(last=False)
-                logger.info("Evicting graph pool for %s (LRU)", evicted_key)
+                logger.info("Evicting graph pool for %s (LRU)", evicted_key.slug())
         else:
             _graph_pool.move_to_end(key)
         return pool
