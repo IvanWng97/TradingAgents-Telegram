@@ -77,8 +77,24 @@ class JsonStorage:
             tmp.flush()
             os.fsync(tmp.fileno())
             tmp_path = tmp.name
-        os.replace(tmp_path, self.file_path)
+        try:
+            os.replace(tmp_path, self.file_path)
+        except Exception:
+            # If the rename fails (e.g. Windows: target locked; macOS dev:
+            # file held by another process), unlink the tempfile so it
+            # doesn't accumulate in `data/`. Mirrors cache.py's pattern.
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     async def _save_async(self) -> None:
-        """Run _save in a worker thread so PTB's event loop isn't blocked."""
+        """Run _save in a worker thread so PTB's event loop isn't blocked.
+
+        Thread-safety: `self._data` mutations must be serialized by the
+        caller (PTB's single async event loop); only the disk I/O is
+        offloaded. Don't introduce concurrent `to_thread` writers without
+        adding a lock around `_data` mutations first.
+        """
         await asyncio.to_thread(self._save)

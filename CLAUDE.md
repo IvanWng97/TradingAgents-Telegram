@@ -185,6 +185,8 @@ A change in this repo usually touches more than just code — these surfaces dri
 - **Build parallelism inside `_builder()`**: building N graphs simultaneously isn't N× faster — LangChain LLM client init and ChromaDB setup serialize partially on internal locks + GIL.
 - `asyncio.to_thread` uses Python's default thread pool (`min(32, cpu_count + 4)`) — beyond that, parallel runs queue at the executor layer regardless of the graph pool size.
 - No structured logging / correlation id. Smoke coverage exists (`scripts/smoke_*.py`) but no pytest suite. Graceful shutdown is wired (`_post_stop` signals every in-flight cancel + 2s drain).
+- **`_try_acquire_nonblocking` reads CPython-private `sem._value` / `sem._waiters`**. The `AttributeError` fallback degrades to blocking-acquire, so a future CPython release reshaping these attributes won't crash — but every run will appear ⏳ Queued even when slots are free. Symptom: elevated queue-time metrics with no error log. Watch for this on Python version bumps; fix is to either follow the upstream attribute rename or rebuild the helper on `asyncio.Semaphore.locked()` + a counter.
+- **`run_user_digest` `status` dict relies on cooperative asyncio scheduling**. `status` is a plain dict mutated from concurrent tasks (`_wrapped` per ticker, `_on_step` callbacks, `_render` reads). Safe today because all mutations happen at `await` boundaries on the single event loop — but if anyone ever refactors the digest path to use `asyncio.to_thread` for status updates, mutations would interleave without a lock and we'd silently lose rows. Document boundary, not bug: if you add thread-offload to the digest fan-out, add an `asyncio.Lock` around `status` writes first.
 
 ## Recently fixed (May 2026)
 
