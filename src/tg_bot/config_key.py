@@ -12,17 +12,14 @@ for *which LLM configuration produced an analysis*:
   config produced the page (instead of all configs colliding on
   `NVDA-Analysis-05-10` and getting silent `-2`/`-3` suffixes).
 
-Before this module existed each surface had its own generator
-(`cache._slug` / `formatters.build_config_summary` / inline `f"{ticker}
-Analysis"`) — they pulled from the same source data but formatted
-independently, so adding a new knob (e.g. `effort`) meant remembering to
-extend each one. Cross-cutting invariant #1 in CLAUDE.md is exactly this
-"keep them aligned" rule; this dataclass enforces it structurally.
-
-`AnalysisConfigKey` is the source of truth. Existing public helpers
-(`cache._slug`, `formatters.build_config_summary`) delegate to it so
-their callers don't have to migrate, but new code should construct an
-`AnalysisConfigKey` and call the shape it needs."""
+Before this module existed each surface had its own generator (one in
+`cache.py`, one in `formatters.py`, and an inline `f"{ticker} Analysis"`
+at the publish site) — they pulled from the same source data but
+formatted independently, so adding a new knob (e.g. `effort`) meant
+remembering to extend each one. Cross-cutting invariant #1 in CLAUDE.md
+is exactly this "keep them aligned" rule; this dataclass enforces it
+structurally. Callers (`cache.py`, `handlers/callbacks.py`,
+`formatters.py`) consume the dataclass directly — no delegators."""
 
 from __future__ import annotations
 

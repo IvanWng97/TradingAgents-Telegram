@@ -2,12 +2,14 @@
 the (provider, deep, quick, rounds, effort) tuple shared across the
 cache slug, the caption "via" line, and the Telegraph title suffix.
 
-Before this dataclass existed, each surface had its own generator
-(`cache._slug` / `formatters.build_config_summary` / inline
-`f"{ticker} Analysis"`) — they pulled from the same source data but
-formatted independently. Cross-cutting invariant #1 in CLAUDE.md is the
-human-enforced "keep all three in sync when adding a knob" rule; these
-scenarios are the structural enforcement.
+Cross-cutting invariant #1 in CLAUDE.md is the human-enforced "keep all
+three shapes in sync when adding a knob" rule; these scenarios are the
+structural enforcement — extending the dataclass with a new field
+without updating slug/caption/title produces visible test failures.
+
+Callers (cache.py, callbacks.py, analysis.py) consume the dataclass
+directly — there are no longer any thin delegators (`cache._slug` and
+`formatters.build_config_summary` were inlined in the cleanup PR).
 
 Run with: .venv/bin/python3 scripts/smoke_config_key.py
 """
@@ -219,38 +221,6 @@ def test_telegraph_title_differs_across_configs_preventing_collision() -> None:
     assert a.telegraph_title("NVDA") != b.telegraph_title("NVDA")
 
 
-# ---------- delegation: existing public helpers point at this class ----------
-
-
-def test_cache_slug_helper_delegates() -> None:
-    """`cache._slug(...)` is a thin wrapper — invariant #1 wants both
-    paths to produce the same output for the same inputs."""
-    from tg_bot.cache import _slug
-
-    direct = AnalysisConfigKey(
-        provider="openai", deep="gpt-4o", quick="o4-mini", rounds=2, effort="high"
-    ).slug()
-    via_helper = _slug("openai", "gpt-4o", "o4-mini", rounds=2, effort="high")
-    assert direct == via_helper
-
-
-def test_build_config_summary_delegates() -> None:
-    """`formatters.build_config_summary(config)` is a thin wrapper — same
-    invariant: dataclass + helper agree on the caption shape."""
-    from tg_bot.formatters import build_config_summary
-
-    cfg = {
-        "llm_provider": "openai",
-        "deep_think_llm": "gpt-4o",
-        "quick_think_llm": "o4-mini",
-        "max_debate_rounds": 2,
-        "openai_reasoning_effort": "high",
-    }
-    direct = AnalysisConfigKey.from_config(cfg).caption()
-    via_helper = build_config_summary(cfg)
-    assert direct == via_helper
-
-
 # ---------- ordering ----------
 
 
@@ -302,8 +272,6 @@ SCENARIOS = [
         "telegraph_title() differs across configs",
         test_telegraph_title_differs_across_configs_preventing_collision,
     ),
-    ("cache._slug delegates to AnalysisConfigKey", test_cache_slug_helper_delegates),
-    ("build_config_summary delegates", test_build_config_summary_delegates),
 ]
 
 

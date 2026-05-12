@@ -22,12 +22,14 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-# Conservative ticker validator: alphanumerics with `.` or `-` only between
-# alnum groups (matches BRK-B, 7203.T, RDS.A; rejects "..", ".A", "A.", "A..B").
-# `[A-Z0-9.\-]+` looked equivalent but `.` is a literal inside a character
-# class — `..` and `.A` matched, so it didn't actually block path traversal
-# when joining the ticker into a directory path.
-_TICKER_RE = re.compile(r"^[A-Z0-9]+(?:[.\-][A-Z0-9]+)*$")
+# Ticker validator shared with `validation.TICKER_RE` — single source of
+# truth so the storage-write check and the disk-read check can never
+# disagree on what counts as a valid ticker. Divergence would silently
+# re-open the path-traversal hole the regex closes (see `validation.py`
+# comment for the `..`/`.A` failure mode the earlier `[A-Z0-9.\-]+` form
+# allowed).
+from tg_bot.validation import TICKER_RE  # noqa: E402
+
 _DATE_FILENAME_RE = re.compile(r"^full_states_log_(\d{4}-\d{2}-\d{2})\.json$")
 
 
@@ -52,7 +54,7 @@ def _ticker_dir(ticker: str) -> Optional[Path]:
 def normalize_ticker(raw: str) -> Optional[str]:
     """Uppercase + validate. Returns None for unsafe input (path traversal)."""
     t = raw.strip().upper()
-    return t if _TICKER_RE.match(t) else None
+    return t if TICKER_RE.match(t) else None
 
 
 def list_available_tickers(limit: int = 20) -> list[str]:

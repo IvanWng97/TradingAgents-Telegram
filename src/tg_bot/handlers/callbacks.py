@@ -31,7 +31,6 @@ from tg_bot.chart import finviz_chart_url
 from tg_bot.digest import build_digest_response
 from tg_bot.formatters import (
     DECISION_EMOJI,
-    build_config_summary,
     caption_summary,
     format_analysis_result_markdown,
     format_full_md_report,
@@ -71,29 +70,6 @@ def _get_run_semaphore() -> asyncio.Semaphore:
     if _run_semaphore is None:
         _run_semaphore = asyncio.Semaphore(Config.MAX_CONCURRENT_ANALYSES)
     return _run_semaphore
-
-
-def _should_cache_publish(telegraph_url: str | None) -> bool:
-    """Cache-hygiene gate for fresh-run cache writes.
-
-    Returns False when `telegraph_url is None` so the analysis handler
-    skips `result_cache.store(...)`. A None URL means the Telegraph
-    publish failed — usually transient (network blip, rate limit, one-
-    off API hiccup). Caching the failure traps the user: every
-    subsequent `/watch <ticker>` hits the cache and faithfully replays
-    "Instant View unavailable" for the rest of the day, even though the
-    publish would succeed on retry. Skipping the store means the next
-    tap re-runs the LLM AND retries the publish — one wasted LLM run on
-    a ~3% failure rate is far cheaper than locking the slot bad.
-
-    Observed in the wild: INTU 2026-05-11 hit a transient publish failure,
-    poisoned the cache, and the user saw the broken state on every retry
-    until midnight cache rollover.
-
-    `bool()` instead of `is not None` defends against the empty-string
-    edge case (some Telegraph SDK paths could plausibly return ""), which
-    would otherwise pass the gate and re-poison the cache."""
-    return bool(telegraph_url)
 
 
 def _full_report_keyboard(
@@ -171,12 +147,23 @@ def _try_acquire_nonblocking(sem: asyncio.Semaphore) -> bool:
     `if` and `_value -= 1`). Avoids the broken `wait_for(..., timeout=0)`
     pattern, which cancels the inner task before the event loop can run
     its fast-path, so it always reports failure.
+
+    Reaches into `sem._value` / `sem._waiters` — CPython-private. Works on
+    CPython 3.10-3.14 (verified). If a future CPython release reshapes
+    those attributes the `AttributeError` branch conservatively returns
+    False — the caller falls back to the slow blocking path (`sem.acquire()`),
+    which still works correctly. The user sees a brief `⏳ Queued` caption
+    instead of the snappier "Analyzing…", but no analysis is lost.
     """
-    if not sem.locked() and (
-        sem._waiters is None or all(w.cancelled() for w in sem._waiters)
-    ):
-        sem._value -= 1
-        return True
+    try:
+        if not sem.locked() and (
+            sem._waiters is None or all(w.cancelled() for w in sem._waiters)
+        ):
+            sem._value -= 1
+            return True
+    except AttributeError:
+        # Private attrs shifted — degrade to blocking acquire path.
+        return False
     return False
 
 
@@ -413,16 +400,14 @@ async def _run_analysis_for_ticker(
     # render directly from the cached final state and skip the LLM run,
     # the progress flow, the Telegraph round-trip, and the cancel plumbing.
     config = build_user_config(user_id, user_config_storage)
-    today_iso = date.today().isoformat()
-    cache_kwargs = result_cache.cache_key_extras(config)
-    cached = result_cache.lookup(
-        config["llm_provider"],
-        config["deep_think_llm"],
-        config["quick_think_llm"],
-        ticker,
-        today_iso,
-        **cache_kwargs,
-    )
+    # Construct AnalysisConfigKey once per request — drives the cache
+    # lookup/store, the caption "via" line, the Telegraph title, and
+    # (transitively) the graph pool. Threading the instance avoids the
+    # 3-4 separate `AnalysisConfigKey.from_config(config)` constructions
+    # the codebase had before this PR.
+    key = AnalysisConfigKey.from_config(config)
+    today_iso = result_cache.today_iso()
+    cached = result_cache.lookup(key, ticker, today_iso)
     # Capture the prior Telegraph URL for edit-in-place on refresh, then
     # let force_refresh suppress the cache-hit short-circuit below so a
     # fresh LLM run + Telegraph edit_page happens.
@@ -445,7 +430,7 @@ async def _run_analysis_for_ticker(
             cached["signal"],
             cached.get("telegraph_url"),
             summary=summary,
-            config_summary=build_config_summary(config),
+            config_summary=key.caption(),
             generated_at=result_cache.parse_generated_at(cached.get("generated_at")),
         )
         # `today_iso` is the cache lookup key AND matches tradingagents'
@@ -482,7 +467,7 @@ async def _run_analysis_for_ticker(
     cancel_event = threading.Event()
     cancel_async = asyncio.Event()
     cancel_registry[run_id] = {
-        "event": cancel_event,
+        "cancel_event": cancel_event,
         "async_event": cancel_async,
         "message_id": None,
     }
@@ -695,7 +680,7 @@ async def _run_analysis_for_ticker(
             ticker,
             final_state,
             signal,
-            config_summary=build_config_summary(config),
+            config_summary=key.caption(),
             generated_at=datetime.now(timezone.utc),
         )
         # `tables` extension generates <table> for GFM pipe-tables; the
@@ -711,7 +696,7 @@ async def _run_analysis_for_ticker(
             _path_from_telegraph_url(prev_telegraph_url) if prev_telegraph_url else None
         )
         telegraph_url = await publish_to_telegraph(
-            AnalysisConfigKey.from_config(config).telegraph_title(ticker),
+            key.telegraph_title(ticker),
             html_content,
             edit_path=edit_path,
         )
@@ -732,7 +717,7 @@ async def _run_analysis_for_ticker(
             signal,
             telegraph_url,
             summary=summary,
-            config_summary=build_config_summary(config),
+            config_summary=key.caption(),
         )
         await context.bot.edit_message_caption(
             chat_id=chat_id,
@@ -743,27 +728,10 @@ async def _run_analysis_for_ticker(
         )
         # Persist for the rest of today so the next /watch tap or digest
         # fire on this ticker (any user with the same config) hits the
-        # short-circuit at the top of the function. `_should_cache_publish`
-        # gates on `telegraph_url` — see its docstring for the cache-
-        # poisoning failure mode this guards against.
-        if _should_cache_publish(telegraph_url):
-            result_cache.store(
-                config["llm_provider"],
-                config["deep_think_llm"],
-                config["quick_think_llm"],
-                ticker,
-                today_iso,
-                final_state,
-                signal,
-                telegraph_url,
-                **cache_kwargs,
-            )
-        else:
-            logger.info(
-                "[%s] skipping cache store (telegraph publish failed); "
-                "next tap will re-run + retry publish",
-                ticker,
-            )
+        # short-circuit at the top of the function. `cache.store` enforces
+        # the cache-hygiene gate internally — a falsy `telegraph_url` is
+        # a no-op (skips the store + logs). See PR #30 / INTU 2026-05-11.
+        result_cache.store(key, ticker, today_iso, final_state, signal, telegraph_url)
         return "completed"
     except CancelledByUserError:
         logger.info("Analysis cancelled by user for %s", ticker)
@@ -1075,7 +1043,7 @@ async def _handle_cancel_analysis(
             "cancel_analysis: no entry for run_id=%s — already finished?", run_id
         )
         return
-    entry["event"].set()
+    entry["cancel_event"].set()
     async_event = entry.get("async_event")
     if async_event is not None:
         async_event.set()
@@ -1413,16 +1381,9 @@ async def _analyze_one_for_digest(
     # result needs no LLM call, so we shouldn't burn a slot or trigger
     # the "Starting…" reporter event.
     config = build_user_config(user_id, user_config_storage)
-    today_iso = date.today().isoformat()
-    cache_kwargs = result_cache.cache_key_extras(config)
-    cached = result_cache.lookup(
-        config["llm_provider"],
-        config["deep_think_llm"],
-        config["quick_think_llm"],
-        ticker,
-        today_iso,
-        **cache_kwargs,
-    )
+    key = AnalysisConfigKey.from_config(config)
+    today_iso = result_cache.today_iso()
+    cached = result_cache.lookup(key, ticker, today_iso)
     if cached:
         logger.info("digest: result_cache HIT for %s — skipping LLM run", ticker)
         return {
@@ -1471,13 +1432,13 @@ async def _analyze_one_for_digest(
                 ticker,
                 final_state,
                 signal,
-                config_summary=build_config_summary(config),
+                config_summary=key.caption(),
                 generated_at=datetime.now(timezone.utc),
             )
             html = markdown.markdown(md, extensions=["tables"])
             html = f'<img src="{chart_url}"/>{html}'
             telegraph_url = await publish_to_telegraph(
-                AnalysisConfigKey.from_config(config).telegraph_title(ticker), html
+                key.telegraph_title(ticker), html
             )
         except Exception as e:
             logger.warning("digest: telegraph publish failed for %s: %s", ticker, e)
@@ -1485,28 +1446,11 @@ async def _analyze_one_for_digest(
 
         # Persist for the rest of today — same key the manual /watch flow
         # writes, so a digest fan-out followed by a manual /watch tap on
-        # the same ticker only pays for one actual LLM run. Gated by
-        # `_should_cache_publish` for the same reason as the manual
-        # flow above (don't poison the cache with transient publish
-        # failures).
-        if _should_cache_publish(telegraph_url):
-            result_cache.store(
-                config["llm_provider"],
-                config["deep_think_llm"],
-                config["quick_think_llm"],
-                ticker,
-                today_iso,
-                final_state,
-                signal,
-                telegraph_url,
-                **cache_kwargs,
-            )
-        else:
-            logger.info(
-                "digest: [%s] skipping cache store (telegraph publish failed); "
-                "next tap will re-run + retry publish",
-                ticker,
-            )
+        # the same ticker only pays for one actual LLM run. `cache.store`
+        # enforces the cache-hygiene gate internally (skips on falsy
+        # `telegraph_url`), so a transient publish failure doesn't
+        # poison the cache.
+        result_cache.store(key, ticker, today_iso, final_state, signal, telegraph_url)
 
         return {"ticker": ticker, "signal": signal, "telegraph_url": telegraph_url}
     finally:

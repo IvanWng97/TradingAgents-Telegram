@@ -1,21 +1,17 @@
 """Same-day result cache — skip the LLM run when an identical analysis
 just happened.
 
-Key: (provider, deep_think_llm, quick_think_llm, ticker, date_iso, rounds,
-effort) — `rounds` and `effort` are graph-baked and would change output,
-so they belong in the key alongside the model triple. The pool key in
-analysis.py shares the 5-element config quintuple (provider, deep, quick,
-rounds, effort) so two users on different config knobs get isolated cache
-entries AND isolated graph instances. The LLM output for a given
-config+ticker+date is identical regardless of which user triggered the
-run, so a hit saves the bill-payer's tokens AND lets a manual /watch
-followed by the daily digest cost only one actual run.
+Key: `(AnalysisConfigKey, ticker, date_iso)` — the dataclass carries
+the (provider, deep_think_llm, quick_think_llm, max_debate_rounds,
+effort) quintuple that defines a graph identity, and the cache layout
+mirrors that:
 
-Layout: `<TG_BOT_DATA_DIR>/result_cache/<config_slug>/<TICKER>/<date>.json`.
-Slug shape: `<provider>__<deep>__<quick>` for default users; `__r{n}`
-appended only when rounds≠1, `__e{level}` only when effort is set, so
-default-config users keep their existing cache slot when a customized
-run lands.
+    <TG_BOT_DATA_DIR>/result_cache/<key.slug()>/<TICKER>/<date>.json
+
+The pool key in `analysis.py` uses the same `AnalysisConfigKey`
+instance as its dict key, so by invariant #1 cache and pool are guaranteed
+to share the same identity definition — adding a new config field
+extends both surfaces in one place.
 
 Each file carries `{final_state: dict, signal: str, telegraph_url:
 str | None, generated_at: str}`. `generated_at` is an ISO UTC timestamp
@@ -30,10 +26,14 @@ Filesystem-backed so the cache survives bot restarts; atomic writes
 readers never see a partial file.
 
 Eviction: lazy. Stale-date files for the same (config, ticker) are dropped
-the next time a fresh result lands in that ticker's directory. Disk is
-cheap; we don't run a nightly sweep job — a watchlist with N tickers and
-M users on K configs leaves at most N*K files lingering until the next
-trigger hits each ticker.
+the next time a fresh result lands in that ticker's directory.
+
+**Cache-hygiene gate built in:** `store` no-ops when `telegraph_url` is
+falsy. Caching a failed publish would trap the user (every subsequent
+`/watch` faithfully replays "Instant View unavailable" until midnight
+rollover). One wasted LLM run on the ~3% transient failure rate is
+cheaper than locking the user out of the slot. See PR #30 / INTU
+2026-05-11 incident for the motivating wild observation.
 """
 
 from __future__ import annotations
@@ -42,51 +42,14 @@ import json
 import logging
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import date as _date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from tg_bot.config_key import AnalysisConfigKey
+
 
 logger = logging.getLogger(__name__)
-
-
-def _now_iso() -> str:
-    """UTC ISO timestamp, no microseconds — small + sortable + tz-aware
-    when round-tripped via `datetime.fromisoformat`."""
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
-def cache_key_extras(config: dict) -> dict:
-    """Pull the cache-key-affecting bits out of a resolved tradingagents
-    config dict — `rounds` and `effort` are the only knobs beyond
-    (provider, deep, quick) that change output, so they're the only ones
-    the cache needs to disambiguate. Returns a kwargs dict ready to splat
-    into `lookup` / `store` / `invalidate`."""
-    # Late import: analysis.py imports from cache (transitively via
-    # callbacks), so importing analysis at module load creates a cycle.
-    # The dict is module-level on analysis so the lookup is O(1) once
-    # imported, and the import itself is cached after first call.
-    from tg_bot.analysis import EFFORT_KEY_BY_PROVIDER
-
-    rounds = config.get("max_debate_rounds", 1)
-    effort = next(
-        (config[k] for k in EFFORT_KEY_BY_PROVIDER.values() if config.get(k)),
-        None,
-    )
-    return {"rounds": rounds, "effort": effort}
-
-
-def parse_generated_at(s: Optional[str]) -> Optional[datetime]:
-    """Round-trip a stored ISO-8601 timestamp back to an aware datetime.
-    Returns None for missing or unparseable values so callers can fall
-    through to "now" defaults — pre-PR cache entries (no `generated_at`
-    field) and corrupted strings both land here gracefully."""
-    if not s:
-        return None
-    try:
-        return datetime.fromisoformat(s)
-    except ValueError:
-        return None
 
 
 # `data` matches `Config`'s implicit default — kept in sync via the env var
@@ -100,22 +63,35 @@ def _data_dir() -> Path:
     return Path(os.environ.get(_DATA_DIR_ENV, "data"))
 
 
-def _slug(
-    provider: str,
-    deep: str,
-    quick: str,
-    rounds: int = 1,
-    effort: Optional[str] = None,
-) -> str:
-    """Cache slug — thin delegator so the caller's positional API stays
-    unchanged. The actual shape lives in `AnalysisConfigKey.slug()` which
-    is the single source of truth shared with the caption "via" line and
-    the Telegraph title suffix (see `config_key.py`)."""
-    from tg_bot.config_key import AnalysisConfigKey
+def _now_iso() -> str:
+    """UTC ISO timestamp, no microseconds — small + sortable + tz-aware
+    when round-tripped via `datetime.fromisoformat`."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
-    return AnalysisConfigKey(
-        provider=provider, deep=deep, quick=quick, rounds=rounds, effort=effort
-    ).slug()
+
+def today_iso() -> str:
+    """Local-date ISO string used as the cache lookup key AND the
+    tradingagents log filename (`full_states_log_<date>.json`). Returned
+    from a helper so callers don't repeat `date.today().isoformat()` and
+    so the convention is documented in one place.
+
+    Local-date (not UTC) is deliberate: matches tradingagents' on-disk
+    log filename convention. Using a UTC stamp would 404 for late-night
+    runs from negative-UTC zones (e.g. 23:00 PDT → 06:00 UTC next day)."""
+    return _date.today().isoformat()
+
+
+def parse_generated_at(s: Optional[str]) -> Optional[datetime]:
+    """Round-trip a stored ISO-8601 timestamp back to an aware datetime.
+    Returns None for missing or unparseable values so callers can fall
+    through to "now" defaults — pre-PR cache entries (no `generated_at`
+    field) and corrupted strings both land here gracefully."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
 
 
 def _json_default(obj: Any) -> Any:
@@ -138,47 +114,23 @@ def _json_default(obj: Any) -> Any:
     return {"__type__": type(obj).__name__, "repr": repr(obj)}
 
 
-def _path_for(
-    provider: str,
-    deep: str,
-    quick: str,
-    ticker: str,
-    date_iso: str,
-    rounds: int = 1,
-    effort: Optional[str] = None,
-) -> Path:
-    return (
-        _data_dir()
-        / _CACHE_SUBDIR
-        / _slug(provider, deep, quick, rounds, effort)
-        / ticker
-        / f"{date_iso}.json"
-    )
+def _path_for(key: AnalysisConfigKey, ticker: str, date_iso: str) -> Path:
+    return _data_dir() / _CACHE_SUBDIR / key.slug() / ticker / f"{date_iso}.json"
 
 
 def lookup(
-    provider: str,
-    deep: str,
-    quick: str,
-    ticker: str,
-    date_iso: str,
-    rounds: int = 1,
-    effort: Optional[str] = None,
+    key: AnalysisConfigKey, ticker: str, date_iso: str
 ) -> Optional[dict[str, Any]]:
-    """Return the cached `{final_state, signal, telegraph_url}` dict, or
-    `None` on miss. Quietly returns `None` on any read error — a corrupt
-    or partially-written file should never block a fresh run.
+    """Return the cached `{final_state, signal, telegraph_url, generated_at}`
+    dict, or `None` on miss. Quietly returns `None` on any read error — a
+    corrupt or partially-written file should never block a fresh run.
 
-    `rounds` and `effort` extend the cache key so customized runs don't
-    collide with default-config runs. Defaults match DEFAULT_CONFIG so
-    callers that don't set them keep their existing cache slot.
-
-    Poisoned entries (`telegraph_url=None`) are returned as-is — the
-    cache module stays out of the rendering policy. Callers that care
-    about the missing URL handle it however they want (currently the
-    rendering path surfaces `⚠️ Instant View unavailable` and `/refresh`
-    is the recovery path)."""
-    path = _path_for(provider, deep, quick, ticker, date_iso, rounds, effort)
+    Poisoned entries (`telegraph_url=None`) are returned as-is. The cache
+    module stays out of the rendering policy; callers that care about the
+    missing URL surface `⚠️ Instant View unavailable` and `/refresh` is
+    the recovery path. The write side prevents *new* poisoned entries
+    via `store`'s hygiene gate."""
+    path = _path_for(key, ticker, date_iso)
     if not path.is_file():
         return None
     try:
@@ -190,21 +142,41 @@ def lookup(
 
 
 def store(
-    provider: str,
-    deep: str,
-    quick: str,
+    key: AnalysisConfigKey,
     ticker: str,
     date_iso: str,
     final_state: dict,
     signal: str,
     telegraph_url: Optional[str],
-    rounds: int = 1,
-    effort: Optional[str] = None,
 ) -> None:
-    """Write the entry atomically. Best-effort — write failures are
-    logged but don't propagate, since the live analysis flow is about
-    to render the result regardless."""
-    path = _path_for(provider, deep, quick, ticker, date_iso, rounds, effort)
+    """Write the cache entry atomically iff the Telegraph publish succeeded.
+
+    **Cache-hygiene gate is built in.** A falsy `telegraph_url` (None or
+    empty string) means the publish failed — we skip the store entirely
+    so the user can retry on the next tap rather than being locked into
+    "Instant View unavailable" until midnight. The cost is one wasted
+    LLM run on the ~3% transient-failure rate; the benefit is that no
+    cache entry is ever born poisoned.
+
+    Best-effort overall — write failures are logged but don't propagate,
+    since the live analysis flow is about to render the result regardless.
+
+    Side effect on successful write: stale-date siblings for the same
+    `(key, ticker)` are swept (lazy eviction). The sweep runs AFTER
+    `os.replace` succeeds so a mid-write crash never orphans yesterday's
+    still-valid entry.
+    """
+    if not telegraph_url:
+        logger.info(
+            "result_cache: skipping store for %s/%s/%s — falsy telegraph_url "
+            "(publish failed; next tap will re-run + retry publish)",
+            key.slug(),
+            ticker,
+            date_iso,
+        )
+        return
+
+    path = _path_for(key, ticker, date_iso)
     # `tmp_path` may be referenced from the rescue branch on a tempfile
     # constructor failure (e.g., disk full mid-NamedTemporaryFile call).
     # Initialize before the try so the rescue's `os.unlink(tmp_path)`
@@ -212,10 +184,6 @@ def store(
     tmp_path: Optional[str] = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Stamp the moment of analysis so cache-hit renders show when the
-        # decision was actually generated, not the time the user tapped
-        # the button. Caller can override (e.g. for backfilled fixtures);
-        # default to "now" so callers don't need to pass anything.
         payload = {
             "final_state": final_state,
             "signal": signal,
@@ -240,10 +208,11 @@ def store(
         except Exception:
             # Drop the partial tempfile so the dir doesn't accumulate
             # orphan .tmp leftovers across repeated failures.
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
             raise
         # Lazy eviction runs AFTER the atomic write succeeds — earlier
         # code swept stale siblings before the write, so a mid-write
@@ -258,28 +227,3 @@ def store(
                     pass
     except Exception as e:
         logger.warning("result_cache: failed to write %s: %s", path, e)
-
-
-def invalidate(
-    provider: str,
-    deep: str,
-    quick: str,
-    ticker: str,
-    date_iso: str,
-    rounds: int = 1,
-    effort: Optional[str] = None,
-) -> bool:
-    """Remove the entry. Returns True if a file was removed.
-
-    Used by `/refresh <TICKER>` so the next run pays the full LLM cost
-    again — useful when intraday data has shifted enough that the user
-    wants a fresh take, or when the previous run produced a bad result."""
-    path = _path_for(provider, deep, quick, ticker, date_iso, rounds, effort)
-    try:
-        path.unlink()
-        return True
-    except FileNotFoundError:
-        return False
-    except OSError as e:
-        logger.warning("result_cache: failed to remove %s: %s", path, e)
-        return False

@@ -1,10 +1,19 @@
 """Smoke tests for the same-day result cache (`tg_bot.cache`).
 
+The cache API now takes `AnalysisConfigKey` directly (no positional
+provider/deep/quick/rounds/effort explosion), and the cache-hygiene
+gate is enforced inside `cache.store` itself (no `_should_cache_publish`
+caller predicate). Both shifts converge the public surface to:
+
+    lookup(key, ticker, date_iso) -> dict | None
+    store(key, ticker, date_iso, final_state, signal, telegraph_url)
+    today_iso() -> str  (local-date convenience)
+
 Each scenario uses a fresh temporary `TG_BOT_DATA_DIR` so disk state is
 isolated. Covers the storage layer in isolation; integration with the
-full /watch and digest fan-out is exercised by the manual test in
-docs/MANUAL_INSTALL.md (no-LLM stub) and the existing `smoke_digest.py`
-fan-out tests (which see the cache via `_analyze_one_for_digest`).
+full /watch and digest fan-out is exercised by the existing
+`smoke_digest.py` fan-out tests (which see the cache via
+`_analyze_one_for_digest`).
 
 Run with: .venv/bin/python3 scripts/smoke_cache.py
 """
@@ -27,6 +36,8 @@ FAIL = "\033[91m✗\033[0m"
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from tg_bot.config_key import AnalysisConfigKey  # noqa: E402
+
 
 def _fresh_data_dir() -> Path:
     """New tempdir + repoint TG_BOT_DATA_DIR. The cache module reads the
@@ -37,6 +48,13 @@ def _fresh_data_dir() -> Path:
     return d
 
 
+# Default key used by most scenarios — the openai/gpt-4o/o4-mini default
+# triple. Tests that need to exercise key-identity behavior (different
+# providers, custom rounds, effort) construct their own keys inline.
+DEFAULT_KEY = AnalysisConfigKey(provider="openai", deep="gpt-4o", quick="o4-mini")
+DEFAULT_SLUG = "openai__gpt-4o__o4-mini"
+
+
 # Sample (final_state, signal, telegraph_url) — minimal structure that
 # matches what `_run_analysis_for_ticker` writes via `result_cache.store`.
 SAMPLE_STATE = {
@@ -44,12 +62,14 @@ SAMPLE_STATE = {
     "trader_investment_plan": "Buy 100 shares ...",
 }
 
+PLACEHOLDER_URL = "https://telegra.ph/test-placeholder"
+
 
 async def test_lookup_miss_returns_none() -> None:
     _fresh_data_dir()
     from tg_bot import cache
 
-    assert cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09") is None
+    assert cache.lookup(DEFAULT_KEY, "NVDA", "2026-05-09") is None
 
 
 async def test_store_then_lookup_roundtrip() -> None:
@@ -57,16 +77,14 @@ async def test_store_then_lookup_roundtrip() -> None:
     from tg_bot import cache
 
     cache.store(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
+        DEFAULT_KEY,
         "NVDA",
         "2026-05-09",
         SAMPLE_STATE,
         "BUY",
         "https://telegra.ph/NVDA-05-09",
     )
-    got = cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09")
+    got = cache.lookup(DEFAULT_KEY, "NVDA", "2026-05-09")
     assert got is not None
     assert got["signal"] == "BUY"
     assert got["telegraph_url"] == "https://telegra.ph/NVDA-05-09"
@@ -79,28 +97,23 @@ async def test_different_config_isolates() -> None:
     _fresh_data_dir()
     from tg_bot import cache
 
-    cache.store(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
-        "NVDA",
-        "2026-05-09",
-        SAMPLE_STATE,
-        "BUY",
-        "https://t.ly/openai",
+    key_openai = DEFAULT_KEY
+    key_deepseek = AnalysisConfigKey(
+        provider="deepseek", deep="deepseek-v4", quick="deepseek-chat"
     )
     cache.store(
-        "deepseek",
-        "deepseek-v4",
-        "deepseek-chat",
+        key_openai, "NVDA", "2026-05-09", SAMPLE_STATE, "BUY", "https://t.ly/openai"
+    )
+    cache.store(
+        key_deepseek,
         "NVDA",
         "2026-05-09",
         SAMPLE_STATE,
         "SELL",
         "https://t.ly/deepseek",
     )
-    a = cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09")
-    b = cache.lookup("deepseek", "deepseek-v4", "deepseek-chat", "NVDA", "2026-05-09")
+    a = cache.lookup(key_openai, "NVDA", "2026-05-09")
+    b = cache.lookup(key_deepseek, "NVDA", "2026-05-09")
     assert a["signal"] == "BUY" and a["telegraph_url"].endswith("openai")
     assert b["signal"] == "SELL" and b["telegraph_url"].endswith("deepseek")
 
@@ -111,44 +124,15 @@ async def test_same_config_shares_across_users() -> None:
     _fresh_data_dir()
     from tg_bot import cache
 
-    # Simulate user A's run.
-    cache.store(
-        "deepseek",
-        "deepseek-v4",
-        "deepseek-chat",
-        "NVDA",
-        "2026-05-09",
-        SAMPLE_STATE,
-        "BUY",
-        "https://t.ly/x",
+    key = AnalysisConfigKey(
+        provider="deepseek", deep="deepseek-v4", quick="deepseek-chat"
     )
+    # Simulate user A's run.
+    cache.store(key, "NVDA", "2026-05-09", SAMPLE_STATE, "BUY", "https://t.ly/x")
     # User B (different user_id, same /config) — no second store call.
     # Their lookup should hit user A's cache file.
-    got = cache.lookup("deepseek", "deepseek-v4", "deepseek-chat", "NVDA", "2026-05-09")
+    got = cache.lookup(key, "NVDA", "2026-05-09")
     assert got is not None and got["signal"] == "BUY"
-
-
-async def test_invalidate_removes_entry() -> None:
-    _fresh_data_dir()
-    from tg_bot import cache
-
-    cache.store(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
-        "NVDA",
-        "2026-05-09",
-        SAMPLE_STATE,
-        "BUY",
-        "https://telegra.ph/test-placeholder",
-    )
-    assert cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09") is not None
-    assert cache.invalidate("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09") is True
-    assert cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09") is None
-    # Second invalidate on already-gone entry: returns False, no error.
-    assert (
-        cache.invalidate("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09") is False
-    )
 
 
 async def test_lazy_eviction_drops_old_dates() -> None:
@@ -158,20 +142,11 @@ async def test_lazy_eviction_drops_old_dates() -> None:
     from tg_bot import cache
 
     # Yesterday's run.
-    cache.store(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
-        "NVDA",
-        "2026-05-08",
-        SAMPLE_STATE,
-        "BUY",
-        "https://telegra.ph/test-placeholder",
-    )
+    cache.store(DEFAULT_KEY, "NVDA", "2026-05-08", SAMPLE_STATE, "BUY", PLACEHOLDER_URL)
     yesterday_path = (
         Path(os.environ["TG_BOT_DATA_DIR"])
         / "result_cache"
-        / "openai__gpt-4o__o4-mini"
+        / DEFAULT_SLUG
         / "NVDA"
         / "2026-05-08.json"
     )
@@ -179,14 +154,7 @@ async def test_lazy_eviction_drops_old_dates() -> None:
 
     # Today's run lands → yesterday's gets swept.
     cache.store(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
-        "NVDA",
-        "2026-05-09",
-        SAMPLE_STATE,
-        "HOLD",
-        "https://telegra.ph/test-placeholder",
+        DEFAULT_KEY, "NVDA", "2026-05-09", SAMPLE_STATE, "HOLD", PLACEHOLDER_URL
     )
     assert not yesterday_path.is_file(), "yesterday's entry should be evicted"
     today_path = yesterday_path.with_name("2026-05-09.json")
@@ -198,51 +166,33 @@ async def test_corrupt_file_returns_none() -> None:
     _fresh_data_dir()
     from tg_bot import cache
 
-    cache.store(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
-        "NVDA",
-        "2026-05-09",
-        SAMPLE_STATE,
-        "BUY",
-        "https://telegra.ph/test-placeholder",
-    )
+    cache.store(DEFAULT_KEY, "NVDA", "2026-05-09", SAMPLE_STATE, "BUY", PLACEHOLDER_URL)
     # Stomp the file with garbage.
     path = (
         Path(os.environ["TG_BOT_DATA_DIR"])
         / "result_cache"
-        / "openai__gpt-4o__o4-mini"
+        / DEFAULT_SLUG
         / "NVDA"
         / "2026-05-09.json"
     )
     path.write_text("not valid json {{{")
-    got = cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09")
+    got = cache.lookup(DEFAULT_KEY, "NVDA", "2026-05-09")
     assert got is None
 
 
 async def test_slug_handles_special_chars() -> None:
-    """Provider/model strings with `/`, `:`, etc. don't blow up the path."""
+    """Provider/model strings with `/`, `:`, etc. don't blow up the path —
+    `AnalysisConfigKey.slug()` sanitizes these to filesystem-safe form."""
     _fresh_data_dir()
     from tg_bot import cache
 
-    cache.store(
-        "openrouter/anthropic",
-        "claude-sonnet-4:thinking",
-        "haiku-4.5",
-        "BRK-B",
-        "2026-05-09",
-        SAMPLE_STATE,
-        "BUY",
-        "https://telegra.ph/test-placeholder",
+    key = AnalysisConfigKey(
+        provider="openrouter/anthropic",
+        deep="claude-sonnet-4:thinking",
+        quick="haiku-4.5",
     )
-    got = cache.lookup(
-        "openrouter/anthropic",
-        "claude-sonnet-4:thinking",
-        "haiku-4.5",
-        "BRK-B",
-        "2026-05-09",
-    )
+    cache.store(key, "BRK-B", "2026-05-09", SAMPLE_STATE, "BUY", PLACEHOLDER_URL)
+    got = cache.lookup(key, "BRK-B", "2026-05-09")
     assert got is not None and got["signal"] == "BUY"
 
 
@@ -274,53 +224,31 @@ async def test_non_serializable_objects_in_state() -> None:
         "final_trade_decision": "BUY",
         "messages": [FakeMessage("hi"), OpaqueMessage("opaque")],
     }
-    cache.store(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
-        "NVDA",
-        "2026-05-09",
-        state,
-        "BUY",
-        "https://telegra.ph/test-placeholder",
-    )
-    got = cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09")
+    cache.store(DEFAULT_KEY, "NVDA", "2026-05-09", state, "BUY", PLACEHOLDER_URL)
+    got = cache.lookup(DEFAULT_KEY, "NVDA", "2026-05-09")
     assert got is not None, "store must not fail on LangChain-style messages"
     msgs = got["final_state"]["messages"]
     assert msgs[0]["content"] == "hi"
     assert msgs[1]["content"] == "opaque" and msgs[1]["__type__"] == "OpaqueMessage"
     # And no orphan tempfiles linger.
     cache_dir = (
-        Path(os.environ["TG_BOT_DATA_DIR"])
-        / "result_cache"
-        / "openai__gpt-4o__o4-mini"
-        / "NVDA"
+        Path(os.environ["TG_BOT_DATA_DIR"]) / "result_cache" / DEFAULT_SLUG / "NVDA"
     )
     assert list(cache_dir.glob("*.tmp")) == []
 
 
 async def test_default_rounds_effort_keeps_slug() -> None:
     """Default users (rounds=1, effort=None) must keep the original slug
-    shape so existing on-disk cache entries don't get orphaned when the
-    rounds/effort feature ships."""
+    shape (`provider__deep__quick`) so existing on-disk cache entries
+    don't get orphaned when the rounds/effort feature ships."""
     _fresh_data_dir()
     from tg_bot import cache
 
-    # Default kwargs (omitted) should land in the same dir as before.
-    cache.store(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
-        "NVDA",
-        "2026-05-09",
-        SAMPLE_STATE,
-        "BUY",
-        "https://telegra.ph/test-placeholder",
-    )
+    cache.store(DEFAULT_KEY, "NVDA", "2026-05-09", SAMPLE_STATE, "BUY", PLACEHOLDER_URL)
     expected = (
         Path(os.environ["TG_BOT_DATA_DIR"])
         / "result_cache"
-        / "openai__gpt-4o__o4-mini"
+        / DEFAULT_SLUG
         / "NVDA"
         / "2026-05-09.json"
     )
@@ -333,44 +261,16 @@ async def test_custom_rounds_isolate_slot() -> None:
     _fresh_data_dir()
     from tg_bot import cache
 
-    cache.store(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
-        "NVDA",
-        "2026-05-09",
-        SAMPLE_STATE,
-        "BUY",
-        "https://telegra.ph/test-placeholder",
-        rounds=1,
+    key_r1 = AnalysisConfigKey(
+        provider="openai", deep="gpt-4o", quick="o4-mini", rounds=1
     )
-    cache.store(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
-        "NVDA",
-        "2026-05-09",
-        SAMPLE_STATE,
-        "SELL",
-        "https://telegra.ph/test-placeholder",
-        rounds=2,
+    key_r2 = AnalysisConfigKey(
+        provider="openai", deep="gpt-4o", quick="o4-mini", rounds=2
     )
-    a = cache.lookup(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
-        "NVDA",
-        "2026-05-09",
-        rounds=1,
-    )
-    b = cache.lookup(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
-        "NVDA",
-        "2026-05-09",
-        rounds=2,
-    )
+    cache.store(key_r1, "NVDA", "2026-05-09", SAMPLE_STATE, "BUY", PLACEHOLDER_URL)
+    cache.store(key_r2, "NVDA", "2026-05-09", SAMPLE_STATE, "SELL", PLACEHOLDER_URL)
+    a = cache.lookup(key_r1, "NVDA", "2026-05-09")
+    b = cache.lookup(key_r2, "NVDA", "2026-05-09")
     assert a is not None and a["signal"] == "BUY"
     assert b is not None and b["signal"] == "SELL"
 
@@ -380,28 +280,14 @@ async def test_custom_effort_isolates_slot() -> None:
     _fresh_data_dir()
     from tg_bot import cache
 
-    cache.store(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
-        "NVDA",
-        "2026-05-09",
-        SAMPLE_STATE,
-        "HOLD",
-        "https://telegra.ph/test-placeholder",
-        effort="high",
+    key_high = AnalysisConfigKey(
+        provider="openai", deep="gpt-4o", quick="o4-mini", effort="high"
     )
+    cache.store(key_high, "NVDA", "2026-05-09", SAMPLE_STATE, "HOLD", PLACEHOLDER_URL)
     # Default effort=None lookup should miss high-effort entry.
-    miss = cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09")
+    miss = cache.lookup(DEFAULT_KEY, "NVDA", "2026-05-09")
     assert miss is None
-    hit = cache.lookup(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
-        "NVDA",
-        "2026-05-09",
-        effort="high",
-    )
+    hit = cache.lookup(key_high, "NVDA", "2026-05-09")
     assert hit is not None and hit["signal"] == "HOLD"
 
 
@@ -411,17 +297,8 @@ async def test_generated_at_persisted() -> None:
     _fresh_data_dir()
     from tg_bot import cache
 
-    cache.store(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
-        "NVDA",
-        "2026-05-09",
-        SAMPLE_STATE,
-        "BUY",
-        "https://telegra.ph/test-placeholder",
-    )
-    got = cache.lookup("openai", "gpt-4o", "o4-mini", "NVDA", "2026-05-09")
+    cache.store(DEFAULT_KEY, "NVDA", "2026-05-09", SAMPLE_STATE, "BUY", PLACEHOLDER_URL)
+    got = cache.lookup(DEFAULT_KEY, "NVDA", "2026-05-09")
     ts = got.get("generated_at")
     assert isinstance(ts, str) and "T" in ts and ts.endswith("+00:00"), (
         f"expected ISO UTC string, got {ts!r}"
@@ -435,19 +312,12 @@ async def test_atomic_write_is_complete_json() -> None:
     from tg_bot import cache
 
     cache.store(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
-        "NVDA",
-        "2026-05-09",
-        SAMPLE_STATE,
-        "BUY",
-        "https://example.com",
+        DEFAULT_KEY, "NVDA", "2026-05-09", SAMPLE_STATE, "BUY", "https://example.com"
     )
     path = (
         Path(os.environ["TG_BOT_DATA_DIR"])
         / "result_cache"
-        / "openai__gpt-4o__o4-mini"
+        / DEFAULT_SLUG
         / "NVDA"
         / "2026-05-09.json"
     )
@@ -460,58 +330,41 @@ async def test_atomic_write_is_complete_json() -> None:
     assert leftover == [], f"unexpected leftover tempfiles: {leftover}"
 
 
-async def test_lookup_returns_poisoned_entry_as_is() -> None:
-    """`cache.lookup` returns poisoned entries (telegraph_url=None) as-is.
-    Earlier iterations of this gate treated poisoned entries as a miss,
-    which triggered a full LLM re-run — wasteful since the cached
-    `final_state` was intact, only the publish failed.
-
-    Republish-only policy now lives in
-    `callbacks._run_analysis_for_ticker` and `_analyze_one_for_digest`:
-    they detect the poisoned state and re-publish from the cached
-    `final_state` (no LLM run). Putting that policy in the cache module
-    would conflate storage with rendering."""
+async def test_store_gate_skips_falsy_telegraph_url() -> None:
+    """Cache-hygiene gate is now built into `cache.store`. Passing a None
+    or empty `telegraph_url` is a no-op — no file is written. Caching a
+    failed publish would trap the user: every subsequent `/watch` faithfully
+    replays "Instant View unavailable" until midnight rollover. The store
+    gate prevents that at the write site, so callers can pass the URL
+    directly without remembering to gate."""
     _fresh_data_dir()
     from tg_bot import cache
 
-    # Write a poisoned entry directly (bypassing the write-time gate to
-    # simulate a legacy condition).
+    # None URL → no-op
+    cache.store(DEFAULT_KEY, "INTU", "2026-05-11", SAMPLE_STATE, "HOLD", None)
+    assert cache.lookup(DEFAULT_KEY, "INTU", "2026-05-11") is None
+
+    # Empty string URL → no-op (some SDK paths could plausibly return "").
+    cache.store(DEFAULT_KEY, "INTU", "2026-05-11", SAMPLE_STATE, "HOLD", "")
+    assert cache.lookup(DEFAULT_KEY, "INTU", "2026-05-11") is None
+
+    # Real URL → stored normally.
     cache.store(
-        "openai",
-        "gpt-4o",
-        "o4-mini",
-        "INTU",
-        "2026-05-11",
-        SAMPLE_STATE,
-        "HOLD",
-        None,  # poisoned: publish failed, telegraph_url is None
+        DEFAULT_KEY, "INTU", "2026-05-11", SAMPLE_STATE, "BUY", "https://telegra.ph/x"
     )
-    got = cache.lookup("openai", "gpt-4o", "o4-mini", "INTU", "2026-05-11")
-    assert got is not None, "lookup must return the poisoned entry, not None"
-    assert got["telegraph_url"] is None
-    assert got["signal"] == "HOLD"
-    # The cached `final_state` is intact — the republish-only path
-    # reuses it without re-running the LLM.
-    assert got["final_state"]["final_trade_decision"].startswith("Final Trading")
+    got = cache.lookup(DEFAULT_KEY, "INTU", "2026-05-11")
+    assert got is not None and got["telegraph_url"] == "https://telegra.ph/x"
 
 
-async def test_should_cache_publish_skips_none() -> None:
-    """Cache-hygiene gate enforced by `_should_cache_publish` in
-    `tg_bot.handlers.callbacks`. The analysis handlers gate every
-    `result_cache.store(...)` call on this predicate so a transient
-    Telegraph publish failure doesn't poison the cache. The
-    `_run_analysis_for_ticker` and `_analyze_one_for_digest` paths both
-    rely on this — if it ever returns True for None, a single bad
-    publish locks the cache slot to 'Instant View unavailable' for the
-    rest of the day."""
-    from tg_bot.handlers.callbacks import _should_cache_publish
+async def test_today_iso_returns_local_iso_date() -> None:
+    """`today_iso()` returns the LOCAL-date ISO string — matches both the
+    cache key AND tradingagents' on-disk log filename convention. Using a
+    UTC stamp would 404 for late-night runs from negative-UTC zones."""
+    from tg_bot import cache
+    from datetime import date
 
-    # Real URL → caller stores normally.
-    assert _should_cache_publish("https://telegra.ph/INTU-Analysis-05-11")
-    # None URL → caller skips store, letting next tap re-run + retry publish.
-    assert not _should_cache_publish(None)
-    # Empty string defends against accidental falsy non-None values too.
-    assert not _should_cache_publish("")
+    out = cache.today_iso()
+    assert out == date.today().isoformat()
 
 
 SCENARIOS = [
@@ -519,7 +372,6 @@ SCENARIOS = [
     ("store + lookup round-trip", test_store_then_lookup_roundtrip),
     ("different config keys isolate", test_different_config_isolates),
     ("same config shares across users", test_same_config_shares_across_users),
-    ("invalidate removes entry", test_invalidate_removes_entry),
     ("lazy eviction drops old dates", test_lazy_eviction_drops_old_dates),
     ("corrupt file returns None", test_corrupt_file_returns_none),
     ("slug handles special chars", test_slug_handles_special_chars),
@@ -530,13 +382,10 @@ SCENARIOS = [
     ("custom effort isolate cache slot", test_custom_effort_isolates_slot),
     ("generated_at stored on every write", test_generated_at_persisted),
     (
-        "lookup returns poisoned entry as-is (republish handled by callers)",
-        test_lookup_returns_poisoned_entry_as_is,
+        "store gate skips falsy telegraph_url (cache-hygiene at write site)",
+        test_store_gate_skips_falsy_telegraph_url,
     ),
-    (
-        "_should_cache_publish gates None telegraph_url out of cache",
-        test_should_cache_publish_skips_none,
-    ),
+    ("today_iso() returns local-date ISO", test_today_iso_returns_local_iso_date),
 ]
 
 

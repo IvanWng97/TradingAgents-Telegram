@@ -174,6 +174,31 @@ def test_sanitizer_drops_unknown_tag_preserves_inner_text() -> None:
     assert "<unknown>" not in out, out
 
 
+def test_sanitizer_anchor_with_whitespace_child() -> None:
+    """`<a href="x"> </a>` (whitespace-only child) must produce a
+    well-formed result. A prior review flagged this case as a potential
+    dangling-open-tag bug; this scenario pins the actual behavior so a
+    future refactor of `handle_endtag` can't regress it. Trace: starttag
+    appends `<a href=...>`, handle_data appends `' '`, endtag sees the
+    space (not the open tag) at `_parts[-1]` and emits `</a>` via the
+    else branch — closed pair, valid HTML."""
+    out = sanitize_html_for_telegram('<a href="https://x.test/"> </a>')
+    # `<a>` open and `</a>` close present, exactly once each.
+    assert out.count('<a href="') == 1, out
+    assert out.count("</a>") == 1, out
+    # And the open is positioned before the close.
+    assert out.index('<a href="') < out.index("</a>"), out
+
+
+def test_sanitizer_anchor_empty_drops_open() -> None:
+    """`<a href="x"></a>` (zero-child) drops the open tag instead of
+    leaving a dangling empty `<a></a>` pair. This is the intended
+    behavior of the `_parts[-1].startswith('<a href="')` check."""
+    out = sanitize_html_for_telegram('<a href="https://x.test/"></a>')
+    assert '<a href="' not in out, out
+    assert "</a>" not in out, out
+
+
 def test_sanitizer_escapes_inner_text() -> None:
     """The parser decodes entities; emit MUST re-escape so the resulting
     HTML stays valid for Telegram."""
@@ -669,6 +694,14 @@ SCENARIOS = [
         test_sanitizer_drops_unknown_tag_preserves_inner_text,
     ),
     ("sanitizer re-escapes inner text", test_sanitizer_escapes_inner_text),
+    (
+        "sanitizer: <a> with whitespace child stays well-formed",
+        test_sanitizer_anchor_with_whitespace_child,
+    ),
+    (
+        "sanitizer: empty <a></a> drops the open tag",
+        test_sanitizer_anchor_empty_drops_open,
+    ),
     (
         "sanitizer keeps blockquote expandable attribute",
         test_sanitizer_keeps_blockquote_expandable_attribute,

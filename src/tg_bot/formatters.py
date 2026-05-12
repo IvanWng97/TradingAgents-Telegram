@@ -217,19 +217,10 @@ DECISION_EMOJI = {
 }
 
 
-def build_config_summary(config: dict) -> str:
-    """Caption "via" line — thin delegator. The shape lives in
-    `AnalysisConfigKey.caption()` which is the single source of truth
-    shared with the cache slug and the Telegraph title suffix (see
-    `config_key.py`)."""
-    from tg_bot.config_key import AnalysisConfigKey
-
-    return AnalysisConfigKey.from_config(config).caption()
-
-
 # Report sections in decision-relevance order. The Telegraph packer adds
-# sections from the top until the rendered HTML approaches the 64 KB cap;
-# the full .md attachment emits all of them unconditionally. Keys map to
+# sections from the top until the rendered HTML approaches the 40,000-char
+# internal budget (see `_TELEGRAPH_HTML_BUDGET` below); the full .md
+# attachment emits all of them unconditionally. Keys map to
 # `final_state` fields populated by tradingagents.
 _REPORT_SECTIONS: list[tuple[str, str]] = [
     ("Final Trading Decision", "final_trade_decision"),
@@ -254,7 +245,6 @@ _REPORT_SECTIONS: list[tuple[str, str]] = [
 # under the documented cap but evidently over the practical one. The
 # tightened budget below forces the packer to drop a section earlier
 # rather than ship oversized content and get hard-rejected.
-_TELEGRAPH_HTML_LIMIT = 65536
 _TELEGRAPH_HTML_BUDGET = 40000  # ~25-40% headroom for Telegraph's Node-tree inflation
 
 
