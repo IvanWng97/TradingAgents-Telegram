@@ -177,7 +177,7 @@ A change in this repo usually touches more than just code — these surfaces dri
 
 ## CI/CD
 
-`.github/workflows/`: `lint.yml` (Ruff), `smoke.yml` (full `pip install -e .` + `bash scripts/run_smoke.sh` on every PR + push to main), `codeql.yml` (`security-extended` Python, weekly cron), `claude.yml` (on-demand `@claude` review in PR threads), `dependabot.yml` (weekly bumps). `docker-build.yml` dual-pushes multi-arch images to Docker Hub + GHCR; the daily cron resolves upstream `tradingagents` HEAD via `git ls-remote` and skips the build when the SHA hasn't changed.
+`.github/workflows/`: `lint.yml` (Ruff), `smoke.yml` (full `pip install -e .` + `bash scripts/run_smoke.sh` on every PR + push to main), `codeql.yml` (`security-extended` Python, weekly cron), `claude.yml` (on-demand `@claude` review in PR threads), `claude-auto-review.yml` (Claude review on every PR `opened`/`reopened`/`ready_for_review`; skips dependabot + the repo owner to avoid credit drain on internal PRs; `synchronize` deliberately omitted so re-pushes don't re-burn credits — use `@claude review` to re-trigger), `dependabot.yml` (weekly bumps). `docker-build.yml` dual-pushes multi-arch images to Docker Hub + GHCR; the daily cron resolves upstream `tradingagents` HEAD via `git ls-remote` and skips the build when the SHA hasn't changed.
 
 ## Known limitations
 

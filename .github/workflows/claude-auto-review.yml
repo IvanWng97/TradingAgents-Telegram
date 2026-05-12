@@ -1,0 +1,78 @@
+name: Claude Auto-Review
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+    # Note: `synchronize` deliberately omitted. A typical PR sees 3-8
+    # push events while iterating — auto-reviewing each one burns Claude
+    # Code credits on diffs you already know about. To re-review after
+    # fixes, comment `@claude review` on the PR (the manual flow in
+    # claude.yml takes over).
+
+# Cancel an in-flight review when a new event lands on the same PR.
+# Mirrors lint.yml + smoke.yml pacing.
+concurrency:
+  group: claude-auto-review-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write   # Post the review as a PR comment.
+  id-token: write        # Required by the Claude Code action.
+  actions: read          # So Claude can read CI results when reviewing.
+
+jobs:
+  review:
+    # Skip noisy authors:
+    # - dependabot[bot]: version bumps with no logic to review; ruff +
+    #   smoke already catch breakages.
+    # - IvanWng97: skip our own internal PRs to avoid the
+    #   "I just pushed, please review me" credit drain. External
+    #   contributors and other team members still get reviews.
+    if: github.actor != 'dependabot[bot]' && github.actor != 'IvanWng97'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Full history so Claude can diff against base for context.
+          fetch-depth: 0
+
+      - name: Claude review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          additional_permissions: |
+            actions: read
+          prompt: |
+            Review the diff on this pull request against the base branch.
+
+            Read `CLAUDE.md` first — it's the architecture map. The 10
+            cross-cutting invariants are the highest-priority check
+            surface; flag any violation.
+
+            Focus only on HIGH-confidence findings:
+            - Real bugs (correctness, race conditions, security holes,
+              missing-await, resource leaks)
+            - Invariant violations from CLAUDE.md (especially #1 cache
+              key triplet, #3 reply_markup re-attach, #4 parse_mode
+              carve-out, #5 cancel race-close)
+            - Missing smoke coverage for new code paths (per CLAUDE.md
+              Workflow §4 — "new behavior needs a new scenario")
+            - Cross-cutting drift (CLAUDE.md / README / smoke /
+              handler contracts diverging)
+
+            Do NOT flag:
+            - Formatting, style, missing docstrings, naming nits
+            - "Consider extracting X" / "could refactor further"
+            - Anything ruff already catches (ruff CI is a separate
+              required check)
+            - Speculative future scenarios
+
+            Output format: a single PR comment. If nothing actionable,
+            say exactly "no actionable findings." Otherwise: numbered
+            list of findings with file:line, severity (HIGH/MEDIUM),
+            and a concrete suggested fix. Cap at 5 findings — pick the
+            highest-priority. Reviews longer than that get ignored.
+
+            Keep under 600 words.
