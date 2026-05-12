@@ -390,6 +390,14 @@ async def _run_analysis_for_ticker(
     - "cancelled" — user tapped Cancel mid-run.
     - "unavailable" — tradingagents module not loaded.
     """
+    # INVARIANT — keep in sync with `_analyze_one_for_digest`. The two
+    # analysis paths share three structural surfaces that must drift
+    # together: (1) the race-close cancel-event checks after `to_thread`
+    # and after Telegraph publish, (2) the `AnalysisConfigKey` cache-key
+    # construction via `build_user_config → from_config`, (3) the
+    # Telegraph title via `key.telegraph_title(ticker)`. If you change
+    # one path's handling of any of these, change the other to match.
+    #
     # /status counter — counts each analysis attempt across the whole bot
     # (both cache hits and live runs, since the user requested an analysis
     # either way).
@@ -1377,6 +1385,14 @@ async def _analyze_one_for_digest(
     `reporter`, when supplied, drives the per-ticker step display in the
     shared digest message — same LangChain hook as the manual flow.
     """
+    # INVARIANT — keep in sync with `_run_analysis_for_ticker`. The two
+    # analysis paths share three structural surfaces that must drift
+    # together: (1) the race-close cancel-event checks after `to_thread`
+    # and after Telegraph publish, (2) the `AnalysisConfigKey` cache-key
+    # construction via `build_user_config → from_config`, (3) the
+    # Telegraph title via `key.telegraph_title(ticker)`. If you change
+    # one path's handling of any of these, change the other to match.
+    #
     # Cache short-circuit before acquiring a semaphore slot — a cached
     # result needs no LLM call, so we shouldn't burn a slot or trigger
     # the "Starting…" reporter event.
@@ -1422,6 +1438,16 @@ async def _analyze_one_for_digest(
             return None
         if final_state is None:
             return None
+
+        # Race-close check: if the cancel button was tapped while
+        # `to_thread(propagate)` was on the wire, skip the Telegraph
+        # publish + cache store so we don't pay for a network round-trip
+        # the user already abandoned (and don't poison the cache with a
+        # post-cancel result). Mirrors the two-check pattern in
+        # `_run_analysis_for_ticker`.
+        if reporter is not None and reporter.cancel_event.is_set():
+            logger.info("digest: cancel detected post-propagate for %s", ticker)
+            raise CancelledByUserError(f"digest cancel for {ticker}")
 
         # Publish the per-ticker Telegraph page so the digest summary can
         # link to a full report per row. Skip silently on failure — the
@@ -1986,8 +2012,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data.startswith("hist_t:"):
         await _handle_history_ticker(query, data.split(":", 1)[1])
     elif data.startswith("hist:"):
-        _, ticker, date_str = data.split(":", 2)
-        await _handle_history(query, ticker, date_str)
+        parts = data.split(":", 2)
+        if len(parts) == 3:
+            await _handle_history(query, parts[1], parts[2])
+        else:
+            logger.warning("Malformed hist: callback_data %r", data)
     elif data.startswith("getmd:"):
-        _, ticker, date_str = data.split(":", 2)
-        await _handle_get_full_md(query, context, ticker, date_str)
+        parts = data.split(":", 2)
+        if len(parts) == 3:
+            await _handle_get_full_md(query, context, parts[1], parts[2])
+        else:
+            logger.warning("Malformed getmd: callback_data %r", data)
