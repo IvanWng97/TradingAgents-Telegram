@@ -138,6 +138,66 @@ async def test_edit_failure_falls_back_to_create() -> None:
     assert len(stub.create_calls) == 1
 
 
+async def test_edit_transient_error_retries_then_succeeds() -> None:
+    """Edit-page transient errors get the same one-retry treatment as
+    create. The earlier revision only retried `create_page` — a TCP
+    reset during `edit_page` would log a warning, fall through to
+    `create_page`, and silently mint a NEW URL, defeating the whole
+    edit-in-place fix. This scenario pins that fix."""
+    if not tc._TRANSIENT_NET_ERRORS:
+        return
+    transient_cls = tc._TRANSIENT_NET_ERRORS[0]
+    stub = _StubClient(
+        edit_responses=[transient_cls("conn reset"), {"path": "T-Analysis-05-10"}]
+    )
+    _install(stub)
+    orig_sleep = asyncio.sleep
+    asyncio.sleep = lambda s: orig_sleep(0)  # type: ignore[assignment]
+    try:
+        url = await tc.publish_to_telegraph(
+            "T Analysis", "<p>x</p>", edit_path="T-Analysis-05-10"
+        )
+    finally:
+        asyncio.sleep = orig_sleep  # type: ignore[assignment]
+    # URL stays stable through the retry; no create_page involvement.
+    assert url == "https://telegra.ph/T-Analysis-05-10", url
+    assert len(stub.edit_calls) == 2
+    assert len(stub.create_calls) == 0
+
+
+async def test_edit_transient_error_exhausted_returns_none() -> None:
+    """If `edit_page` keeps hitting transient errors past the retry
+    budget, we MUST return None — falling through to `create_page` at
+    this point would generate a new URL and undo edit-in-place. The
+    caller's cache-hygiene gate will then skip the store so the next
+    tap retries the edit cleanly."""
+    if not tc._TRANSIENT_NET_ERRORS:
+        return
+    transient_cls = tc._TRANSIENT_NET_ERRORS[0]
+    stub = _StubClient(
+        edit_responses=[transient_cls("err1"), transient_cls("err2")],
+        # No create_responses scripted — if the code falls through
+        # to create_page (the bug we're guarding against), the stub
+        # returns its default `{"path": "new-path-1"}` and the URL
+        # assertion below catches that regression.
+    )
+    _install(stub)
+    orig_sleep = asyncio.sleep
+    asyncio.sleep = lambda s: orig_sleep(0)  # type: ignore[assignment]
+    try:
+        url = await tc.publish_to_telegraph(
+            "T Analysis", "<p>x</p>", edit_path="T-Analysis-05-10"
+        )
+    finally:
+        asyncio.sleep = orig_sleep  # type: ignore[assignment]
+    assert url is None, f"expected None on exhausted edit retries, got {url}"
+    assert len(stub.edit_calls) == 2
+    assert len(stub.create_calls) == 0, (
+        "transient edit failure must NOT fall through to create_page — "
+        "that would leak a new URL and defeat edit-in-place"
+    )
+
+
 async def test_no_edit_path_goes_directly_to_create() -> None:
     """Fresh runs (no prior cached URL) skip edit_page entirely."""
     stub = _StubClient(create_responses=[{"path": "T-Analysis-05-10"}])
@@ -216,8 +276,16 @@ SCENARIOS = [
     ),
     ("edit_path → edit_page first (URL stable)", test_edit_path_calls_edit_page_first),
     (
-        "edit_page failure → create_page fallback",
+        "edit_page non-transient failure → create_page fallback",
         test_edit_failure_falls_back_to_create,
+    ),
+    (
+        "edit_page transient error → retry → success (URL stable)",
+        test_edit_transient_error_retries_then_succeeds,
+    ),
+    (
+        "edit_page transient exhausted → None (NOT create_page fallback)",
+        test_edit_transient_error_exhausted_returns_none,
     ),
     ("no edit_path → create_page directly", test_no_edit_path_goes_directly_to_create),
     (

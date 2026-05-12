@@ -173,13 +173,11 @@ def lookup(
     collide with default-config runs. Defaults match DEFAULT_CONFIG so
     callers that don't set them keep their existing cache slot.
 
-    **Poisoned entries (`telegraph_url=None`) are returned as-is.** The
-    caller is responsible for the policy: `callbacks._run_analysis_for_ticker`
-    and `_analyze_one_for_digest` detect the poisoned state and re-publish
-    from the cached `final_state` (no LLM run needed — the LLM bill was
-    already paid; only the Telegraph publish needs to retry). Putting
-    this policy in the cache module would conflate storage with
-    rendering."""
+    Poisoned entries (`telegraph_url=None`) are returned as-is — the
+    cache module stays out of the rendering policy. Callers that care
+    about the missing URL handle it however they want (currently the
+    rendering path surfaces `⚠️ Instant View unavailable` and `/refresh`
+    is the recovery path)."""
     path = _path_for(provider, deep, quick, ticker, date_iso, rounds, effort)
     if not path.is_file():
         return None
@@ -207,17 +205,13 @@ def store(
     logged but don't propagate, since the live analysis flow is about
     to render the result regardless."""
     path = _path_for(provider, deep, quick, ticker, date_iso, rounds, effort)
+    # `tmp_path` may be referenced from the rescue branch on a tempfile
+    # constructor failure (e.g., disk full mid-NamedTemporaryFile call).
+    # Initialize before the try so the rescue's `os.unlink(tmp_path)`
+    # doesn't UnboundLocalError-mask the real exception.
+    tmp_path: Optional[str] = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Lazy eviction: while we have the directory open, drop any
-        # stale-date entries for this (config, ticker). Cheap (one
-        # listdir) and bounds disk growth without a separate cron job.
-        for sibling in path.parent.glob("*.json"):
-            if sibling.name != path.name:
-                try:
-                    sibling.unlink()
-                except OSError:
-                    pass
         # Stamp the moment of analysis so cache-hit renders show when the
         # decision was actually generated, not the time the user tapped
         # the button. Caller can override (e.g. for backfilled fixtures);
@@ -251,6 +245,17 @@ def store(
             except OSError:
                 pass
             raise
+        # Lazy eviction runs AFTER the atomic write succeeds — earlier
+        # code swept stale siblings before the write, so a mid-write
+        # failure would orphan yesterday's still-valid entry. The sweep
+        # is best-effort: an unlink error here doesn't roll back the
+        # successful write (the new entry is already on disk).
+        for sibling in path.parent.glob("*.json"):
+            if sibling.name != path.name:
+                try:
+                    sibling.unlink()
+                except OSError:
+                    pass
     except Exception as e:
         logger.warning("result_cache: failed to write %s: %s", path, e)
 

@@ -99,6 +99,35 @@ def _path_from_telegraph_url(url: str) -> Optional[str]:
     return url.rsplit("/", 1)[-1] or None
 
 
+async def _call_with_transient_retry(call, *args, **kwargs):
+    """Run a blocking Telegraph SDK call in a thread with one retry on
+    transient network errors (`ConnectionError` / `Timeout`). API-level
+    errors (`TelegraphException` — auth, content rejection, page not
+    found) propagate immediately because a re-attempt would fail
+    identically.
+
+    Reused by both `edit_page` (URL-stability path) and `create_page`
+    (fresh-publish path) so a transient blip on either doesn't degrade
+    behavior asymmetrically. Earlier revisions retried only on
+    `create_page` — a `ConnectionError` during `edit_page` would log
+    a warning, fall through to `create_page`, and silently leak a new
+    Telegraph URL — exactly the regression the edit-in-place plumbing
+    was added to prevent."""
+    for attempt in range(2):
+        try:
+            return await asyncio.to_thread(call, *args, **kwargs)
+        except _TRANSIENT_NET_ERRORS as e:
+            if attempt == 0:
+                logger.warning(
+                    "Telegraph network error (attempt 1, will retry in 1s): %s: %s",
+                    type(e).__name__,
+                    e,
+                )
+                await asyncio.sleep(1.0)
+                continue
+            raise
+
+
 async def publish_to_telegraph(
     title: str, content: str, edit_path: Optional[str] = None
 ) -> Optional[str]:
@@ -111,35 +140,55 @@ async def publish_to_telegraph(
     shareable URL while replacing the content — without it, every
     refresh creates a new page (Telegraph appends `-2`/`-3` suffixes on
     title collision) and old shared links go stale. When `edit_path` is
-    provided we try `edit_page` first; on any failure we fall through to
-    `create_page` so a missing/deleted page never blocks the new publish.
+    provided we try `edit_page` first. A *transient* failure on edit
+    (`ConnectionError`/`Timeout`) gets one retry; if it still fails, we
+    return None (don't fall through to `create_page` — that would leak a
+    new URL and defeat the whole edit-in-place fix). A *non-transient*
+    failure on edit (page deleted, auth drift, oversized content) falls
+    through to `create_page` so a broken edit-target doesn't block the
+    publish entirely. The caller's cache-hygiene gate ensures a None
+    return doesn't poison the cache.
 
     Resilience:
     - One retry with 1s backoff on transient network errors
-      (ConnectionError / Timeout). Telegraph has occasional flakiness and
-      losing the link to a one-off blip is the worse UX.
+      (ConnectionError / Timeout) — applied uniformly to both edit and
+      create paths via `_call_with_transient_retry`.
     - Failure log records input/cleaned HTML sizes + exception class so
       future failures can be triaged without re-instrumenting.
     """
     cleaned_html = sanitize_html_for_telegraph(content)
     client = _telegraph_client()
 
-    async def _try_edit_in_place() -> Optional[str]:
-        # `edit_page` returns the same `path` we passed in; the public
-        # URL stays stable across refresh cycles.
-        await asyncio.to_thread(
-            client.edit_page,
-            path=edit_path,
-            title=title,
-            html_content=cleaned_html,
-            author_name="TradingAgents Bot",
-        )
-        return f"https://telegra.ph/{edit_path}"
-
     if edit_path:
         try:
-            return await _try_edit_in_place()
+            await _call_with_transient_retry(
+                client.edit_page,
+                path=edit_path,
+                title=title,
+                html_content=cleaned_html,
+                author_name="TradingAgents Bot",
+            )
+            return f"https://telegra.ph/{edit_path}"
+        except _TRANSIENT_NET_ERRORS as e:
+            # Transient failure even after one retry — don't fall through
+            # to create_page; returning None lets the cache-hygiene gate
+            # skip the store so the next tap retries the edit cleanly.
+            logger.error(
+                "Telegraph edit_page transient failure after retry; "
+                "NOT falling back to create_page (would leak URL). "
+                "path=%r input_html=%d cleaned_html=%d type=%s: %s",
+                edit_path,
+                len(content),
+                len(cleaned_html),
+                type(e).__name__,
+                e,
+            )
+            return None
         except Exception as e:
+            # Non-transient edit failure (page deleted, content too big,
+            # auth issue) — fall through to create_page. User gets a
+            # fresh URL, which is acceptable degradation vs. blocking
+            # the publish on a broken edit-target.
             logger.warning(
                 "Telegraph edit_page failed for path=%r (will fall back to "
                 "create_page). type=%s: %s",
@@ -147,43 +196,21 @@ async def publish_to_telegraph(
                 type(e).__name__,
                 e,
             )
-            # Fall through to create_page below.
 
-    for attempt in range(2):
-        try:
-            page = await asyncio.to_thread(
-                client.create_page,
-                title=title,
-                html_content=cleaned_html,
-                author_name="TradingAgents Bot",
-            )
-            return f"https://telegra.ph/{page['path']}"
-        except _TRANSIENT_NET_ERRORS as e:
-            if attempt == 0:
-                logger.warning(
-                    "Telegraph network error (attempt 1, will retry in 1s): %s: %s",
-                    type(e).__name__,
-                    e,
-                )
-                await asyncio.sleep(1.0)
-                continue
-            logger.error(
-                "Failed to publish to Telegraph after retry. "
-                "input_html=%d cleaned_html=%d type=%s: %s",
-                len(content),
-                len(cleaned_html),
-                type(e).__name__,
-                e,
-            )
-            return None
-        except Exception as e:
-            logger.error(
-                "Failed to publish to Telegraph. "
-                "input_html=%d cleaned_html=%d type=%s: %s",
-                len(content),
-                len(cleaned_html),
-                type(e).__name__,
-                e,
-            )
-            return None
-    return None
+    try:
+        page = await _call_with_transient_retry(
+            client.create_page,
+            title=title,
+            html_content=cleaned_html,
+            author_name="TradingAgents Bot",
+        )
+        return f"https://telegra.ph/{page['path']}"
+    except Exception as e:
+        logger.error(
+            "Failed to publish to Telegraph. input_html=%d cleaned_html=%d type=%s: %s",
+            len(content),
+            len(cleaned_html),
+            type(e).__name__,
+            e,
+        )
+        return None
