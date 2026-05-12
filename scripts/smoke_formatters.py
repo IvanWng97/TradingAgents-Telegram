@@ -613,6 +613,36 @@ def test_telegraph_packer_keeps_all_sections_when_under_budget() -> None:
         )
 
 
+def test_telegraph_packer_truncates_single_oversized_section() -> None:
+    """Bug observed in the wild: a single huge section (>64 KB markdown)
+    fell through the drop-trailing strategy and Telegraph rejected the
+    publish entirely → user saw 'Instant View unavailable' with no link.
+
+    Defense: when the loop exits without finding a fitting subset, the
+    first (highest-priority) section gets truncated to fit, with a
+    visible marker pointing readers at the .md attachment for the full
+    content. Telegraph publish then succeeds with a meaningful page
+    instead of failing silently."""
+    # 100 KB of markdown — bigger than the 64 KB HTML budget even after
+    # accounting for markdown's near-1:1 bloat on plain prose. Drop-trailing
+    # can't help since the first section alone exceeds the budget.
+    huge = "x " * 50000
+    state = {
+        "final_trade_decision": huge,
+        "trader_investment_plan": "tiny",
+    }
+    out = format_analysis_result_markdown("SOFI", state, "HOLD")
+    # First section is present but the content was truncated.
+    assert "## Final Trading Decision" in out, out[:500]
+    assert len(out) < 50000, f"truncation should bound the output; got {len(out)}"
+    # Marker is visible so readers know where the rest went.
+    assert "📥 Download .md" in out, out[-500:]
+    assert "truncated" in out.lower(), out[-500:]
+    # Trailing section dropped (correct behavior — first section is
+    # already maxed out, no budget left).
+    assert "## Trader" not in out, out[:1000]
+
+
 SCENARIOS = [
     ("fresh run prepends full ts + config header", test_fresh_run_prepends_full_header),
     ("history prepends date-only header", test_history_prepends_date_only_header),
@@ -732,6 +762,10 @@ SCENARIOS = [
     (
         "Telegraph packer keeps all sections when under budget",
         test_telegraph_packer_keeps_all_sections_when_under_budget,
+    ),
+    (
+        "Telegraph packer truncates a single oversized section instead of failing",
+        test_telegraph_packer_truncates_single_oversized_section,
     ),
 ]
 

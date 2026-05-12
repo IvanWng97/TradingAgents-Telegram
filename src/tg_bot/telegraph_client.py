@@ -74,22 +74,73 @@ def sanitize_html_for_telegraph(html: str) -> str:
     return str(soup)
 
 
+# Exception types from `requests` that suggest a transient network issue —
+# worth one retry. API-level errors (TelegraphException, content too large,
+# token invalid) raise different types and shouldn't be retried.
+_TRANSIENT_NET_ERRORS: tuple[type[Exception], ...] = ()
+try:
+    from requests.exceptions import (
+        ConnectionError as _RequestsConnectionError,
+        Timeout as _RequestsTimeout,
+    )
+
+    _TRANSIENT_NET_ERRORS = (_RequestsConnectionError, _RequestsTimeout)
+except ImportError:  # pragma: no cover — requests is a transitive dep of telegraph
+    pass
+
+
 async def publish_to_telegraph(title: str, content: str) -> Optional[str]:
     """Publish HTML content to Telegraph; returns the page URL or None on failure.
 
     The Telegraph SDK uses synchronous HTTP under the hood, so we offload
     create_page to a worker thread to keep PTB's event loop responsive.
+
+    Resilience:
+    - Transient network errors (ConnectionError / Timeout) get one retry
+      with 1s backoff — Telegraph's API has occasional flakiness, and
+      losing the link entirely for a one-off network blip is the worse UX.
+    - On any failure, the log records the input/output HTML sizes and the
+      exception class so future failures can be diagnosed quickly without
+      needing to instrument further.
     """
-    try:
-        cleaned_html = sanitize_html_for_telegraph(content)
-        client = _telegraph_client()
-        page = await asyncio.to_thread(
-            client.create_page,
-            title=title,
-            html_content=cleaned_html,
-            author_name="TradingAgents Bot",
-        )
-        return f"https://telegra.ph/{page['path']}"
-    except Exception as e:
-        logger.error("Failed to publish to Telegraph: %s", e)
-        return None
+    cleaned_html = sanitize_html_for_telegraph(content)
+    client = _telegraph_client()
+
+    for attempt in range(2):
+        try:
+            page = await asyncio.to_thread(
+                client.create_page,
+                title=title,
+                html_content=cleaned_html,
+                author_name="TradingAgents Bot",
+            )
+            return f"https://telegra.ph/{page['path']}"
+        except _TRANSIENT_NET_ERRORS as e:
+            if attempt == 0:
+                logger.warning(
+                    "Telegraph network error (attempt 1, will retry in 1s): %s: %s",
+                    type(e).__name__,
+                    e,
+                )
+                await asyncio.sleep(1.0)
+                continue
+            logger.error(
+                "Failed to publish to Telegraph after retry. "
+                "input_html=%d cleaned_html=%d type=%s: %s",
+                len(content),
+                len(cleaned_html),
+                type(e).__name__,
+                e,
+            )
+            return None
+        except Exception as e:
+            logger.error(
+                "Failed to publish to Telegraph. "
+                "input_html=%d cleaned_html=%d type=%s: %s",
+                len(content),
+                len(cleaned_html),
+                type(e).__name__,
+                e,
+            )
+            return None
+    return None

@@ -269,6 +269,18 @@ _REPORT_SECTIONS: list[tuple[str, str]] = [
 _TELEGRAPH_HTML_LIMIT = 65536
 _TELEGRAPH_HTML_BUDGET = 64000  # leave 1.5 KB of headroom for tags we don't account for
 
+# Per-section markdown character cap applied only after the section-dropping
+# strategy has failed (one section alone still over budget). Picked
+# empirically: 45 KB of markdown stays under 65 KB HTML even at the
+# observed worst-case 44% table-bloat ratio. When we truncate, append the
+# `_TRUNCATION_MARKER` so the Telegraph reader sees the section was cut
+# AND knows the full content is in the `.md` attachment.
+_SECTION_TRUNCATION_LIMIT = 45000
+_TRUNCATION_MARKER = (
+    "\n\n_(This section was truncated to fit Telegraph's 64 KB page cap. "
+    "Tap **📥 Download .md** for the full content.)_"
+)
+
 
 def _build_header(
     config_summary: str | None, generated_at: date | datetime | None
@@ -414,11 +426,20 @@ def format_analysis_result_markdown(
         rendered = _markdown_lib.markdown(md, extensions=["tables"])
         if len(rendered) <= _TELEGRAPH_HTML_BUDGET:
             return md
-    # Even the first section alone exceeds the cap — extremely unlikely,
-    # but fall through to first section as-is rather than returning an
-    # empty body. Telegraph will reject if it's truly too large, and
-    # `publish_to_telegraph` already logs/handles the failure.
-    return _assemble_report(header, blocks[:1])
+    # First section alone exceeds the cap (rare but observed in the wild
+    # — e.g. a Market Analysis with very long tables can exceed 60 KB).
+    # Truncate the section's markdown source so the rendered HTML
+    # comfortably lands under the cap, and surface a marker so the
+    # Telegraph reader knows content was cut + how to recover (.md).
+    # Without this defense, Telegraph rejects the publish entirely and
+    # `publish_to_telegraph` returns None → user sees "Instant View
+    # unavailable" with no link at all (the worse failure mode).
+    first_title, first_content = blocks[0]
+    if len(first_content) > _SECTION_TRUNCATION_LIMIT:
+        first_content = (
+            first_content[:_SECTION_TRUNCATION_LIMIT].rstrip() + _TRUNCATION_MARKER
+        )
+    return _assemble_report(header, [(first_title, first_content)])
 
 
 def format_full_md_report(
