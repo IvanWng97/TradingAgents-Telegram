@@ -57,10 +57,18 @@ jobs:
           fi
 
           # De-dup against existing issues. A re-run within the 36h window
-          # must not open a second issue for the same tag.
+          # must not open a second issue for the same tag. `readarray`
+          # instead of `for tag in $(...)` so a tag name with whitespace
+          # (e.g. a future pre-release like "v1.2.3 RC1") doesn't split
+          # into two iterations. `--search "..." in:title` does the
+          # server-side filter so dedup works past 30 issues without
+          # bumping `--limit`; the client-side `select(.title == ...)`
+          # then enforces exact-match safety (search is fuzzy).
           filtered="[]"
-          for tag in $(echo "$recent" | jq -r '.[].tag'); do
+          readarray -t tags < <(echo "$recent" | jq -r '.[].tag')
+          for tag in "${tags[@]}"; do
             existing=$(gh issue list \
+              --search "\"tradingagents $tag: upstream audit\" in:title" \
               --label upstream-audit \
               --state all \
               --json title \
@@ -97,6 +105,17 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Ensure upstream-audit label exists
+        # `gh issue create --label X` errors with "Label 'X' not found"
+        # on first run. `--force` is idempotent.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create upstream-audit \
+            --color "5319e7" \
+            --description "Upstream tradingagents release audit" \
+            --force
 
       - name: Audit upstream release(s)
         uses: anthropics/claude-code-action@v1
