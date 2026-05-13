@@ -61,6 +61,21 @@ jobs:
               Workflow §4 — "new behavior needs a new scenario")
             - Cross-cutting drift (CLAUDE.md / README / smoke /
               handler contracts diverging)
+            - Architectural drift: new code that fights the surrounding
+              module's patterns (e.g. a new storage class bypassing
+              JsonStorage's atomic _save_async), abstractions at the
+              wrong layer (UI formatting in storage, storage writes in
+              handlers), or file boundaries that don't match the
+              existing layout (callback handler living in commands.py).
+              HIGH-confidence mismatches against established patterns
+              only — not speculative "could be extracted further."
+            - Scope creep: new abstractions, parameters, or helpers
+              added for hypothetical future requirements (per CLAUDE.md
+              Conventions: "Don't add features, refactor, or introduce
+              abstractions beyond what the task requires"). A bug fix
+              doesn't need surrounding cleanup; a one-shot doesn't need
+              a helper. Flag concrete over-engineering, not stylistic
+              preference.
 
             Do NOT flag:
             - Formatting, style, missing docstrings, naming nits
@@ -68,6 +83,15 @@ jobs:
             - Anything ruff already catches (ruff CI is a separate
               required check)
             - Speculative future scenarios
+
+            Severity rubric (use these definitions verbatim, don't
+            invent your own threshold each run):
+            - HIGH: ships a bug, violates a CLAUDE.md invariant, or
+              breaks a documented contract. Must fix before merge.
+            - MEDIUM: missing test coverage for a new path, doc/code
+              drift, unverified handler edge. Worth fixing but not
+              blocking.
+            - Do not emit LOW. If you'd label it LOW, drop it.
 
             Output format: a single PR comment. If nothing actionable,
             say exactly "no actionable findings." Otherwise: numbered
