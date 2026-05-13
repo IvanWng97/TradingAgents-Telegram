@@ -47,6 +47,14 @@ jobs:
           # instead of stacking). Inline comments are separate threads
           # per finding and unaffected.
           use_sticky_comment: true
+          # Surface the model's tool calls + final response in the run
+          # log. Documented as "hides output for security" by default,
+          # but our prompt only reads public diff + CLAUDE.md, so no
+          # secret-leak surface. Visibility is load-bearing: without it,
+          # a silent review (no comments posted) is indistinguishable
+          # from "model found nothing" vs "posting tool was denied" —
+          # we hit exactly this gap on PR #50.
+          show_full_output: true
           additional_permissions: |
             actions: read
           # Tools must be explicitly enumerated. Without this allow-list,
@@ -136,3 +144,19 @@ jobs:
               summary stays empty; the inline comments are the review.
 
             Cap 5 findings TOTAL across inline + summary.
+
+            **Final signal** — REQUIRED. As the last line of your
+            assistant response (your `result` field), print exactly one
+            of these (no other text after, no markdown around):
+
+              signal: posted <N> inline, <M> summary
+
+            …with the actual counts you posted via tools. OR, if you
+            found nothing actionable:
+
+              signal: clean — <one-sentence reason why this diff is OK>
+
+            This line is parsed downstream to distinguish "no findings"
+            from "posting was silently denied." A run with no comments
+            and no signal line is treated as broken. Do not include the
+            review text in the response — only this signal line.
