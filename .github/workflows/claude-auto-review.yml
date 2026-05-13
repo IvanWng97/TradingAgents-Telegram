@@ -39,6 +39,7 @@ jobs:
           fetch-depth: 0
 
       - name: Claude review
+        id: claude
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -107,3 +108,69 @@ jobs:
             highest-priority. Reviews longer than that get ignored.
 
             Keep under 600 words.
+
+      - name: Post review as PR comment
+        # The action's `post-buffered-inline-comments.ts` step only
+        # posts buffered inline annotations — it never picks up the
+        # model's final `result` text. Our prompt asks for a single PR
+        # comment, so we parse the execution log directly and post it.
+        # `if: always()` because the Claude step's status can be
+        # `failure` on workflow-self-mod 401 even though the model still
+        # ran and produced output; we want to post in either case.
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+          OUTPUT="/home/runner/work/_temp/claude-execution-output.json"
+          if [ ! -f "$OUTPUT" ]; then
+            echo "No execution log at $OUTPUT — nothing to post."
+            exit 0
+          fi
+
+          # The file is a stream of concatenated JSON events (one per
+          # assistant turn / tool call / final result). Use Python's
+          # raw_decode to walk objects sequentially without assuming
+          # NDJSON-vs-array layout. The final `type=result` event holds
+          # the model's assembled review in its `.result` string.
+          review=$(python3 - "$OUTPUT" <<'PY'
+          import json, pathlib, sys
+          text = pathlib.Path(sys.argv[1]).read_text()
+          dec = json.JSONDecoder()
+          i = 0
+          last = None
+          while i < len(text):
+              while i < len(text) and text[i].isspace():
+                  i += 1
+              if i >= len(text):
+                  break
+              try:
+                  obj, end = dec.raw_decode(text, i)
+              except json.JSONDecodeError:
+                  break
+              if isinstance(obj, dict) and obj.get("type") == "result":
+                  last = (obj.get("result") or "").strip()
+              i = end
+          if last:
+              sys.stdout.write(last)
+          PY
+          )
+
+          if [ -z "$review" ]; then
+            echo "No result text in execution log — nothing to post."
+            exit 0
+          fi
+
+          # Clean-review sentinel: skip posting so the PR doesn't get
+          # a noise comment when the reviewer found nothing.
+          if printf '%s' "$review" | grep -qiE "no actionable findings\.?$"; then
+            echo "Review is clean ('no actionable findings') — skipping PR comment."
+            exit 0
+          fi
+
+          # Prepend a header so it's clearly the auto-review, not a
+          # human one. The body cap (~65K chars in the GH API) is well
+          # above the prompt's 600-word output budget.
+          body=$'🤖 **Auto-review** (Claude Code, full review below)\n\n'"$review"
+          gh pr comment "$PR_NUMBER" --body "$body"
