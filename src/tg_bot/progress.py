@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from typing import Any, Optional
+from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -50,7 +50,7 @@ TOTAL_STEPS = max(ordinal for _name, ordinal in _STEP_MAP.values())
 _current_reporter = threading.local()
 
 
-def resolve_step(raw_name: str) -> tuple[str, Optional[int]]:
+def resolve_step(raw_name: str) -> tuple[str, int | None]:
     """Map a langgraph node name to (friendly_name, ordinal). Falls back to
     a Title-Cased version of the raw name with no ordinal when unknown."""
     key = raw_name.replace("_", " ").lower().strip()
@@ -90,8 +90,8 @@ class ProgressReporter:
         message_id: int,
         ticker: str,
         loop: asyncio.AbstractEventLoop,
-        cancel_event: Optional[threading.Event] = None,
-        cancel_run_id: Optional[str] = None,
+        cancel_event: threading.Event | None = None,
+        cancel_run_id: str | None = None,
     ) -> None:
         self.bot = bot
         self.chat_id = chat_id
@@ -103,7 +103,7 @@ class ProgressReporter:
         # Re-attached on every caption edit since editMessageCaption drops
         # reply_markup unless re-sent.
         self.cancel_run_id = cancel_run_id
-        self._last_step: Optional[str] = None
+        self._last_step: str | None = None
 
     async def report(self, raw_node_name: str) -> None:
         """Coalesce duplicate step names and edit the caption. Swallows
@@ -177,7 +177,7 @@ class _DelegatingProgressCallback(BaseCallbackHandler):
 
     def on_chat_model_start(
         self,
-        serialized: Optional[dict],
+        serialized: dict | None,
         messages: Any,
         **kwargs: Any,
     ) -> None:
@@ -185,14 +185,14 @@ class _DelegatingProgressCallback(BaseCallbackHandler):
 
     def on_llm_start(
         self,
-        serialized: Optional[dict],
+        serialized: dict | None,
         prompts: Any,
         **kwargs: Any,
     ) -> None:
         self._dispatch(kwargs)
 
     def _dispatch(self, kwargs: dict) -> None:
-        reporter: Optional[ProgressReporter] = getattr(_current_reporter, "value", None)
+        reporter: ProgressReporter | None = getattr(_current_reporter, "value", None)
         if reporter is None:
             logger.debug("dispatch: no reporter on this thread, ignoring callback")
             return
@@ -227,6 +227,6 @@ class _DelegatingProgressCallback(BaseCallbackHandler):
 delegating_progress_callback = _DelegatingProgressCallback()
 
 
-def set_reporter(reporter: Optional[ProgressReporter]) -> None:
+def set_reporter(reporter: ProgressReporter | None) -> None:
     """Bind a reporter to the current thread (or clear it with None)."""
     _current_reporter.value = reporter

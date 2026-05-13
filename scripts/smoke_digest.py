@@ -1635,7 +1635,7 @@ async def test_openrouter_model_catalog_patched_in() -> None:
     deep = get_model_options("openrouter", "deep")
     assert len(quick) >= 3 and len(deep) >= 3, (quick, deep)
     # Slugs must be `vendor/model[:variant]` — openrouter rejects bare ids.
-    for label, slug in quick + deep:
+    for _label, slug in quick + deep:
         assert "/" in slug, f"openrouter slug {slug!r} missing vendor prefix"
     # Free tier must be reachable (default fallback = first entry).
     assert ":free" in quick[0][1], f"first quick entry should be free: {quick[0]}"

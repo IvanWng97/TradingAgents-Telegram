@@ -36,3 +36,22 @@ dev = ["ruff==0.15.12", "pre-commit>=4.6.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff.lint]
+# Default `E + F` (pycodestyle errors + pyflakes) is on by default;
+# adding the rest layers in syntax modernization + bug-bear without
+# the noise of SIM (mostly stylistic) or RUF's em-dash unicode rules
+# (RUF001/002/003 — we use em-dashes deliberately in docstrings).
+#
+# UP — pyupgrade: Optional[X] → X | None, typing.List → list,
+#      timezone.utc → UTC, etc. Auto-fixable; keeps the codebase on
+#      modern syntax appropriate to our `requires-python = ">=3.11"`.
+# B  — bugbear: catches real bug patterns (mutable defaults, missing
+#      `strict=` on zip, unused loop variables, dangling asyncio tasks).
+select = ["E", "F", "UP", "B"]
+# E501 conflicts with `ruff format`'s own line-length management — the
+# formatter intentionally leaves some lines long (f-strings, URLs,
+# docstrings with code snippets) where breaking them would hurt
+# readability. Ruff's own docs recommend dropping E501 when using
+# `ruff format`.
+ignore = ["E501"]

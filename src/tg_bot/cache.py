@@ -42,9 +42,9 @@ import json
 import logging
 import os
 import tempfile
-from datetime import date as _date, datetime, timezone
+from datetime import date as _date, datetime, UTC
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from tg_bot.config_key import AnalysisConfigKey
 
@@ -66,7 +66,7 @@ def _data_dir() -> Path:
 def _now_iso() -> str:
     """UTC ISO timestamp, no microseconds — small + sortable + tz-aware
     when round-tripped via `datetime.fromisoformat`."""
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
 def today_iso() -> str:
@@ -81,7 +81,7 @@ def today_iso() -> str:
     return _date.today().isoformat()
 
 
-def parse_generated_at(s: Optional[str]) -> Optional[datetime]:
+def parse_generated_at(s: str | None) -> datetime | None:
     """Round-trip a stored ISO-8601 timestamp back to an aware datetime.
     Returns None for missing or unparseable values so callers can fall
     through to "now" defaults — pre-PR cache entries (no `generated_at`
@@ -118,9 +118,7 @@ def _path_for(key: AnalysisConfigKey, ticker: str, date_iso: str) -> Path:
     return _data_dir() / _CACHE_SUBDIR / key.slug() / ticker / f"{date_iso}.json"
 
 
-def lookup(
-    key: AnalysisConfigKey, ticker: str, date_iso: str
-) -> Optional[dict[str, Any]]:
+def lookup(key: AnalysisConfigKey, ticker: str, date_iso: str) -> dict[str, Any] | None:
     """Return the cached `{final_state, signal, telegraph_url, generated_at}`
     dict, or `None` on miss. Quietly returns `None` on any read error — a
     corrupt or partially-written file should never block a fresh run.
@@ -147,7 +145,7 @@ def store(
     date_iso: str,
     final_state: dict,
     signal: str,
-    telegraph_url: Optional[str],
+    telegraph_url: str | None,
 ) -> None:
     """Write the cache entry atomically iff the Telegraph publish succeeded.
 
@@ -181,7 +179,7 @@ def store(
     # constructor failure (e.g., disk full mid-NamedTemporaryFile call).
     # Initialize before the try so the rescue's `os.unlink(tmp_path)`
     # doesn't UnboundLocalError-mask the real exception.
-    tmp_path: Optional[str] = None
+    tmp_path: str | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {

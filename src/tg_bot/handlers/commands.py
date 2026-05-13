@@ -105,7 +105,7 @@ async def _apply_add(user_id: int, tokens: list[str]) -> str:
     duplicate: list[str] = []
     invalid: list[str] = []
     notes: list[str] = []
-    for raw, (canonical, hint) in zip(cleaned, results):
+    for raw, (canonical, hint) in zip(cleaned, results, strict=True):
         if canonical is None:
             invalid.append(hint or f"`{raw}` is invalid.")
             continue

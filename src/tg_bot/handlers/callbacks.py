@@ -348,7 +348,7 @@ async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) 
         return_exceptions=True,
     )
     logger.debug("queue: gather returned %d results", len(results))
-    for ticker, r in zip(selection, results):
+    for ticker, r in zip(selection, results, strict=True):
         if isinstance(r, BaseException):
             logger.error("[%s] task raised: %s (type=%s)", ticker, r, type(r).__name__)
         else:

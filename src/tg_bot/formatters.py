@@ -2,9 +2,8 @@
 
 import html as _html_lib
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, UTC
 from html.parser import HTMLParser
-from typing import Optional
 
 import markdown as _markdown_lib
 
@@ -92,7 +91,7 @@ class _TelegramHtmlSanitizer(HTMLParser):
         if needed:
             self._parts.append("\n" * needed)
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in _DROP_WITH_CONTENT or self._skip_depth > 0:
             if tag in _DROP_WITH_CONTENT:
                 self._skip_depth += 1
@@ -443,7 +442,7 @@ def _strip_final_decision_header(text: str) -> str:
     return "\n".join(lines[i:]).lstrip()
 
 
-def _extract_executive_summary(text: str) -> Optional[str]:
+def _extract_executive_summary(text: str) -> str | None:
     """Pull the `**Executive Summary**` section body out of
     `final_trade_decision`, if present.
 
@@ -574,7 +573,7 @@ def format_short_message(
     emoji = DECISION_EMOJI.get(signal.strip().upper(), "📊")
     safe_ticker = _html_lib.escape(ticker)
     safe_signal = _html_lib.escape(signal)
-    when = generated_at if generated_at else datetime.now(timezone.utc)
+    when = generated_at if generated_at else datetime.now(UTC)
     timestamp = _html_lib.escape(when.strftime("%Y-%m-%d %H:%M UTC"))
 
     parts = [f"{emoji} <b>{safe_ticker}</b> — <b>{safe_signal}</b>", ""]

@@ -7,7 +7,6 @@ import queue
 import threading
 from collections import OrderedDict
 from datetime import date
-from typing import Optional
 
 from telegram.helpers import escape_markdown
 
@@ -25,7 +24,7 @@ logger = logging.getLogger(__name__)
 # its API key. Used by `check_llm_configured` to give users a targeted
 # error before the LLM call 401s with a generic message. Keep in sync
 # with `.env.example` and the catalog in `MODEL_OPTIONS` below.
-PROVIDER_ENV_KEYS: dict[str, Optional[str]] = {
+PROVIDER_ENV_KEYS: dict[str, str | None] = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "google": "GOOGLE_API_KEY",
@@ -48,7 +47,7 @@ PROVIDER_ENV_KEYS: dict[str, Optional[str]] = {
 }
 
 
-def check_llm_configured(user_id, user_config_storage) -> Optional[str]:
+def check_llm_configured(user_id, user_config_storage) -> str | None:
     """Return None if the user is ready to run analyses, or a short reason
     string explaining what to fix. Callers wrap the reason in their own
     user-facing rendering (full message vs `/status` line)."""
@@ -178,7 +177,7 @@ class GraphPool:
             )
 
 
-_graph_pool: "OrderedDict[tuple[str, str, str, int, Optional[str]], GraphPool]" = (
+_graph_pool: "OrderedDict[tuple[str, str, str, int, str | None], GraphPool]" = (
     OrderedDict()
 )
 _pool_mutex = threading.Lock()
@@ -267,7 +266,7 @@ def has_model_catalog(provider: str) -> bool:
 
 def _resolve_models(
     user_id, user_config_storage, provider
-) -> tuple[Optional[str], Optional[str]]:
+) -> tuple[str | None, str | None]:
     """Pick (deep, quick) for this user+provider; falls back to the catalog's
     first entry when unset. (None, None) for providers without a catalog.
 
@@ -344,7 +343,7 @@ def run_trading_analysis(
     ticker: str,
     user_id,
     user_config_storage,
-    reporter: Optional[ProgressReporter] = None,
+    reporter: ProgressReporter | None = None,
 ):
     """Run TradingAgentsGraph for `ticker` using the user's stored LLM config.
 

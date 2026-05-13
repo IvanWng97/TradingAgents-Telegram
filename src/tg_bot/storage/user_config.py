@@ -1,7 +1,7 @@
 """Per-user LLM configuration: provider + deep/quick model + digest schedule."""
 
 import logging
-from typing import Any, Optional
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ._base import JsonStorage
@@ -57,7 +57,7 @@ class UserConfigStorage(JsonStorage):
         await self._save_async()
         return True
 
-    def get_llm_provider(self, user_id: str) -> Optional[str]:
+    def get_llm_provider(self, user_id: str) -> str | None:
         return self._data.get(str(user_id), {}).get("llm_provider")
 
     async def set_llm_model(self, user_id: str, mode: str, model: str) -> bool:
@@ -70,7 +70,7 @@ class UserConfigStorage(JsonStorage):
         await self._save_async()
         return True
 
-    def get_llm_model(self, user_id: str, mode: str) -> Optional[str]:
+    def get_llm_model(self, user_id: str, mode: str) -> str | None:
         key = self.MODEL_KEYS.get(mode)
         if key is None:
             return None
@@ -98,7 +98,7 @@ class UserConfigStorage(JsonStorage):
         v = self._data.get(str(user_id), {}).get(self.ROUNDS_KEY)
         return int(v) if isinstance(v, int) and v in self.VALID_ROUNDS else 1
 
-    async def set_effort_level(self, user_id: str, level: Optional[str]) -> bool:
+    async def set_effort_level(self, user_id: str, level: str | None) -> bool:
         """`level` in {'low', 'medium', 'high'} or None to clear back to
         provider default."""
         if level is None:
@@ -116,7 +116,7 @@ class UserConfigStorage(JsonStorage):
         await self._save_async()
         return True
 
-    def get_effort_level(self, user_id: str) -> Optional[str]:
+    def get_effort_level(self, user_id: str) -> str | None:
         v = self._data.get(str(user_id), {}).get(self.EFFORT_KEY)
         return v if v in self.VALID_EFFORT_LEVELS else None
 
@@ -155,7 +155,7 @@ class UserConfigStorage(JsonStorage):
             "tickers": [],
         }
 
-    def get_digest(self, user_id: str) -> Optional[dict[str, Any]]:
+    def get_digest(self, user_id: str) -> dict[str, Any] | None:
         """Return the digest block (or None if never set). Read-only — copy
         before mutating."""
         return self._data.get(str(user_id), {}).get(self.DIGEST_KEY)

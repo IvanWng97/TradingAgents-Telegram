@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import os
-from typing import Optional
 
 from bs4 import BeautifulSoup
 from telegraph import Telegraph
@@ -89,7 +88,7 @@ except ImportError:  # pragma: no cover — requests is a transitive dep
     pass
 
 
-def _path_from_telegraph_url(url: str) -> Optional[str]:
+def _path_from_telegraph_url(url: str) -> str | None:
     """Extract the Telegraph page path from a `https://telegra.ph/<path>`
     URL. Returns None for anything that doesn't look like a Telegraph URL
     so callers can fall back to `create_page` instead of feeding garbage
@@ -129,8 +128,8 @@ async def _call_with_transient_retry(call, *args, **kwargs):
 
 
 async def publish_to_telegraph(
-    title: str, content: str, edit_path: Optional[str] = None
-) -> Optional[str]:
+    title: str, content: str, edit_path: str | None = None
+) -> str | None:
     """Publish HTML content to Telegraph; return page URL or None on failure.
 
     The Telegraph SDK uses synchronous HTTP under the hood, so we offload

@@ -22,7 +22,7 @@ import logging
 import threading
 import time
 import uuid
-from datetime import datetime, time as dt_time, timezone, date
+from datetime import datetime, time as dt_time, date, UTC
 from html import escape as _html_escape
 from io import BytesIO
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -541,7 +541,7 @@ async def _run_analysis_for_ticker(
             final_state,
             signal,
             config_summary=key.caption(),
-            generated_at=datetime.now(timezone.utc),
+            generated_at=datetime.now(UTC),
         )
         # `tables` extension generates <table> for GFM pipe-tables; the
         # telegraph_client then rewrites them into <ul> since Telegraph
@@ -813,7 +813,7 @@ async def _analyze_one_for_digest(
                 final_state,
                 signal,
                 config_summary=key.caption(),
-                generated_at=datetime.now(timezone.utc),
+                generated_at=datetime.now(UTC),
             )
             html = markdown.markdown(md, extensions=["tables"])
             html = f'<img src="{chart_url}"/>{html}'

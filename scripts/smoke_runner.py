@@ -28,7 +28,7 @@ import threading
 import time
 from collections import defaultdict
 from types import SimpleNamespace
-from typing import Callable
+from collections.abc import Callable
 
 # Cap=5 across all tests. Individual tests vary ticker count.
 os.environ["TG_BOT_MAX_CONCURRENT_ANALYSES"] = "5"
@@ -166,7 +166,7 @@ def _msg_id_for(bot: FakeBot, ticker: str) -> int | None:
 
 def _trigger_cancel(context: FakeContext, ticker: str) -> None:
     registry = context.chat_data.get("analysis_cancels") or {}
-    for run_id, entry in registry.items():
+    for entry in registry.values():
         mid = entry.get("message_id")
         if mid is None:
             continue
