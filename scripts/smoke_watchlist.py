@@ -18,6 +18,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 
 PASS = "\033[92m✓\033[0m"
@@ -131,6 +132,84 @@ async def test_keyboard_structure_identical_across_modes() -> None:
         assert [b.callback_data for b in row_w] == [b.callback_data for b in row_r]
 
 
+# ─── /add via ForceReply ───────────────────────────────────────────────
+
+
+def _build_reply_update(reply_text: str, user_text: str, *, from_bot: bool = True):
+    """Construct a minimal Update shape that `add_via_reply` reads from.
+
+    Only the attributes touched in the handler are populated; everything
+    else is left as a SimpleNamespace so AttributeError surfaces a real
+    coverage gap rather than masking with a MagicMock."""
+    replies: list[str] = []
+
+    async def _reply_text(text):
+        replies.append(text)
+
+    msg = SimpleNamespace(
+        text=user_text,
+        reply_to_message=SimpleNamespace(
+            text=reply_text,
+            from_user=SimpleNamespace(is_bot=from_bot),
+        ),
+        reply_text=_reply_text,
+    )
+    update = SimpleNamespace(
+        message=msg,
+        effective_user=SimpleNamespace(id=1),
+    )
+    return update, replies
+
+
+async def test_add_via_reply_fires_only_on_exact_prompt_match() -> None:
+    """Force-reply `/add` is dispatched by a `MessageHandler(REPLY)`
+    filter that fires on *any* reply to a bot message. `add_via_reply`
+    then guards by comparing `reply_to_message.text` verbatim against
+    `ADD_PROMPT` — without that guard, every reply to any of the bot's
+    messages (e.g. tapping reply on a `/help` response and typing
+    something) would silently mutate the watchlist."""
+    _fresh_data_dir()
+    _seed_storage([])
+    commands = _reload_storage_singletons()
+
+    # Stub _apply_add so the handler doesn't touch yfinance or storage.
+    apply_calls: list[tuple[int, list[str]]] = []
+
+    async def fake_apply_add(user_id: int, tokens: list[str]) -> str:
+        apply_calls.append((user_id, tokens))
+        return f"✅ Added: {', '.join(tokens)}"
+
+    commands._apply_add = fake_apply_add
+
+    # Negative: reply to a different bot message (e.g. /help output).
+    update, replies = _build_reply_update(
+        reply_text="Some other bot message (not the add prompt)",
+        user_text="NVDA AAPL",
+    )
+    await commands.add_via_reply(update, SimpleNamespace())
+    assert apply_calls == [], f"add fired on mismatched reply: {apply_calls!r}"
+    assert replies == [], f"reply emitted on mismatch: {replies!r}"
+
+    # Negative: reply to a user (not the bot) — defensive check against
+    # spoofed reply_to_message envelopes.
+    update, _ = _build_reply_update(
+        reply_text=commands.ADD_PROMPT,
+        user_text="NVDA",
+        from_bot=False,
+    )
+    await commands.add_via_reply(update, SimpleNamespace())
+    assert apply_calls == [], f"add fired on reply to non-bot user: {apply_calls!r}"
+
+    # Positive: reply to the exact ADD_PROMPT from the bot → handler fires.
+    update, replies = _build_reply_update(
+        reply_text=commands.ADD_PROMPT,
+        user_text="NVDA AAPL",
+    )
+    await commands.add_via_reply(update, SimpleNamespace())
+    assert apply_calls == [(1, ["NVDA", "AAPL"])], apply_calls
+    assert replies == ["✅ Added: NVDA, AAPL"], replies
+
+
 async def test_empty_watchlist_no_keyboard() -> None:
     """Both modes must short-circuit cleanly on an empty watchlist."""
     _fresh_data_dir()
@@ -152,6 +231,10 @@ SCENARIOS = [
         test_keyboard_structure_identical_across_modes,
     ),
     ("empty watchlist short-circuits in both modes", test_empty_watchlist_no_keyboard),
+    (
+        "force-reply /add fires only on exact ADD_PROMPT match",
+        test_add_via_reply_fires_only_on_exact_prompt_match,
+    ),
 ]
 
 

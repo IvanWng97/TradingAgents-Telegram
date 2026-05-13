@@ -459,6 +459,131 @@ async def test_cancel_post_completion_race() -> None:
     )
 
 
+# --- Race-close coverage (CLAUDE.md Invariant #5) --------------------------
+# Three checks discard a late-arriving Cancel rather than overwriting the
+# "Cancelling…" caption with a success: (1) flag-check post-to_thread,
+# (2) flag-check post-Telegraph publish, (3) CancelledByUserError from the
+# progress callback during propagate. The deterministic scenarios below
+# arm each path directly so a regression flips the test from "cancelled"
+# to "completed" — the post-completion-race test above only asserts no
+# slot leak so it cannot catch a missing flag check.
+
+
+async def test_race_close_post_to_thread_discards_result() -> None:
+    """Flag-check #1: cancel_event set inside the analysis (before return)
+    makes the post-to_thread check on the asyncio side flip to 'cancelled'."""
+    reset_state()
+
+    def self_cancelling_analysis(ticker, user_id, ucs, reporter=None, **kw):
+        # Simulate "user tapped Cancel during the last LLM call" — the
+        # propagate() returns successfully, but the cancel event was set
+        # while it was on the wire. The post-to_thread check (line ~525)
+        # must honour the flag rather than render the success caption.
+        if reporter is not None and reporter.cancel_event is not None:
+            reporter.cancel_event.set()
+        return ({"final_trade_decision": f"{ticker}: HOLD"}, "HOLD")
+
+    bot, ctx = install_mocks(analysis_func=self_cancelling_analysis)
+    result = await runner._run_analysis_for_ticker(ctx, 1, 1, "AAPL")
+    assert result == "cancelled", f"expected cancelled, got {result!r}"
+    cap = bot.captions.get(_msg_id_for(bot, "AAPL")) or ""
+    assert "cancelled" in cap.lower(), f"expected Cancelled caption, got {cap!r}"
+
+
+async def test_race_close_post_telegraph_publish_discards_result() -> None:
+    """Flag-check #2: cancel_event set during Telegraph publish (between
+    LLM finish and final caption edit) makes the post-publish check flip
+    to 'cancelled' rather than committing the success caption."""
+    reset_state()
+
+    def quick_analysis(ticker, *a, **kw):
+        return ({"final_trade_decision": f"{ticker}: HOLD"}, "HOLD")
+
+    bot, ctx = install_mocks(analysis_func=quick_analysis)
+
+    async def cancelling_publish(title, content, edit_path=None):
+        # Simulate "user tapped Cancel while Telegraph publish was on the
+        # wire". Flip the cancel event before returning the URL so the
+        # post-publish flag check (line ~566) discards instead of editing.
+        registry = ctx.chat_data.get("analysis_cancels") or {}
+        for entry in registry.values():
+            entry["cancel_event"].set()
+            if entry.get("async_event"):
+                entry["async_event"].set()
+        return f"https://telegra.ph/{title.replace(' ', '-')}-tg"
+
+    runner.publish_to_telegraph = cancelling_publish
+
+    result = await runner._run_analysis_for_ticker(ctx, 1, 1, "AAPL")
+    assert result == "cancelled", f"expected cancelled, got {result!r}"
+    cap = bot.captions.get(_msg_id_for(bot, "AAPL")) or ""
+    assert "cancelled" in cap.lower(), f"expected Cancelled caption, got {cap!r}"
+
+
+async def test_race_close_cancelled_by_user_error_branch() -> None:
+    """Exception boundary #3: CancelledByUserError raised mid-propagate
+    (the path ProgressReporter._dispatch takes when cancel_event fires
+    before a step) lands in the `except CancelledByUserError` arm and
+    renders Cancelled — not the generic exception handler that would
+    surface as 'Error analyzing AAPL'."""
+    reset_state()
+
+    def raising_analysis(ticker, *a, **kw):
+        raise runner.CancelledByUserError(f"in-pipeline cancel for {ticker}")
+
+    bot, ctx = install_mocks(analysis_func=raising_analysis)
+    result = await runner._run_analysis_for_ticker(ctx, 1, 1, "AAPL")
+    assert result == "cancelled", f"expected cancelled, got {result!r}"
+    cap = bot.captions.get(_msg_id_for(bot, "AAPL")) or ""
+    assert "cancelled" in cap.lower(), f"expected Cancelled caption, got {cap!r}"
+    # Crucially: no error caption — the generic except branch would render
+    # "Error analyzing AAPL." which would be a regression.
+    assert "Error analyzing" not in cap, f"hit generic exception arm: {cap!r}"
+
+
+# --- parse_mode contract (CLAUDE.md Invariant #4) --------------------------
+
+
+async def test_parse_mode_contract_across_lifecycle() -> None:
+    """Pin the per-call parse_mode used by `_run_analysis_for_ticker`:
+    initial `send_photo` + transient `Analyzing…` edits use MarkdownV2;
+    the final completion `editMessageCaption` uses HTML. A mismatch
+    surfaces as `Bad Request: can't parse entities` at runtime, which
+    no unit test on the formatter functions alone can catch — this
+    scenario watches the actual bot-API call sequence."""
+    reset_state()
+
+    def quick_analysis(ticker, *a, **kw):
+        return ({"final_trade_decision": f"{ticker}: HOLD"}, "HOLD")
+
+    bot, ctx = install_mocks(analysis_func=quick_analysis)
+    result = await runner._run_analysis_for_ticker(ctx, 1, 1, "AAPL")
+    assert result == "completed", result
+
+    # Initial send_photo carries the "📊 Analyzing…" caption under MarkdownV2.
+    analyzing = [
+        (cap, mode)
+        for cap, mode in bot.caption_history
+        if cap and cap.startswith("📊 Analyzing")
+    ]
+    assert analyzing, f"no 📊 Analyzing caption seen: {bot.caption_history!r}"
+    for cap, mode in analyzing:
+        assert mode == "MarkdownV2", (
+            f"transient caption must use MarkdownV2, got {mode!r}: {cap!r}"
+        )
+
+    # The final caption (after Telegraph publish) flips to HTML — it
+    # contains `<b>TICKER</b>` and the markdown-rendered summary block.
+    html_finals = [
+        (cap, mode) for cap, mode in bot.caption_history if cap and "<b>AAPL</b>" in cap
+    ]
+    assert html_finals, f"no HTML final caption seen: {bot.caption_history!r}"
+    for cap, mode in html_finals:
+        assert mode == "HTML", (
+            f"final caption must use HTML, got {mode!r}: {cap[:120]!r}"
+        )
+
+
 # --- Runner ----------------------------------------------------------------
 
 
@@ -474,6 +599,22 @@ TESTS = [
     ("single ticker (no queueing)", test_single_ticker_no_queueing),
     ("graceful shutdown signals all", test_graceful_shutdown_signals_all),
     ("cancel post-completion race", test_cancel_post_completion_race),
+    (
+        "race-close: post-to_thread flag check discards",
+        test_race_close_post_to_thread_discards_result,
+    ),
+    (
+        "race-close: post-Telegraph-publish flag check discards",
+        test_race_close_post_telegraph_publish_discards_result,
+    ),
+    (
+        "race-close: CancelledByUserError branch renders Cancelled",
+        test_race_close_cancelled_by_user_error_branch,
+    ),
+    (
+        "parse_mode contract across analysis lifecycle (Invariant #4)",
+        test_parse_mode_contract_across_lifecycle,
+    ),
 ]
 
 
