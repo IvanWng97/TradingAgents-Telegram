@@ -53,6 +53,10 @@ class FakeBot:
 
     def __init__(self, send_photo_failures: int = 0) -> None:
         self.captions: dict[int, str] = {}
+        # Ordered (caption, parse_mode) of every send_photo / edit_message_caption.
+        # The parse_mode contract scenario (Invariant #4) reads this to verify
+        # transient captions use MarkdownV2 and final captions use HTML.
+        self.caption_history: list[tuple[str, str | None]] = []
         self._next_id = 1000
         self._lock = asyncio.Lock()
         self._send_photo_attempts: dict[int, int] = defaultdict(int)
@@ -70,12 +74,14 @@ class FakeBot:
             mid = self._next_id
             self._next_id += 1
         self.captions[mid] = caption
+        self.caption_history.append((caption, parse_mode))
         return SimpleNamespace(message_id=mid)
 
     async def edit_message_caption(
         self, chat_id, message_id, caption, parse_mode=None, reply_markup=None
     ):
         self.captions[message_id] = caption
+        self.caption_history.append((caption, parse_mode))
 
     async def edit_message_reply_markup(self, chat_id, message_id, reply_markup):
         pass
