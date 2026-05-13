@@ -37,6 +37,19 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Ensure drift-audit label exists
+        # `gh issue create --label X` errors with "Label 'X' not found"
+        # if the label hasn't been created yet — and Claude can't
+        # recover from that mid-prompt. `--force` makes this step
+        # idempotent: creates the label on first run, no-ops after.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create drift-audit \
+            --color "0075ca" \
+            --description "Smoke coverage gap detected by weekly audit" \
+            --force
+
       - name: Drift audit
         uses: anthropics/claude-code-action@v1
         env:
