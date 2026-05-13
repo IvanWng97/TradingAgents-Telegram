@@ -28,6 +28,9 @@ permissions:
 jobs:
   detect:
     runs-on: ubuntu-latest
+    # `gh api` calls finish in seconds; the default 360-min cap means
+    # a network hang ties up a runner for 6h. 5 is generous.
+    timeout-minutes: 5
     outputs:
       have_new: ${{ steps.find.outputs.have_new }}
       new_releases: ${{ steps.find.outputs.new_releases }}
@@ -60,17 +63,19 @@ jobs:
           # must not open a second issue for the same tag. `readarray`
           # instead of `for tag in $(...)` so a tag name with whitespace
           # (e.g. a future pre-release like "v1.2.3 RC1") doesn't split
-          # into two iterations. `--search "..." in:title` does the
-          # server-side filter so dedup works past 30 issues without
-          # bumping `--limit`; the client-side `select(.title == ...)`
-          # then enforces exact-match safety (search is fuzzy).
+          # into two iterations. `--limit 200` covers years of audits
+          # without pagination; client-side `select(.title == ...)`
+          # enforces exact match. Deliberately NOT using `--search "$tag
+          # in:title"` — that string is shell-expanded inside the
+          # double-quotes and would execute command substitutions if a
+          # future upstream tag included e.g. backticks or `$(...)`.
           filtered="[]"
           readarray -t tags < <(echo "$recent" | jq -r '.[].tag')
           for tag in "${tags[@]}"; do
             existing=$(gh issue list \
-              --search "\"tradingagents $tag: upstream audit\" in:title" \
               --label upstream-audit \
               --state all \
+              --limit 200 \
               --json title \
               --jq "[.[] | select(.title == \"tradingagents $tag: upstream audit\")] | length")
             if [ "$existing" -gt 0 ]; then
@@ -100,7 +105,12 @@ jobs:
     needs: detect
     if: needs.detect.outputs.have_new == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Each release audit is ~5 min for Claude (fetch tags + compare, walk
+    # the diff, render issue). 30 min covers up to 5 simultaneous releases
+    # before the dedup window's 36h cutoff would permanently skip an
+    # unprocessed one. Bumped from 15 after PR #48's auto-review pointed
+    # out the multi-release timeout-then-skip failure mode.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
         with:
@@ -124,6 +134,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Explicit allow-list. Without these, `gh` / `Read` / `Grep`
+          # commands hit "This command requires approval" at runtime
+          # and the model gives up without opening any issue.
+          claude_args: |
+            --allowedTools "Bash(gh issue create:*),Bash(gh issue list:*),Bash(gh api:*),Read,Glob,Grep"
           prompt: |
             One or more new TauricResearch/TradingAgents releases have
             landed. Audit each against this bot's integration surface

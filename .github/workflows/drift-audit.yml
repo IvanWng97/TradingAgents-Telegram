@@ -56,6 +56,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Explicit allow-list. Without these, `gh` / `Read` / `Grep`
+          # commands hit "This command requires approval" at runtime
+          # and the model gives up without opening any issue.
+          claude_args: |
+            --allowedTools "Bash(gh issue create:*),Bash(gh issue list:*),Read,Glob,Grep"
           prompt: |
             Audit smoke-test coverage against CLAUDE.md and open a GitHub
             issue with the gap list ONLY if findings exist. Silent on a

@@ -4,8 +4,8 @@ on:
   pull_request:
     types: [opened, reopened, ready_for_review]
     # Note: `synchronize` deliberately omitted. A typical PR sees 3-8
-    # push events while iterating — auto-reviewing each one burns Claude
-    # Code credits on diffs you already know about. To re-review after
+    # push events while iterating — auto-reviewing each one burns Max
+    # plan quota on diffs you already know about. To re-review after
     # fixes, comment `@claude review` on the PR (the manual flow in
     # claude.yml takes over).
 
@@ -17,7 +17,7 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write   # Post the review as a PR comment.
+  pull-requests: write   # Post the review as inline + summary comments.
   id-token: write        # Required by the Claude Code action.
   actions: read          # So Claude can read CI results when reviewing.
 
@@ -39,20 +39,28 @@ jobs:
           fetch-depth: 0
 
       - name: Claude review
-        id: claude
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # Surface the model's full tool calls + responses in the run
-          # log. Default `false` is documented as "hides output for
-          # security" — relevant when prompts handle secrets. Our prompt
-          # only reads public diff + CLAUDE.md, so unhiding the trace
-          # lets us diagnose silent-review issues (e.g. permission_
-          # denials with no PR comment posted) without re-running.
-          show_full_output: true
+          # Re-use one summary comment per PR (close/reopen, /loop,
+          # ready-from-draft transitions all land on the same comment
+          # instead of stacking). Inline comments are separate threads
+          # per finding and unaffected.
+          use_sticky_comment: true
           additional_permissions: |
             actions: read
+          # Tools must be explicitly enumerated. Without this allow-list,
+          # `gh` subcommands hit "This command requires approval" at
+          # runtime (we hit this on PR #44's reopened run — model burned
+          # 3 turns trying `gh pr list` before giving up). Pattern lifted
+          # from anthropics/claude-code-action/docs/solutions.md
+          # "Automatic PR Code Review" — the docs' canonical recipe.
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Glob,Grep"
           prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
             Review the diff on this pull request against the base branch.
 
             Read `CLAUDE.md` first — it's the architecture map. The 10
@@ -101,121 +109,30 @@ jobs:
               blocking.
             - Do not emit LOW. If you'd label it LOW, drop it.
 
-            Output format: a single PR comment. If nothing actionable,
-            say exactly "no actionable findings." Otherwise: numbered
-            list of findings with file:line, severity (HIGH/MEDIUM),
-            and a concrete suggested fix. Cap at 5 findings — pick the
-            highest-priority. Reviews longer than that get ignored.
+            Output — HYBRID (post directly via GitHub tools; do not
+            submit review text as your final assistant message — only
+            posted comments count as output):
 
-            Keep under 600 words.
+            For **file/line-anchored findings** — a bug or contract
+            violation tied to a specific line or function — call
+            `mcp__github_inline_comment__create_inline_comment`:
+            - `path`: file path in the repo (e.g. "src/tg_bot/cache.py")
+            - `line`: line number in the NEW file (post-diff)
+            - `body`: severity prefix + one-paragraph why-it's-wrong;
+              optional ```suggestion\n...\n``` block (which replaces the
+              targeted line range — keep it syntactically complete)
+            - `confirmed: true` so the comment posts immediately
 
-      - name: Post review as PR comment
-        # The action's `post-buffered-inline-comments.ts` step only
-        # posts buffered inline annotations — it never picks up the
-        # model's final `result` text. Our prompt asks for a single PR
-        # comment, so we parse the execution log directly and post it.
-        # `if: always()` because the Claude step's status can be
-        # `failure` on workflow-self-mod 401 even though the model still
-        # ran and produced output; we want to post in either case.
-        if: always() && github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -uo pipefail
-          OUTPUT="/home/runner/work/_temp/claude-execution-output.json"
-          if [ ! -f "$OUTPUT" ]; then
-            echo "No execution log at $OUTPUT — nothing to post."
-            exit 0
-          fi
+            For **cross-cutting findings** — invariant violations
+            spanning multiple files, dataflow drift, missing smoke
+            across suites — call
+            `gh pr comment $PR_NUMBER --body "$body"` with a markdown
+            body. Heading "## Cross-cutting findings" + numbered list
+            with file:line refs for each.
 
-          # `claude-execution-output.json` may be a JSON array, NDJSON,
-          # or concatenated JSON objects depending on action version /
-          # mode. Try each format in order until one yields a parseable
-          # event list, then walk to the final `type=result` event and
-          # extract its `.result` string. First robust pass dumps the
-          # first 200 bytes to the log so future format drift is
-          # diagnosable without re-running.
-          echo "::group::execution-output preview"
-          ls -la "$OUTPUT" || true
-          head -c 200 "$OUTPUT" 2>/dev/null || true
-          echo
-          echo "::endgroup::"
+            Empty cases (post nothing in either tool):
+            - No findings → done. The summary path stays empty.
+            - All findings posted inline (no cross-cutting) → done. The
+              summary stays empty; the inline comments are the review.
 
-          review=$(python3 - "$OUTPUT" <<'PY'
-          import json, pathlib, sys
-          text = pathlib.Path(sys.argv[1]).read_text()
-          events = []
-          # Format 1: a single JSON value (array of events or single event).
-          try:
-              parsed = json.loads(text)
-              if isinstance(parsed, list):
-                  events = parsed
-              elif isinstance(parsed, dict):
-                  events = [parsed]
-          except json.JSONDecodeError:
-              pass
-          # Format 2: NDJSON (one event per line).
-          if not events:
-              tried = []
-              ok = True
-              for line in text.splitlines():
-                  line = line.strip()
-                  if not line:
-                      continue
-                  try:
-                      tried.append(json.loads(line))
-                  except json.JSONDecodeError:
-                      ok = False
-                      break
-              if ok and tried:
-                  events = tried
-          # Format 3: concatenated JSON objects (pretty-printed back-to-back).
-          if not events:
-              dec = json.JSONDecoder()
-              i = 0
-              tried = []
-              while i < len(text):
-                  while i < len(text) and text[i].isspace():
-                      i += 1
-                  if i >= len(text):
-                      break
-                  try:
-                      obj, end = dec.raw_decode(text, i)
-                      tried.append(obj)
-                      i = end
-                  except json.JSONDecodeError:
-                      break
-              events = tried
-          last = None
-          for ev in events:
-              if isinstance(ev, dict) and ev.get("type") == "result":
-                  last = (ev.get("result") or "").strip()
-          # Diagnostic on the stderr side so failures are visible without
-          # leaking content; helps when the parser is empty-handed.
-          print(
-              f"parser: {len(events)} event(s), last_result={'present' if last else 'absent'}",
-              file=sys.stderr,
-          )
-          if last:
-              sys.stdout.write(last)
-          PY
-          )
-
-          if [ -z "$review" ]; then
-            echo "No result text in execution log — nothing to post."
-            exit 0
-          fi
-
-          # Clean-review sentinel: skip posting so the PR doesn't get
-          # a noise comment when the reviewer found nothing.
-          if printf '%s' "$review" | grep -qiE "no actionable findings\.?$"; then
-            echo "Review is clean ('no actionable findings') — skipping PR comment."
-            exit 0
-          fi
-
-          # Prepend a header so it's clearly the auto-review, not a
-          # human one. The body cap (~65K chars in the GH API) is well
-          # above the prompt's 600-word output budget.
-          body=$'🤖 **Auto-review** (Claude Code, full review below)\n\n'"$review"
-          gh pr comment "$PR_NUMBER" --body "$body"
+            Cap 5 findings TOTAL across inline + summary.
