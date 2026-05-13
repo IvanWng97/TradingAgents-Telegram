@@ -13,7 +13,7 @@ Run with: .venv/bin/python3 scripts/smoke_formatters.py
 from __future__ import annotations
 
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, UTC
 from pathlib import Path
 
 
@@ -45,7 +45,7 @@ def test_fresh_run_prepends_full_header() -> None:
         _STATE,
         "HOLD",
         config_summary="openai · gpt-4o/o4-mini",
-        generated_at=datetime(2026, 5, 10, 12, 34, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 10, 12, 34, tzinfo=UTC),
     )
     assert out.startswith(
         "> Generated 2026-05-10 12:34 UTC · openai · gpt-4o/o4-mini\n\n---\n\n"
@@ -91,7 +91,7 @@ def test_datetime_subclass_check_picks_full_format() -> None:
     """datetime is a subclass of date, so isinstance order matters: we
     must check datetime first to get the full HH:MM stamp instead of
     falling through to the date-only branch."""
-    dt = datetime(2026, 5, 10, 9, 5, tzinfo=timezone.utc)
+    dt = datetime(2026, 5, 10, 9, 5, tzinfo=UTC)
     out = format_analysis_result_markdown("SOFI", _STATE, "BUY", generated_at=dt)
     assert "09:05 UTC" in out, out
 
@@ -113,7 +113,7 @@ def test_body_blockquote_lines_stay_separate_from_header() -> None:
         state,
         "HOLD",
         config_summary="openai · gpt-4o/o4-mini",
-        generated_at=datetime(2026, 5, 10, 12, 34, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 10, 12, 34, tzinfo=UTC),
     )
     rendered = markdown.markdown(out, extensions=["tables"])
     # Two separate blockquotes (header + body), divided by an <hr/>.
@@ -243,7 +243,7 @@ def test_format_short_message_emits_html_structure() -> None:
         telegraph_url="https://telegra.ph/SOFI-Analysis-05-10",
         summary="Lead **bold** prose.",
         config_summary="openai · gpt-4o/o4-mini",
-        generated_at=datetime(2026, 5, 10, 12, 34, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 10, 12, 34, tzinfo=UTC),
     )
     assert "<b>SOFI</b>" in out and "<b>SELL</b>" in out, out
     assert "<blockquote expandable>" in out and "</blockquote>" in out, out
@@ -278,7 +278,7 @@ def test_format_short_message_caption_fits_under_telegram_limit() -> None:
         telegraph_url="https://telegra.ph/SOFI-Analysis-05-10-3",
         summary=summary[:700],
         config_summary="openai · gpt-4o/o4-mini · r2 · e=high",
-        generated_at=datetime(2026, 5, 10, 12, 34, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 10, 12, 34, tzinfo=UTC),
     )
     assert len(out) <= 1024, f"caption {len(out)} chars > 1024 limit:\n{out}"
 
@@ -686,7 +686,7 @@ def test_full_md_report_includes_header_when_provided() -> None:
         "SOFI",
         _FULL_STATE,
         config_summary="openai · gpt-4o/o4-mini",
-        generated_at=datetime(2026, 5, 10, 12, 34, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 5, 10, 12, 34, tzinfo=UTC),
     )
     assert out.startswith(
         "> Generated 2026-05-10 12:34 UTC · openai · gpt-4o/o4-mini\n\n---\n\n"

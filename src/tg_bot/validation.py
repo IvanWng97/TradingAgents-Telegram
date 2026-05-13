@@ -16,7 +16,6 @@ import asyncio
 import logging
 import re
 import time
-from typing import Optional
 
 import yfinance as yf
 
@@ -50,13 +49,13 @@ _CACHE_TTL = 300.0  # 5 minutes
 _CACHE_MAX = 1024
 
 
-def _normalize(raw: str) -> Optional[str]:
+def _normalize(raw: str) -> str | None:
     """Uppercase + regex-validate. Returns None for unsafe input."""
     t = raw.strip().upper()
     return t if TICKER_RE.match(t) else None
 
 
-def _class_share_alt(symbol: str) -> Optional[str]:
+def _class_share_alt(symbol: str) -> str | None:
     """Return the dash-form of a US class-share symbol, or None if not one."""
     m = _CLASS_SHARE_RE.match(symbol)
     return f"{m.group(1)}-{m.group(2)}" if m else None
@@ -86,7 +85,7 @@ def _yfinance_has_data(symbol: str) -> bool:
     return ok
 
 
-async def validate_ticker(raw: str) -> tuple[Optional[str], Optional[str]]:
+async def validate_ticker(raw: str) -> tuple[str | None, str | None]:
     """Validate `raw` against yfinance.
 
     Returns `(canonical_symbol, hint)`:

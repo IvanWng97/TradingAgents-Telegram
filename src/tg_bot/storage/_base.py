@@ -25,7 +25,7 @@ class JsonStorage:
         if not self.file_path.exists():
             return {}
         try:
-            with open(self.file_path, "r", encoding="utf-8") as f:
+            with open(self.file_path, encoding="utf-8") as f:
                 return json.load(f)
         except json.JSONDecodeError:
             # File exists but is malformed JSON — could be disk corruption,

@@ -214,3 +214,6 @@ __marimo__/
 /eval_results
 /.DS_Store
 /src/.DS_Store
+
+# macOS Finder metadata — recurse anywhere, not just repo root.
+**/.DS_Store

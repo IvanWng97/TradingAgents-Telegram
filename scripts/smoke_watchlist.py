@@ -127,7 +127,7 @@ async def test_keyboard_structure_identical_across_modes() -> None:
     # All ticker rows + pagination + bulk-select rows have identical
     # callback_data — only the last row's first button (Done) text differs.
     for row_w, row_r in zip(
-        kb_watch.inline_keyboard[:-1], kb_refresh.inline_keyboard[:-1]
+        kb_watch.inline_keyboard[:-1], kb_refresh.inline_keyboard[:-1], strict=True
     ):
         assert [b.callback_data for b in row_w] == [b.callback_data for b in row_r]
 

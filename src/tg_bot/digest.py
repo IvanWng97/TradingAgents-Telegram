@@ -9,7 +9,7 @@ to Telegram.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -47,7 +47,7 @@ _TZ_SHORT: dict[str, str] = {
 }
 
 
-def tz_short(iana: Optional[str]) -> str:
+def tz_short(iana: str | None) -> str:
     """Compact tz abbreviation for the status line. Falls back to the IANA
     name if not in our curated catalog (should be rare — picker only
     surfaces curated zones)."""
@@ -56,7 +56,7 @@ def tz_short(iana: Optional[str]) -> str:
     return _TZ_SHORT.get(iana, iana)
 
 
-def next_fire(hour_local: int, tz_str: str, now: Optional[datetime] = None) -> datetime:
+def next_fire(hour_local: int, tz_str: str, now: datetime | None = None) -> datetime:
     """Next absolute firing instant for a daily run at `hour_local:00` in
     `tz_str`. `now` defaults to the current time in that tz (overridable for
     tests). DST is handled by ZoneInfo."""
@@ -71,7 +71,7 @@ def next_fire(hour_local: int, tz_str: str, now: Optional[datetime] = None) -> d
     return target
 
 
-def humanize_delta(target: datetime, now: Optional[datetime] = None) -> str:
+def humanize_delta(target: datetime, now: datetime | None = None) -> str:
     """'in 4h 23m' / 'in 12m' / 'any moment'. Coarsest non-zero unit pair."""
     if now is None:
         now = datetime.now(target.tzinfo) if target.tzinfo else datetime.now()
@@ -90,8 +90,8 @@ _TICKERS_PAGE_SIZE = 9  # 3×3, matches /watch for visual consistency
 
 
 def _status_line(
-    digest: Optional[dict[str, Any]],
-    watchlist: Optional[list[str]] = None,
+    digest: dict[str, Any] | None,
+    watchlist: list[str] | None = None,
 ) -> str:
     """MarkdownV2 status line. Variable parts (time, abbr, delta) escaped."""
     if not digest or not digest.get("tz"):
@@ -128,8 +128,8 @@ def _status_line(
 
 
 def _hour_keyboard(
-    digest: Optional[dict[str, Any]],
-    watchlist: Optional[list[str]] = None,
+    digest: dict[str, Any] | None,
+    watchlist: list[str] | None = None,
 ) -> InlineKeyboardMarkup:
     """6×4 hour grid + action row. Selected hour gets a ✅ prefix.
     "🔕 Off" only appears when enabled (no point un-disabling).
@@ -243,7 +243,7 @@ def _tickers_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
-def _tz_keyboard(digest: Optional[dict[str, Any]]) -> InlineKeyboardMarkup:
+def _tz_keyboard(digest: dict[str, Any] | None) -> InlineKeyboardMarkup:
     """5×2 tz grid. Selected tz gets a ✅ prefix.
     Back-to-hours only when an hour was set already (otherwise nowhere to
     go back to — the first-time flow flows tz → hours)."""
@@ -269,9 +269,9 @@ def _tz_keyboard(digest: Optional[dict[str, Any]]) -> InlineKeyboardMarkup:
 
 
 def build_digest_response(
-    digest: Optional[dict[str, Any]],
+    digest: dict[str, Any] | None,
     mode: str = "auto",
-    watchlist: Optional[list[str]] = None,
+    watchlist: list[str] | None = None,
     page: int = 0,
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Render the digest picker as (MarkdownV2 caption, inline keyboard).

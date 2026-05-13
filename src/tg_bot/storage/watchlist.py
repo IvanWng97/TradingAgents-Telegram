@@ -1,7 +1,5 @@
 """Per-user ticker watchlists."""
 
-from typing import List
-
 from ._base import JsonStorage
 
 
@@ -47,5 +45,5 @@ class WatchlistStorage(JsonStorage):
         await self._save_async()
         return True
 
-    def get_watchlist(self, user_id: str) -> List[str]:
+    def get_watchlist(self, user_id: str) -> list[str]:
         return self._data.get(str(user_id), []).copy()

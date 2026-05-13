@@ -24,7 +24,6 @@ structurally. Callers (`cache.py`, `handlers/callbacks.py`,
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 
 # Filesystem-safe regex re-imported from cache for the slug() method.
@@ -49,10 +48,10 @@ class AnalysisConfigKey:
     deep: str
     quick: str
     rounds: int = 1
-    effort: Optional[str] = None
+    effort: str | None = None
 
     @classmethod
-    def from_config(cls, config: dict) -> "AnalysisConfigKey":
+    def from_config(cls, config: dict) -> AnalysisConfigKey:
         """Pull the key knobs out of a resolved tradingagents config dict.
 
         `effort` lives under a provider-specific key

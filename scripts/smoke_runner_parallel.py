@@ -125,7 +125,7 @@ async def run() -> None:
 
     # ── Assertion 3: every run completed successfully ────────────────────
     assert all(r == "completed" for r in results), (
-        f"unexpected results: {dict(zip(tickers, results))}"
+        f"unexpected results: {dict(zip(tickers, results, strict=True))}"
     )
     print(f"  ✓ all {len(tickers)} reached 'completed'")
 

@@ -16,7 +16,6 @@ import logging
 import re
 from datetime import date
 from pathlib import Path
-from typing import Optional
 
 
 logger = logging.getLogger(__name__)
@@ -33,7 +32,7 @@ from tg_bot.validation import TICKER_RE  # noqa: E402
 _DATE_FILENAME_RE = re.compile(r"^full_states_log_(\d{4}-\d{2}-\d{2})\.json$")
 
 
-def _results_dir() -> Optional[Path]:
+def _results_dir() -> Path | None:
     """Return the configured tradingagents `results_dir`, or None if the
     package isn't installed."""
     try:
@@ -44,14 +43,14 @@ def _results_dir() -> Optional[Path]:
         return None
 
 
-def _ticker_dir(ticker: str) -> Optional[Path]:
+def _ticker_dir(ticker: str) -> Path | None:
     base = _results_dir()
     if base is None:
         return None
     return base / ticker / "TradingAgentsStrategy_logs"
 
 
-def normalize_ticker(raw: str) -> Optional[str]:
+def normalize_ticker(raw: str) -> str | None:
     """Uppercase + validate. Returns None for unsafe input (path traversal)."""
     t = raw.strip().upper()
     return t if TICKER_RE.match(t) else None
@@ -105,7 +104,7 @@ def list_available_dates(ticker: str, limit: int = 10) -> list[date]:
     return dates[:limit]
 
 
-def load_historical_state(ticker: str, date_str: str) -> Optional[dict]:
+def load_historical_state(ticker: str, date_str: str) -> dict | None:
     """Return the saved final_state dict for `ticker` on `date_str`, or None.
 
     Normalizes the on-disk log's `trader_investment_decision` key back to the
@@ -130,7 +129,7 @@ def load_historical_state(ticker: str, date_str: str) -> Optional[dict]:
     if not path.exists():
         return None
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             raw = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("Failed to read history %s: %s", path, e)
