@@ -129,29 +129,74 @@ jobs:
             exit 0
           fi
 
-          # The file is a stream of concatenated JSON events (one per
-          # assistant turn / tool call / final result). Use Python's
-          # raw_decode to walk objects sequentially without assuming
-          # NDJSON-vs-array layout. The final `type=result` event holds
-          # the model's assembled review in its `.result` string.
+          # `claude-execution-output.json` may be a JSON array, NDJSON,
+          # or concatenated JSON objects depending on action version /
+          # mode. Try each format in order until one yields a parseable
+          # event list, then walk to the final `type=result` event and
+          # extract its `.result` string. First robust pass dumps the
+          # first 200 bytes to the log so future format drift is
+          # diagnosable without re-running.
+          echo "::group::execution-output preview"
+          ls -la "$OUTPUT" || true
+          head -c 200 "$OUTPUT" 2>/dev/null || true
+          echo
+          echo "::endgroup::"
+
           review=$(python3 - "$OUTPUT" <<'PY'
           import json, pathlib, sys
           text = pathlib.Path(sys.argv[1]).read_text()
-          dec = json.JSONDecoder()
-          i = 0
+          events = []
+          # Format 1: a single JSON value (array of events or single event).
+          try:
+              parsed = json.loads(text)
+              if isinstance(parsed, list):
+                  events = parsed
+              elif isinstance(parsed, dict):
+                  events = [parsed]
+          except json.JSONDecodeError:
+              pass
+          # Format 2: NDJSON (one event per line).
+          if not events:
+              tried = []
+              ok = True
+              for line in text.splitlines():
+                  line = line.strip()
+                  if not line:
+                      continue
+                  try:
+                      tried.append(json.loads(line))
+                  except json.JSONDecodeError:
+                      ok = False
+                      break
+              if ok and tried:
+                  events = tried
+          # Format 3: concatenated JSON objects (pretty-printed back-to-back).
+          if not events:
+              dec = json.JSONDecoder()
+              i = 0
+              tried = []
+              while i < len(text):
+                  while i < len(text) and text[i].isspace():
+                      i += 1
+                  if i >= len(text):
+                      break
+                  try:
+                      obj, end = dec.raw_decode(text, i)
+                      tried.append(obj)
+                      i = end
+                  except json.JSONDecodeError:
+                      break
+              events = tried
           last = None
-          while i < len(text):
-              while i < len(text) and text[i].isspace():
-                  i += 1
-              if i >= len(text):
-                  break
-              try:
-                  obj, end = dec.raw_decode(text, i)
-              except json.JSONDecodeError:
-                  break
-              if isinstance(obj, dict) and obj.get("type") == "result":
-                  last = (obj.get("result") or "").strip()
-              i = end
+          for ev in events:
+              if isinstance(ev, dict) and ev.get("type") == "result":
+                  last = (ev.get("result") or "").strip()
+          # Diagnostic on the stderr side so failures are visible without
+          # leaking content; helps when the parser is empty-handed.
+          print(
+              f"parser: {len(events)} event(s), last_result={'present' if last else 'absent'}",
+              file=sys.stderr,
+          )
           if last:
               sys.stdout.write(last)
           PY
