@@ -20,7 +20,7 @@ Every runtime knob lives in `.env` (Docker loads via `env_file:`; local runs pic
 
 Set via `/config` after the bot is up:
 
-- **Built-in model catalogs** (deep + quick model picker): `openai`, `google`, `anthropic`, `xai`, `deepseek`, `qwen`, `glm`, `ollama`, `openrouter`.
+- **Built-in model catalogs** (deep + quick model picker): `openai`, `google`, `anthropic`, `xai`, `deepseek`, `qwen`, `glm`, `minimax`, `ollama`, `openrouter`.
 - **Custom model IDs only** (selection UI not yet wired — fall back to `DEFAULT_CONFIG`): `azure`.
 
 OpenRouter's catalog ships a curated starter list (free `meta-llama/llama-3.3-70b-instruct:free`, plus paid `openai/gpt-4o-mini`, `anthropic/claude-3.5-sonnet`, `deepseek/deepseek-r1`, etc.) — see `src/tg_bot/analysis.py:_OPENROUTER_MODELS`. tradingagents' OpenAIClient routes openrouter requests to `https://openrouter.ai/api/v1` and reads `OPENROUTER_API_KEY`.

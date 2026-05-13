@@ -38,7 +38,8 @@ class UserConfigStorage(JsonStorage):
     VALID_EFFORT_LEVELS = ("low", "medium", "high")
     # Providers that have a "thinking effort" knob in tradingagents'
     # DEFAULT_CONFIG. Used to gate the /config picker step — for providers
-    # without one (deepseek, qwen, glm, ollama, xai) the step is skipped.
+    # without one (deepseek, qwen, glm, minimax, ollama, xai) the step is
+    # skipped.
     PROVIDERS_WITH_EFFORT = frozenset({"openai", "anthropic", "google"})
     DIGEST_KEY = "digest"
 
