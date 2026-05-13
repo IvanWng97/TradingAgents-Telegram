@@ -23,13 +23,13 @@ permissions:
 
 jobs:
   review:
-    # Skip noisy authors:
-    # - dependabot[bot]: version bumps with no logic to review; ruff +
-    #   smoke already catch breakages.
-    # - IvanWng97: skip our own internal PRs to avoid the
-    #   "I just pushed, please review me" credit drain. External
-    #   contributors and other team members still get reviews.
-    if: github.actor != 'dependabot[bot]' && github.actor != 'IvanWng97'
+    # Skip dependabot: version bumps with no logic to review; ruff +
+    # smoke already catch breakages. Every other author — including the
+    # repo owner — gets a review, because the failure mode the workflow
+    # exists to prevent (shipping unreviewed code) is most common on
+    # author's-own PRs. `synchronize` is still excluded above so a
+    # WIP-push loop doesn't burn credits — one review per PR, lifecycle.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
