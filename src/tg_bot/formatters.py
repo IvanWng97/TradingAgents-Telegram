@@ -443,22 +443,70 @@ def _strip_final_decision_header(text: str) -> str:
     return "\n".join(lines[i:]).lstrip()
 
 
+def _extract_executive_summary(text: str) -> Optional[str]:
+    """Pull the `**Executive Summary**` section body out of
+    `final_trade_decision`, if present.
+
+    Tradingagents' synthesis output is structured: `**Rating**` →
+    `**Executive Summary**` → `**Investment Thesis**` →
+    `**Why not Sell/Hold/...**` → `**Decisive evidence anchoring**` →
+    `**Price Target**` → `**Time Horizon**`. The Executive Summary is
+    the natural TL;DR — concrete actionable guidance (trim/add levels,
+    stops, re-entry zones, price targets) that fits a 700-char caption
+    natively without dragging in the multi-paragraph counterargument
+    sections.
+
+    Handles both header variants the LLM emits inconsistently:
+      - `**Executive Summary**:` (colon outside the bold)
+      - `**Executive Summary:**` (colon inside the bold)
+    Case-insensitive on the title. Body terminates at the next
+    `\\n\\n**` (next bold-headed paragraph) or end of text.
+
+    Returns None when the header isn't present so callers can fall
+    back to the generic strip-and-clip path — older analyses, custom
+    prompts, and providers whose output doesn't conform all degrade
+    gracefully."""
+    lower = text.lower()
+    # Two patterns the structured output uses, normalized to lowercase
+    # so we match regardless of capitalization drift.
+    for marker in ("**executive summary**:", "**executive summary:**"):
+        idx = lower.find(marker)
+        if idx == -1:
+            continue
+        body_start = idx + len(marker)
+        # Section terminates at the next bold-headed paragraph
+        # (preceded by a blank line) OR the end of text. The blank-line
+        # guard avoids false-positive termination on inline `**word**`
+        # bolding inside the summary prose.
+        end = text.find("\n\n**", body_start)
+        body = text[body_start:end] if end != -1 else text[body_start:]
+        return body.strip()
+    return None
+
+
 def caption_summary(final_state: dict, max_len: int = 700) -> str:
     """Caption summary clip sourced from `final_trade_decision` (the
     post-risk-debate synthesis — matches the signal badge by
-    construction) with the redundant header stripped.
+    construction).
 
-    Earlier the source was `trader_investment_plan`, which produced an
-    action-oriented "I recommend X. Reasoning: …" clip — but the trader
-    runs pre-risk-debate, so for cases where the risk panel tempered
-    the trader's verdict (e.g. trader SELL → final UNDERWEIGHT) the
-    expandable disagreed with the badge. Switching the source guarantees
-    alignment; the strip recovers the 700-char budget we'd otherwise
-    waste duplicating the badge."""
-    return extract_summary(
-        _strip_final_decision_header(final_state.get("final_trade_decision", "")),
-        max_len=max_len,
-    )
+    Two extraction paths, in priority order:
+      1. **Executive Summary section** (`_extract_executive_summary`) —
+         the structured TL;DR with actionable price levels + stops +
+         entries. Natural caption content, ~700 chars by convention.
+      2. **Strip-and-clip fallback** — drop the redundant
+         ticker/rating header, then clip to `max_len`. Catches older
+         analyses or custom-prompt outputs that don't conform to the
+         structured layout.
+
+    Earlier the source was `trader_investment_plan` (pre-risk-debate),
+    which disagreed with the post-risk-debate badge when the risk
+    panel tempered the trader's verdict. Switching the source +
+    section-anchoring guarantees alignment AND a focused preview."""
+    raw = final_state.get("final_trade_decision", "")
+    section = _extract_executive_summary(raw)
+    if section is not None:
+        return extract_summary(section, max_len=max_len)
+    return extract_summary(_strip_final_decision_header(raw), max_len=max_len)
 
 
 def extract_summary(decision_text: str, max_len: int = 700) -> str:

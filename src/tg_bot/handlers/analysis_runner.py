@@ -84,26 +84,25 @@ def _full_report_keyboard(
 ) -> InlineKeyboardMarkup:
     """Two-button inline keyboard for the analysis output.
 
-    Row 1: `📰 Instant View` (URL button → Telegraph IV) +
-           `📥 Download .md` (callback → `getmd:<TICKER>:<DATE>`).
+    Row 1: `📰 Instant View` (URL → Telegraph IV — usually all 7 sections,
+           but the 40K HTML budget can drop table-heavy sections like
+           Fundamentals/Market on long analyses) + `📥 Download Full Report`
+           (callback → `getmd:<TICKER>:<DATE>` → unbounded `.md`, all 7
+           sections, no cap — the canonical complete archive).
 
-    Replaces the previous single-button keyboard + inline `<a>` link
-    inside the caption. Two equal-weight buttons read as primary actions;
-    the inline link was reading as documentation. Tapping the URL button
-    opens Telegraph's Instant View directly inside Telegram — no
-    intermediate photo, no in-app browser detour. Telegraph URLs are
-    first-class IV-eligible.
+    Label asymmetry is deliberate: "Instant View" keeps Telegraph's
+    in-app branding for the convenient view; "Full Report" signals the
+    .md is the guaranteed-complete artifact when Telegraph truncates.
 
-    The IV button is omitted (single-button keyboard) when `telegraph_url`
-    is None — typically a publish failure where there's nothing to link.
-    `getmd:` payload stays well under Telegram's 64-byte callback_data
-    cap (max ~25 bytes for sane ticker + ISO date)."""
+    The IV button is omitted when `telegraph_url` is None (publish
+    failure). `getmd:` payload stays well under Telegram's 64-byte
+    callback_data cap (max ~25 bytes for sane ticker + ISO date)."""
     buttons: list[InlineKeyboardButton] = []
     if telegraph_url:
         buttons.append(InlineKeyboardButton("📰 Instant View", url=telegraph_url))
     buttons.append(
         InlineKeyboardButton(
-            "📥 Download .md",
+            "📥 Download Full Report",
             callback_data=f"getmd:{ticker}:{date_iso}",
         )
     )

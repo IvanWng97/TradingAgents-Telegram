@@ -478,6 +478,107 @@ def test_caption_summary_aligns_with_badge_after_strip() -> None:
     assert "Rating: UNDERWEIGHT" not in out, out
 
 
+# ─── Caption summary: Executive Summary section extraction ──────────────
+
+
+_STRUCTURED_FINAL_DECISION = (
+    "**Final Trading Decision: CLS**\n\n"
+    "**Rating**: Underweight\n\n"
+    "**Executive Summary**: Trim 25-33% of existing CLS positions into any "
+    "strength above $395-$400. Hard stop at $355, re-entry $330-$340.\n\n"
+    "**Investment Thesis**: The Research Manager's Underweight recommendation "
+    "is adopted as the final decision after the risk debate.\n\n"
+    "**Why not Sell (Aggressive Analyst's position):** The aggressive analyst "
+    "correctly identifies the asymmetric risk/reward but selling entirely "
+    "ignores the structural growth story.\n\n"
+    "**Price Target**: 460.0\n\n"
+    "**Time Horizon**: 3-6 months"
+)
+
+
+def test_caption_extracts_executive_summary_when_present() -> None:
+    """Structured final_trade_decision → caption pulls JUST the Executive
+    Summary section. Investment Thesis, Why-not-Sell, Price Target, and
+    Time Horizon are excluded from the 700-char preview — those live in
+    the Telegraph body / .md download where they belong."""
+    final_state = {"final_trade_decision": _STRUCTURED_FINAL_DECISION}
+    out = caption_summary(final_state)
+    assert "Trim 25-33%" in out, out
+    assert "Hard stop at $355" in out, out
+    # Sections after Executive Summary must NOT leak into the caption.
+    assert "Investment Thesis" not in out, out
+    assert "Why not Sell" not in out, out
+    assert "Price Target" not in out, out
+
+
+def test_caption_handles_colon_inside_bold_marker() -> None:
+    """LLM emits both `**Executive Summary**:` and `**Executive Summary:**`
+    inconsistently. The colon-inside-bold variant must be recognized too."""
+    final_state = {
+        "final_trade_decision": (
+            "**Rating:** HOLD\n\n"
+            "**Executive Summary:** Maintain partial position. Monitor "
+            "the $480 resistance level.\n\n"
+            "**Investment Thesis:** Balanced risk profile."
+        )
+    }
+    out = caption_summary(final_state)
+    assert "Maintain partial position" in out, out
+    assert "Investment Thesis" not in out, out
+    assert "Balanced risk profile" not in out, out
+
+
+def test_caption_falls_back_when_no_executive_summary_header() -> None:
+    """Older analyses or custom-prompt outputs that don't have the
+    structured Executive Summary section degrade to the existing
+    strip-and-clip behavior — no caption regression for those callers."""
+    final_state = {
+        "final_trade_decision": (
+            "**Final Trading Decision: NVDA**\n\n"
+            "**Rating: BUY**\n\n"
+            "After thorough debate the trader's Buy stands. Strong "
+            "fundamentals + macro tailwinds support continued upside."
+        )
+    }
+    out = caption_summary(final_state)
+    # Strip path: the rating/decision lines are gone, body starts here.
+    assert out.startswith("After thorough debate"), out
+    assert "Final Trading Decision" not in out, out
+    assert "Rating: BUY" not in out, out
+
+
+def test_caption_executive_summary_terminates_at_next_section() -> None:
+    """The section extractor must stop at the next `\\n\\n**` paragraph
+    header — not run on through subsequent sections. Pins the
+    blank-line-required guard against inline `**word**` bolding inside
+    the summary prose."""
+    final_state = {
+        "final_trade_decision": (
+            "**Executive Summary**: First section content with a "
+            "**bold inline phrase** that must NOT terminate the section.\n\n"
+            "**Investment Thesis**: This should be excluded entirely."
+        )
+    }
+    out = caption_summary(final_state)
+    assert "bold inline phrase" in out, out
+    assert "Investment Thesis" not in out, out
+    assert "should be excluded" not in out, out
+
+
+def test_caption_executive_summary_clipped_when_overlong() -> None:
+    """A 2,000-char Executive Summary still gets clipped to the 700-char
+    caption budget. The clip is word-boundary safe (existing behavior)."""
+    long_body = "Trim positions above $395. " * 100  # ~2,700 chars
+    final_state = {
+        "final_trade_decision": (
+            f"**Executive Summary**: {long_body}\n\n**Investment Thesis**: ignored"
+        )
+    }
+    out = caption_summary(final_state)
+    assert len(out) <= 700 + 5, f"clip overran: {len(out)}"  # +5 for ellipsis/marker
+    assert out.startswith("Trim positions above"), out
+
+
 def test_full_report_keyboard_two_button_shape_with_url() -> None:
     """When `telegraph_url` is set, the keyboard exposes both actions
     side-by-side: a URL button (`📰 Instant View`) opening Telegraph IV
@@ -497,7 +598,11 @@ def test_full_report_keyboard_two_button_shape_with_url() -> None:
     # Callback button: no url, has callback_data.
     assert md_btn.url is None
     assert md_btn.callback_data == "getmd:BRK-B:2026-05-10", md_btn.callback_data
-    assert "📥" in md_btn.text and "Download .md" in md_btn.text, md_btn.text
+    # Label says "Full Report" (the .md is unbounded — all 7 sections),
+    # distinct from the Telegraph IV button which can truncate sections
+    # under the 40K HTML budget. Label asymmetry communicates the
+    # completeness guarantee to the user.
+    assert "📥" in md_btn.text and "Download Full Report" in md_btn.text, md_btn.text
     assert len(md_btn.callback_data.encode("utf-8")) <= 64
 
 
@@ -788,6 +893,27 @@ SCENARIOS = [
     (
         "caption_summary aligns badge + expandable after strip",
         test_caption_summary_aligns_with_badge_after_strip,
+    ),
+    # Caption Executive Summary section extraction
+    (
+        "caption extracts Executive Summary section when present",
+        test_caption_extracts_executive_summary_when_present,
+    ),
+    (
+        "caption handles `**Executive Summary:**` colon-inside-bold variant",
+        test_caption_handles_colon_inside_bold_marker,
+    ),
+    (
+        "caption falls back to strip+clip when no Executive Summary header",
+        test_caption_falls_back_when_no_executive_summary_header,
+    ),
+    (
+        "Executive Summary terminates at next `\\n\\n**Header**`",
+        test_caption_executive_summary_terminates_at_next_section,
+    ),
+    (
+        "Executive Summary clipped to 700 chars when overlong",
+        test_caption_executive_summary_clipped_when_overlong,
     ),
     # Telegraph packer + full .md report
     (
