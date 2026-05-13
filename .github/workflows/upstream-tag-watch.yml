@@ -1,0 +1,224 @@
+name: Upstream Tag Watch (tradingagents)
+
+# Daily cron that detects new releases on TauricResearch/TradingAgents
+# (the bot's only meaningful pip dep — pyproject.toml tracks HEAD).
+# When a new tag lands, fires Claude to audit it against the bot's
+# integration surface and opens a GitHub issue with ADOPT / BREAKING /
+# IGNORE findings.
+#
+# Why daily, not weekly: the bot's docker-build cron deploys HEAD daily,
+# so we want the audit on the same day upstream tags (before the next
+# image build ships the new code). The 36h API window + dedup-by-title
+# tolerates cron drift without double-firing.
+
+on:
+  schedule:
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-tag-watch
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    # `gh api` calls finish in seconds; the default 360-min cap means
+    # a network hang ties up a runner for 6h. 5 is generous.
+    timeout-minutes: 5
+    outputs:
+      have_new: ${{ steps.find.outputs.have_new }}
+      new_releases: ${{ steps.find.outputs.new_releases }}
+    steps:
+      - name: Find new upstream releases (de-duped)
+        id: find
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # 36h window: 24h cron interval + slack for delays / manual dispatch.
+          # Releases published outside this window are assumed already audited
+          # (or pre-date the workflow's creation, which is fine — the bot is
+          # already running them).
+          since=$(date -u -d "36 hours ago" "+%Y-%m-%dT%H:%M:%SZ")
+          echo "Looking for upstream releases published after $since"
+
+          recent=$(gh api repos/TauricResearch/TradingAgents/releases \
+            --jq "[.[] | select(.published_at > \"$since\") | {tag: .tag_name, url: .html_url, published: .published_at}]")
+          recent_count=$(echo "$recent" | jq 'length')
+          echo "$recent_count release(s) in window"
+
+          if [ "$recent_count" -eq 0 ]; then
+            echo "have_new=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # De-dup against existing issues. A re-run within the 36h window
+          # must not open a second issue for the same tag. `readarray`
+          # instead of `for tag in $(...)` so a tag name with whitespace
+          # (e.g. a future pre-release like "v1.2.3 RC1") doesn't split
+          # into two iterations. `--limit 200` covers years of audits
+          # without pagination; client-side `select(.title == ...)`
+          # enforces exact match. Deliberately NOT using `--search "$tag
+          # in:title"` — that string is shell-expanded inside the
+          # double-quotes and would execute command substitutions if a
+          # future upstream tag included e.g. backticks or `$(...)`.
+          filtered="[]"
+          readarray -t tags < <(echo "$recent" | jq -r '.[].tag')
+          for tag in "${tags[@]}"; do
+            existing=$(gh issue list \
+              --label upstream-audit \
+              --state all \
+              --limit 200 \
+              --json title \
+              --jq "[.[] | select(.title == \"tradingagents $tag: upstream audit\")] | length")
+            if [ "$existing" -gt 0 ]; then
+              echo "  $tag: already audited (issue exists), skipping"
+            else
+              echo "  $tag: new, queuing"
+              rel=$(echo "$recent" | jq --arg t "$tag" '[.[] | select(.tag == $t)][0]')
+              filtered=$(echo "$filtered" | jq --argjson r "$rel" '. + [$r]')
+            fi
+          done
+
+          final_count=$(echo "$filtered" | jq 'length')
+          if [ "$final_count" -eq 0 ]; then
+            echo "All in-window releases already audited; nothing to do"
+            echo "have_new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_new=true" >> "$GITHUB_OUTPUT"
+            # Compact JSON for env-var passing.
+            {
+              echo "new_releases<<NEW_RELEASES_EOF"
+              echo "$filtered" | jq -c .
+              echo "NEW_RELEASES_EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+  audit:
+    needs: detect
+    if: needs.detect.outputs.have_new == 'true'
+    runs-on: ubuntu-latest
+    # Each release audit is ~5 min for Claude (fetch tags + compare, walk
+    # the diff, render issue). 30 min covers up to 5 simultaneous releases
+    # before the dedup window's 36h cutoff would permanently skip an
+    # unprocessed one. Bumped from 15 after PR #48's auto-review pointed
+    # out the multi-release timeout-then-skip failure mode.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Ensure upstream-audit label exists
+        # `gh issue create --label X` errors with "Label 'X' not found"
+        # on first run. `--force` is idempotent.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create upstream-audit \
+            --color "5319e7" \
+            --description "Upstream tradingagents release audit" \
+            --force
+
+      - name: Audit upstream release(s)
+        uses: anthropics/claude-code-action@v1
+        env:
+          NEW_RELEASES: ${{ needs.detect.outputs.new_releases }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Explicit allow-list. Without these, `gh` / `Read` / `Grep`
+          # commands hit "This command requires approval" at runtime
+          # and the model gives up without opening any issue.
+          claude_args: |
+            --allowedTools "Bash(gh issue create:*),Bash(gh issue list:*),Bash(gh api:*),Read,Glob,Grep"
+          prompt: |
+            One or more new TauricResearch/TradingAgents releases have
+            landed. Audit each against this bot's integration surface
+            and open one GitHub issue per release.
+
+            ## Input
+
+            Env var `NEW_RELEASES` holds a JSON array. Each element is
+            `{tag, url, published}`. Iterate over every entry.
+
+            ## Bot integration surface (what changes matter)
+
+            From `src/tg_bot/` + CLAUDE.md, the bot reads these
+            upstream surfaces. A change to any of them is bot-relevant:
+
+            - `tradingagents.llm_clients.api_key_env.PROVIDER_API_KEY_ENV`
+              → mirrored by bot's `analysis.py:PROVIDER_ENV_KEYS`. Drift
+              means a silent 401 on the affected provider.
+            - `tradingagents.llm_clients.model_catalog.MODEL_OPTIONS`
+              → imported as-is; new providers need a row in bot's
+              `storage/user_config.py:VALID_PROVIDERS` to appear in /config.
+            - `tradingagents.default_config.DEFAULT_CONFIG` keys →
+              new graph-baked knobs may need to join the 5-tuple in
+              bot's `config_key.py:AnalysisConfigKey` (Invariant #1).
+            - `TradingAgentsGraph(...)` constructor signature.
+            - `propagate(ticker, date) -> (final_state, signal)` shape.
+            - Callback API: bot's `progress.py` listens for
+              `on_chat_model_start` / `on_llm_start` and reads
+              `metadata["langgraph_node"]`.
+            - On-disk log format under `TradingAgentsStrategy_logs/full_states_log_<date>.json`
+              (bot's `history.py` reads this).
+            - `final_state` dict keys consumed by `formatters.py`:
+              `final_trade_decision`, `trader_investment_plan`,
+              `investment_plan`, `market_report`, `fundamentals_report`,
+              `news_report`, `sentiment_report`.
+
+            ## Method per release
+
+            For each release in `NEW_RELEASES`:
+
+            1. Determine the previous semver tag. The cleanest way:
+               `gh api repos/TauricResearch/TradingAgents/tags --jq '.[].name'`
+               and pick the most recent tag preceding the current one
+               by version sort. (Do NOT use `target_commitish` — it's
+               usually `main`, not the prior tag.)
+            2. Fetch the compare:
+               `gh api repos/TauricResearch/TradingAgents/compare/<prev>...<tag>`
+               Walk the file list + commit messages for changes touching
+               the surface above.
+            3. Bucket each bot-relevant change:
+               - **ADOPT** — concrete benefit, low effort. Name the bot
+                 file + the wiring change ("add `MINIMAX_API_KEY` to
+                 `analysis.py:PROVIDER_ENV_KEYS`").
+               - **ADOPT-LATER** — benefit exists, needs investigation.
+               - **BREAKING** — bot call-site needs updating. What + where.
+               - **IGNORE** — listed for completeness so the user can
+                 confirm we looked, e.g. "sentiment analyst rename:
+                 final_state key unchanged, no bot impact."
+            4. Open the issue:
+               ```
+               gh issue create \
+                 --title "tradingagents <tag>: upstream audit" \
+                 --label upstream-audit \
+                 --body "$BODY"
+               ```
+               Body structure:
+               - **Headline:** 1 sentence on the release's theme.
+               - **ADOPT** items (if any).
+               - **BREAKING** items (if any).
+               - **ADOPT-LATER** items (if any).
+               - **IGNORE** items (group at the bottom; one line each).
+               - **Link** to the release page (`url` from input).
+
+            ## Constraints
+
+            - One issue per release. Never bundle two releases into one
+              issue — they're audited independently.
+            - If a release has zero bot-relevant changes, STILL open
+              the issue (with just IGNORE items + the headline) so the
+              user has confirmation the audit ran.
+            - Issue body ≤ 600 words per release.
+            - Cite upstream file paths (e.g.
+              `tradingagents/llm_clients/api_key_env.py`) when relevant.

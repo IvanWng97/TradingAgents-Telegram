@@ -1,0 +1,123 @@
+name: Drift Audit
+
+# Weekly cron that runs an Explore-style audit of smoke-test coverage
+# against CLAUDE.md's invariants and handler surface. Opens a GitHub
+# issue with the gap list ONLY when there are findings — silent on a
+# clean week so the issues list stays signal, not noise.
+#
+# This is the retrospective half of the policy CLAUDE.md Workflow §4
+# enforces forward-looking ("new behavior needs a new scenario"). The
+# forward rule catches new gaps as they're introduced; this catches
+# old gaps that lapsed when surrounding code moved.
+
+on:
+  schedule:
+    # Mondays 09:00 UTC — start-of-week so findings are visible when
+    # you sit down. Misalignment with daily UTC cron drift is fine;
+    # the audit is idempotent.
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+# A manual dispatch while a cron run is in flight cancels the older one.
+concurrency:
+  group: drift-audit
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write       # Open the punch-list issue.
+  id-token: write     # Required by the Claude Code action.
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Ensure drift-audit label exists
+        # `gh issue create --label X` errors with "Label 'X' not found"
+        # if the label hasn't been created yet — and Claude can't
+        # recover from that mid-prompt. `--force` makes this step
+        # idempotent: creates the label on first run, no-ops after.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create drift-audit \
+            --color "0075ca" \
+            --description "Smoke coverage gap detected by weekly audit" \
+            --force
+
+      - name: Drift audit
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Explicit allow-list. Without these, `gh` / `Read` / `Grep`
+          # commands hit "This command requires approval" at runtime
+          # and the model gives up without opening any issue.
+          claude_args: |
+            --allowedTools "Bash(gh issue create:*),Bash(gh issue list:*),Read,Glob,Grep"
+          prompt: |
+            Audit smoke-test coverage against CLAUDE.md and open a GitHub
+            issue with the gap list ONLY if findings exist. Silent on a
+            clean week.
+
+            ## Inputs to read
+
+            - `CLAUDE.md` — focus on §"Cross-cutting invariants" (#1–#10),
+              §"Request lifecycle (manual /watch tap)", and §"Data flow
+              at a glance."
+            - `scripts/smoke_*.py` — pinning suites. Each has a
+              `SCENARIOS` list (or `TESTS` in smoke_runner.py). Treat the
+              registered scenarios as your "covered" set.
+            - `src/tg_bot/handlers/` — runtime. Callback prefixes are
+              dispatched via `data.startswith(...)` chains; commands via
+              `CommandHandler` registrations in `app.py`.
+
+            ## Method
+
+            1. Enumerate the 10 invariants from CLAUDE.md.
+            2. Enumerate every callback prefix in the handlers (grep for
+               `data.startswith("`).
+            3. Enumerate every smoke scenario across all `smoke_*.py` files.
+            4. Cross-reference: which invariants and callback prefixes
+               lack at least one pinning scenario? A scenario "pins" an
+               invariant when it would FAIL if the invariant were broken.
+
+            ## Severity
+
+            - HIGH: a CLAUDE.md invariant has no scenario asserting it
+            - MEDIUM: a callback prefix / handler path / dataflow edge
+              is unpinned
+            - Skip LOW — drop anything you'd otherwise label LOW
+
+            ## Action
+
+            - **0 findings:** print "drift audit: clean" to stdout and
+              EXIT. Do NOT open an issue. The empty state is the goal.
+            - **≥1 finding:** open exactly ONE issue:
+              ```
+              gh issue create \
+                --title "Drift audit: $(date -u +%Y-%m-%d)" \
+                --label drift-audit \
+                --body "$BODY"
+              ```
+              Body structure:
+              - One-paragraph headline ("N HIGH, M MEDIUM gaps found").
+              - Section A: HIGH (invariant unpinned). For each: which
+                invariant + which smoke suite should own the new scenario.
+              - Section B: MEDIUM (handler path unverified). Same format.
+              - Cap 8 total findings; pick the highest-priority.
+
+            ## Constraints
+
+            - Issue body ≤ 800 words. Reviews longer get skipped.
+            - Cite file paths (e.g. `analysis_runner.py:566`), not vague
+              "the cancel path."
+            - Don't propose code. Just map the gap.
+            - If unsure whether something counts as "pinned," err toward
+              listing it as MEDIUM — the user will judge.
