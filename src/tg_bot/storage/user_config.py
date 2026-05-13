@@ -21,6 +21,7 @@ class UserConfigStorage(JsonStorage):
         "deepseek",
         "qwen",
         "glm",
+        "minimax",
         "openrouter",
         "ollama",
         "azure",

@@ -278,6 +278,39 @@ async def test_config_summary_with_effort() -> None:
     assert "· r2 · e=high" in out, out
 
 
+# ─── upstream env-key alignment ────────────────────────────────────────
+
+
+async def test_provider_env_keys_match_upstream() -> None:
+    """The bot's `PROVIDER_ENV_KEYS` must agree with upstream tradingagents'
+    `PROVIDER_API_KEY_ENV` for every shared provider. A divergence (like
+    the GLM `ZHIPUAI_API_KEY` → `ZHIPU_API_KEY` rename in v0.2.5) silently
+    breaks: the bot's precheck passes by reading the old env var while
+    tradingagents itself reads the new one and 401s on first API call."""
+    from tg_bot.analysis import PROVIDER_ENV_KEYS
+    from tradingagents.llm_clients.api_key_env import PROVIDER_API_KEY_ENV
+
+    shared = set(PROVIDER_ENV_KEYS) & set(PROVIDER_API_KEY_ENV)
+    mismatches = [
+        (p, PROVIDER_ENV_KEYS[p], PROVIDER_API_KEY_ENV[p])
+        for p in shared
+        if PROVIDER_ENV_KEYS[p] != PROVIDER_API_KEY_ENV[p]
+    ]
+    assert not mismatches, "bot ↔ upstream env-key drift:\n" + "\n".join(
+        f"  {p}: bot={b!r} upstream={u!r}" for p, b, u in mismatches
+    )
+
+
+async def test_valid_providers_includes_minimax() -> None:
+    """MiniMax is a first-class provider upstream as of tradingagents v0.2.5;
+    the bot must list it in VALID_PROVIDERS so /config can route to it."""
+    from tg_bot.storage.user_config import UserConfigStorage
+
+    assert "minimax" in UserConfigStorage.VALID_PROVIDERS, (
+        UserConfigStorage.VALID_PROVIDERS
+    )
+
+
 SCENARIOS = [
     ("rounds default is 1", test_rounds_default_is_one),
     ("rounds set/get round-trip", test_rounds_set_get_roundtrip),
@@ -319,6 +352,11 @@ SCENARIOS = [
     ("config_summary default", test_config_summary_default),
     ("config_summary with custom rounds", test_config_summary_custom_rounds),
     ("config_summary with effort", test_config_summary_with_effort),
+    (
+        "PROVIDER_ENV_KEYS aligns with tradingagents upstream",
+        test_provider_env_keys_match_upstream,
+    ),
+    ("VALID_PROVIDERS includes minimax", test_valid_providers_includes_minimax),
 ]
 
 

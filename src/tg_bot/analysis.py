@@ -32,7 +32,8 @@ PROVIDER_ENV_KEYS: dict[str, Optional[str]] = {
     "xai": "XAI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "qwen": "DASHSCOPE_API_KEY",
-    "glm": "ZHIPUAI_API_KEY",
+    "glm": "ZHIPU_API_KEY",
+    "minimax": "MINIMAX_API_KEY",
     "ollama": None,  # local; no key needed
     # openrouter has no MODEL_OPTIONS catalog yet so the /config picker
     # still short-circuits (run falls back to DEFAULT_CONFIG models, which
