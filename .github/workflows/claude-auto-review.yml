@@ -42,6 +42,13 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Surface the model's full tool calls + responses in the run
+          # log. Default `false` is documented as "hides output for
+          # security" — relevant when prompts handle secrets. Our prompt
+          # only reads public diff + CLAUDE.md, so unhiding the trace
+          # lets us diagnose silent-review issues (e.g. permission_
+          # denials with no PR comment posted) without re-running.
+          show_full_output: true
           additional_permissions: |
             actions: read
           prompt: |
