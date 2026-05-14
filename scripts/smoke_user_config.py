@@ -421,6 +421,21 @@ async def test_enrolled_empty_watchlist_returns_empty() -> None:
     assert s.get_enrolled_tickers("u1", []) == []
 
 
+async def test_enrolled_explicit_empty_filter_returns_empty() -> None:
+    """`tickers=[]` (user cleared their filter via the picker's
+    `digest:ttclear` action) → []. This is a distinct branch from
+    both `block absent` (→ []) and `tickers` key absent (legacy → all
+    watchlist). Without this pin, a future change that treats `[]`
+    as a legacy signal would silently re-enroll the full watchlist."""
+    s = _make_storage()
+    await s.set_digest_hour("u1", 9, 999)
+    await s.set_digest_tz("u1", "UTC")
+    await s.set_digest_tickers("u1", [])  # explicit clear via picker
+    # Sanity: the stored value is `[]`, NOT missing — distinguishes from legacy.
+    assert s.get_digest("u1")["tickers"] == []
+    assert s.get_enrolled_tickers("u1", ["AAPL", "NVDA"]) == []
+
+
 SCENARIOS = [
     ("rounds default is 1", test_rounds_default_is_one),
     ("rounds set/get round-trip", test_rounds_set_get_roundtrip),
@@ -496,6 +511,10 @@ SCENARIOS = [
     (
         "enrolled: empty watchlist → []",
         test_enrolled_empty_watchlist_returns_empty,
+    ),
+    (
+        "enrolled: explicit empty filter (tickers=[]) → []",
+        test_enrolled_explicit_empty_filter_returns_empty,
     ),
 ]
 
