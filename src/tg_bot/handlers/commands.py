@@ -72,7 +72,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/add <ticker> [...] - Add tickers (e.g. /add NVDA AAPL). "
         "With no args, the bot prompts you.\n"
         "/del [<ticker> ...] - Remove tickers. With no args, opens a picker.\n"
-        "/watch or /list - Paginated watchlist; tap to select, "
+        "/list - Show your watchlist as text + digest enrolment "
+        "(read-only).\n"
+        "/watch - Paginated watchlist picker; tap to select, "
         "Done to run (parallel for multiple).\n"
         "/config - Pick LLM provider + deep/quick think models.\n"
         "/digest - Schedule a daily auto-run; pick time zone, hour, "
@@ -336,6 +338,106 @@ async def list_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(text)
     else:
         await update.message.reply_text(text, reply_markup=kb, parse_mode="MarkdownV2")
+
+
+_LIST_ROW_WIDTH = 4
+
+
+def _digest_enrolled_set(digest: dict | None, watchlist: list[str]) -> set[str] | None:
+    """Effective digest enrolment for the current watchlist.
+
+    None → digest off (caller suppresses the digest header line entirely).
+    Set → enrolled tickers intersected with the live watchlist (drops
+    stragglers the user removed from the watchlist after enrolling them).
+    Legacy save with `tickers` key absent is treated as "all watchlist"
+    per the backward-compat rule documented in CLAUDE.md's "Digest
+    schedule" key contract.
+
+    Duplicates the intersection logic in `analysis_runner.run_user_digest`
+    + 3 sites in `digest.py`. See the GitHub issue "extract
+    get_enrolled_tickers" — keeping inline here so this PR stays scoped
+    to the UX add.
+    """
+    if not digest or not digest.get("enabled"):
+        return None
+    tickers = digest.get("tickers")
+    if tickers is None:
+        return set(watchlist)
+    return {t.upper() for t in tickers} & set(watchlist)
+
+
+def _format_list_view(
+    watchlist: list[str],
+    digest: dict | None,
+    enrolled: set[str] | None,
+) -> str:
+    """MarkdownV2 grid renderer for `/list`. Tickers in monospace,
+    `_LIST_ROW_WIDTH` per row. 🔔 prefix only when there's an active
+    filter (not when 'all watchlist fires') — a marker on every ticker
+    is noise."""
+    parts: list[str] = []
+    parts.append(f"📋 *Watchlist* — {len(watchlist)} tickers")
+
+    if digest is not None and enrolled is not None:
+        hour = digest.get("hour_local", 0)
+        tz_label = tz_short(digest.get("tz"))
+        all_watchlist = enrolled == set(watchlist)
+        if all_watchlist:
+            tally = f"all {len(watchlist)} fire daily"
+        else:
+            tally = f"{len(enrolled)} of {len(watchlist)} enrolled"
+        # tz_label may contain a slash from raw IANA fallback ("America/Los_Angeles")
+        # which is a MarkdownV2 special char and must be escaped outside code spans.
+        parts.append(
+            f"🔔 *Digest* — `{hour:02d}:00` {escape_markdown(tz_label, version=2)} · {tally}"
+        )
+
+    parts.append("")  # blank line between header and grid
+
+    show_markers = (
+        digest is not None and enrolled is not None and enrolled != set(watchlist)
+    )
+    for i in range(0, len(watchlist), _LIST_ROW_WIDTH):
+        row_tickers = watchlist[i : i + _LIST_ROW_WIDTH]
+        cells = []
+        for t in row_tickers:
+            marker = "🔔 " if show_markers and t in enrolled else "    "
+            cells.append(f"{marker}`{t}`")
+        parts.append("  ".join(cells))
+
+    parts.append("")  # blank line before footer
+    if digest is None:
+        parts.append("_Daily digest off — use /digest to enable\\._")
+    elif enrolled is not None and not enrolled:
+        # Digest enabled but filter set excludes the entire watchlist.
+        # The fan-out treats this as "nothing to do" and sends a reminder;
+        # surface that state so the user understands why.
+        parts.append("_Digest enabled but no tickers enrolled — /digest to fix\\._")
+
+    return "\n".join(parts)
+
+
+async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Read-only watchlist view + digest enrolment status. Unlike /watch
+    (the picker for actioning tickers), this is pure read — no
+    chat_data, no callbacks, no inline keyboard. Surfaces the digest
+    filter membership inline (🔔) since that subset is otherwise buried
+    two screens deep inside /digest."""
+    user_id = update.effective_user.id
+    uid_str = str(user_id)
+    watchlist = watchlist_storage.get_watchlist(uid_str)
+
+    if not watchlist:
+        await update.message.reply_text(
+            "📋 Watchlist is empty\\. Use `/add NVDA AAPL` to start\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    digest = user_config_storage.get_digest(uid_str)
+    enrolled = _digest_enrolled_set(digest, watchlist)
+    text = _format_list_view(watchlist, digest, enrolled)
+    await update.message.reply_text(text, parse_mode="MarkdownV2")
 
 
 async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

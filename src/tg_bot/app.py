@@ -26,6 +26,7 @@ from tg_bot.handlers import (
     digest_cmd,
     help_cmd,
     history_cmd,
+    list_cmd,
     list_watchlist,
     refresh_cmd,
     start,
@@ -47,8 +48,8 @@ BOT_COMMANDS = [
     BotCommand("help", "Show available commands"),
     BotCommand("add", "Add a ticker to your watchlist"),
     BotCommand("del", "Remove a ticker from your watchlist"),
-    BotCommand("watch", "Show your watchlist"),
-    BotCommand("list", "Show your watchlist (alias)"),
+    BotCommand("watch", "Watchlist picker — tap tickers to analyze"),
+    BotCommand("list", "Show your watchlist as text + digest enrolment"),
     BotCommand("config", "Configure LLM provider and models"),
     BotCommand("digest", "Schedule a daily summary of your watchlist"),
     BotCommand("history", "Look up a past analysis"),
@@ -192,7 +193,7 @@ def _build_application() -> Application:
     application.add_handler(CommandHandler("add", add_ticker))
     application.add_handler(CommandHandler("del", del_ticker))
     application.add_handler(CommandHandler("watch", list_watchlist))
-    application.add_handler(CommandHandler("list", list_watchlist))
+    application.add_handler(CommandHandler("list", list_cmd))
     application.add_handler(CommandHandler("config", config_cmd))
     application.add_handler(CommandHandler("digest", digest_cmd))
     application.add_handler(CommandHandler("history", history_cmd))

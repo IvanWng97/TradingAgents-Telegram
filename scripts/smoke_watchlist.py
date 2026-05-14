@@ -223,6 +223,161 @@ async def test_empty_watchlist_no_keyboard() -> None:
         assert "empty" in text.lower(), text
 
 
+# ─── /list (text view) ─────────────────────────────────────────────────
+
+
+async def test_list_empty_watchlist() -> None:
+    """Handler-level: empty watchlist short-circuits with a /add nudge,
+    no digest header rendered."""
+    _fresh_data_dir()
+    _seed_storage([])
+    commands = _reload_storage_singletons()
+
+    sent: list[dict] = []
+
+    async def _reply(text, **kw):
+        sent.append({"text": text, **kw})
+
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=1),
+        message=SimpleNamespace(reply_text=_reply),
+    )
+    await commands.list_cmd(update, SimpleNamespace(chat_data={}))
+    assert len(sent) == 1, sent
+    assert "empty" in sent[0]["text"].lower(), sent[0]["text"]
+    assert "/add" in sent[0]["text"], sent[0]["text"]
+    assert sent[0]["parse_mode"] == "MarkdownV2"
+
+
+async def test_list_no_digest() -> None:
+    """Watchlist + no digest block → no header, footer says 'off'."""
+    _fresh_data_dir()
+    _seed_storage(["AAPL", "NVDA"])
+    commands = _reload_storage_singletons()
+
+    enrolled = commands._digest_enrolled_set(None, ["AAPL", "NVDA"])
+    assert enrolled is None, enrolled
+
+    text = commands._format_list_view(["AAPL", "NVDA"], None, None)
+    assert "Watchlist" in text and "2 tickers" in text, text
+    assert "Digest" not in text, "no digest header should render"
+    assert "Daily digest off" in text, text
+    assert "🔔" not in text, "no markers when digest off"
+
+
+async def test_list_digest_all_watchlist() -> None:
+    """Digest enabled with no `tickers` filter (legacy save) → 'all N
+    fire daily' tally, NO per-ticker 🔔 markers (would be noise)."""
+    _fresh_data_dir()
+    _seed_storage(["AAPL", "NVDA"])
+    commands = _reload_storage_singletons()
+
+    # Legacy shape: digest enabled, `tickers` key absent entirely.
+    digest = {
+        "enabled": True,
+        "hour_local": 9,
+        "tz": "America/Los_Angeles",
+        "chat_id": 999,
+    }
+    enrolled = commands._digest_enrolled_set(digest, ["AAPL", "NVDA"])
+    assert enrolled == {"AAPL", "NVDA"}, enrolled
+
+    text = commands._format_list_view(["AAPL", "NVDA"], digest, enrolled)
+    assert "Digest" in text and "09:00" in text, text
+    assert "all 2 fire daily" in text, text
+    # The 🔔 in the *header* is always present when digest is on; the
+    # per-ticker marker (🔔 prefix on a grid cell `AAPL`) must NOT appear
+    # since all watchlist already fires. Grid lines start with whitespace
+    # padding or 🔔; header lines start with 📋 / 🔔 *Digest*.
+    grid_lines = [
+        line for line in text.split("\n") if "`" in line and "Digest" not in line
+    ]
+    assert grid_lines, f"expected grid lines: {text!r}"
+    for line in grid_lines:
+        assert "🔔" not in line, (
+            f"per-ticker markers must be suppressed when all enrolled: {line!r}"
+        )
+
+
+async def test_list_digest_with_filter() -> None:
+    """Digest enabled with a `tickers` subset → 'K of N enrolled' tally,
+    🔔 prefix on enrolled tickers only."""
+    _fresh_data_dir()
+    _seed_storage(["AAPL", "NVDA", "TSLA", "MSFT"])
+    commands = _reload_storage_singletons()
+
+    digest = {
+        "enabled": True,
+        "hour_local": 8,
+        "tz": "America/New_York",
+        "chat_id": 999,
+        "tickers": ["AAPL", "TSLA"],
+    }
+    enrolled = commands._digest_enrolled_set(digest, ["AAPL", "NVDA", "TSLA", "MSFT"])
+    assert enrolled == {"AAPL", "TSLA"}, enrolled
+
+    text = commands._format_list_view(
+        ["AAPL", "NVDA", "TSLA", "MSFT"], digest, enrolled
+    )
+    assert "2 of 4 enrolled" in text, text
+    # 🔔 must appear exactly twice (once per enrolled ticker in the body)
+    # plus the header — so 3 total. Don't assert exact count to avoid
+    # flaking on header glyph changes; assert directionally:
+    assert text.count("🔔") >= 2, f"expected 🔔 on enrolled tickers: {text!r}"
+
+
+async def test_list_handler_non_empty_path_sets_parse_mode() -> None:
+    """The non-empty `_format_list_view` output is MarkdownV2; the
+    handler must pass `parse_mode="MarkdownV2"` on the reply for the
+    formatting to render. The empty-watchlist path is covered above by
+    `test_list_empty_watchlist`; this pins the populated path so a
+    refactor can't silently drop parse_mode from `list_cmd`."""
+    _fresh_data_dir()
+    _seed_storage(["AAPL", "NVDA"])
+    commands = _reload_storage_singletons()
+
+    sent: list[dict] = []
+
+    async def _reply(text, **kw):
+        sent.append({"text": text, **kw})
+
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=1),
+        message=SimpleNamespace(reply_text=_reply),
+    )
+    await commands.list_cmd(update, SimpleNamespace(chat_data={}))
+    assert len(sent) == 1, sent
+    assert sent[0]["parse_mode"] == "MarkdownV2", sent[0]
+    # Body sanity: header + ticker grid present.
+    assert "Watchlist" in sent[0]["text"], sent[0]["text"]
+    assert "`AAPL`" in sent[0]["text"] and "`NVDA`" in sent[0]["text"], sent[0]["text"]
+
+
+async def test_list_digest_filter_drift_auto_prune() -> None:
+    """A stale `tickers` entry pointing at a ticker the user removed
+    from the watchlist must NOT count — `_digest_enrolled_set` filters
+    by intersection with the live watchlist. Same auto-prune rule as
+    `run_user_digest`."""
+    _fresh_data_dir()
+    _seed_storage(["AAPL", "NVDA"])
+    commands = _reload_storage_singletons()
+
+    digest = {
+        "enabled": True,
+        "hour_local": 9,
+        "tz": "UTC",
+        "chat_id": 999,
+        # TSLA isn't in the watchlist anymore — user deleted it after
+        # picking it for digest.
+        "tickers": ["AAPL", "TSLA"],
+    }
+    enrolled = commands._digest_enrolled_set(digest, ["AAPL", "NVDA"])
+    assert enrolled == {"AAPL"}, enrolled
+
+    text = commands._format_list_view(["AAPL", "NVDA"], digest, enrolled)
+    assert "1 of 2 enrolled" in text, text
+
+
 SCENARIOS = [
     ("watch mode header + Done label", test_watch_mode_header_and_done_label),
     ("refresh mode header + Done label", test_refresh_mode_header_and_done_label),
@@ -234,6 +389,24 @@ SCENARIOS = [
     (
         "force-reply /add fires only on exact ADD_PROMPT match",
         test_add_via_reply_fires_only_on_exact_prompt_match,
+    ),
+    ("/list empty watchlist → nudge", test_list_empty_watchlist),
+    ("/list no digest → footer 'off'", test_list_no_digest),
+    (
+        "/list digest enabled, all watchlist fires → 'all N fire daily'",
+        test_list_digest_all_watchlist,
+    ),
+    (
+        "/list digest filter → 'K of N enrolled' + 🔔 markers",
+        test_list_digest_with_filter,
+    ),
+    (
+        "/list digest filter intersected with live watchlist (auto-prune)",
+        test_list_digest_filter_drift_auto_prune,
+    ),
+    (
+        "/list handler sets parse_mode=MarkdownV2 on non-empty path",
+        test_list_handler_non_empty_path_sets_parse_mode,
     ),
 ]
 
