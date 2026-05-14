@@ -1106,59 +1106,73 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
 
     last_edit_at = 0.0
     edit_in_flight = False
+    pending_rerender = False
     blocked = False
 
     async def _render() -> None:
-        """Single-flight, throttle-deferring render.
+        """Single-flight, trampolining render.
 
-        If two state changes fire within the throttle window (common at
-        fan-out start when N tickers acquire the sem simultaneously),
-        only the first one schedules an edit — the rest bail. The
-        scheduled edit waits out the remaining cooldown and then reads
-        the *current* status dict, so the second ticker's transition
-        from ⏳ → 📊 isn't lost just because it raced with the first.
+        If a state change fires while an edit is already in flight, the
+        bailed call sets `pending_rerender` and the running render loops
+        back to repaint once its HTTP edit returns. Without this, the
+        bailed render is permanently lost — observable when one ticker
+        cache-hits (instant `status` flip → `_render` enters its HTTP
+        edit) and the next ticker's `report_starting` arrives mid-flight:
+        no future `_render` fires until the second ticker's first real
+        LLM-callback event (5–30s into graph cold-start), so the row
+        sits on ⏳ even though the slot is taken. The throttle is still
+        respected because each loop iteration recomputes `wait` against
+        `last_edit_at`.
         """
-        nonlocal last_edit_at, edit_in_flight, blocked
-        if blocked or edit_in_flight:
+        nonlocal last_edit_at, edit_in_flight, pending_rerender, blocked
+        if blocked:
+            return
+        if edit_in_flight:
+            pending_rerender = True
             return
         edit_in_flight = True
         try:
-            wait = _DIGEST_PROGRESS_INTERVAL - (time.monotonic() - last_edit_at)
-            if wait > 0:
-                await asyncio.sleep(wait)
-            if blocked:
-                return
-            last_edit_at = time.monotonic()
-            text = _format_digest_progress(watchlist, status, safe_date)
-            try:
-                # Re-attach the cancel button on every edit — Telegram
-                # drops reply_markup unless re-sent with each edit.
-                await application.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=header.message_id,
-                    text=text,
-                    parse_mode="HTML",
-                    reply_markup=cancel_kb,
-                )
-            except Forbidden:
-                logger.warning(
-                    "digest: user %s blocked the bot mid-run, disabling", user_id
-                )
-                await user_config_storage.disable_digest(user_id)
-                cancel_digest_job(application, user_id)
-                blocked = True
-                # User can't receive the output anyway — abort the
-                # remaining fan-out so we stop spending LLM tokens on
-                # a chat we'll never deliver to. Mirrors the user-tap
-                # cancel path: threading event for in-flight tickers,
-                # asyncio.cancel for pending ones.
-                cancel_event.set()
-                for t in tasks_holder:
-                    if not t.done():
-                        t.cancel()
-            except Exception as e:
-                # "message is not modified" or transient — keep going.
-                logger.debug("digest progress edit skipped: %s", e)
+            while True:
+                pending_rerender = False
+                wait = _DIGEST_PROGRESS_INTERVAL - (time.monotonic() - last_edit_at)
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                if blocked:
+                    return
+                last_edit_at = time.monotonic()
+                text = _format_digest_progress(watchlist, status, safe_date)
+                try:
+                    # Re-attach the cancel button on every edit — Telegram
+                    # drops reply_markup unless re-sent with each edit.
+                    await application.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=header.message_id,
+                        text=text,
+                        parse_mode="HTML",
+                        reply_markup=cancel_kb,
+                    )
+                except Forbidden:
+                    logger.warning(
+                        "digest: user %s blocked the bot mid-run, disabling", user_id
+                    )
+                    await user_config_storage.disable_digest(user_id)
+                    cancel_digest_job(application, user_id)
+                    blocked = True
+                    # User can't receive the output anyway — abort the
+                    # remaining fan-out so we stop spending LLM tokens on
+                    # a chat we'll never deliver to. Mirrors the user-tap
+                    # cancel path: threading event for in-flight tickers,
+                    # asyncio.cancel for pending ones.
+                    cancel_event.set()
+                    for t in tasks_holder:
+                        if not t.done():
+                            t.cancel()
+                    return
+                except Exception as e:
+                    # "message is not modified" or transient — keep going.
+                    logger.debug("digest progress edit skipped: %s", e)
+                if not pending_rerender:
+                    break
         finally:
             edit_in_flight = False
 

@@ -830,6 +830,81 @@ async def test_render_deferred_captures_latest_state() -> None:
         runner._DIGEST_PROGRESS_INTERVAL = orig_iv
 
 
+async def test_render_trampolines_after_cache_hit_neighbour() -> None:
+    """Regression: when one ticker is a cache hit (instant `status`
+    flip → `_render` enters edit_message_text immediately) and another
+    is mid-startup (calls `report_starting` while T1's edit is on the
+    wire), the bailed render must trampoline once T1's edit returns.
+    Without the rerender flag, T2 sits on ⏳ until its first real LLM
+    callback fires inside `to_thread` (5–30s in production), even
+    though the slot is already taken.
+
+    The default `_FakeFanOutBot.edit_message_text` is purely
+    synchronous — no `await` to yield on, so coroutines can't actually
+    interleave during the "edit." Without a yield point inside the
+    mocked HTTP call, T2's `report_starting` won't arrive while T1's
+    render holds `edit_in_flight=True`, and the trampoline never gets
+    exercised (both old + new code paint identical edits). Subclass
+    with `await asyncio.sleep(0)` so the bailed-during-edit path is
+    actually triggered — without this, the test passes against the
+    buggy old code too.
+    """
+    from tg_bot.handlers import analysis_runner as runner
+
+    class _W:
+        def get_watchlist(self, _u):
+            return ["CACHED", "FRESH"]
+
+    class _YieldingBot(_FakeFanOutBot):
+        async def edit_message_text(self, chat_id, message_id, text, **kw):
+            await asyncio.sleep(0)  # force a yield mid-edit
+            await super().edit_message_text(chat_id, message_id, text, **kw)
+
+    class _YieldingApp(_FakeFanOutApp):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bot = _YieldingBot()
+
+    async def _fake(_uid, ticker, reporter=None):
+        if ticker == "CACHED":
+            # Cache-hit path: no report_starting, instant return. Mirrors
+            # the real `_analyze_one_for_digest` short-circuit.
+            return {"ticker": ticker, "signal": "BUY", "telegraph_url": None}
+        # Fresh path: sem acquire happens inside (skipped here), then
+        # report_starting flips ⏳ → 📊 Starting…, then a long LLM sleep.
+        if reporter is not None:
+            await reporter.report_starting()
+        await asyncio.sleep(0.6)
+        return {"ticker": ticker, "signal": "BUY", "telegraph_url": None}
+
+    orig_w = runner.watchlist_storage
+    orig_a = runner._analyze_one_for_digest
+    orig_iv = runner._DIGEST_PROGRESS_INTERVAL
+    runner.watchlist_storage = _W()
+    runner._analyze_one_for_digest = _fake
+    runner._DIGEST_PROGRESS_INTERVAL = 0.1
+    try:
+        app = _YieldingApp()
+        await runner.run_user_digest(app, 42, 999)
+        # FRESH must appear as 📊 in at least one progress edit. Before
+        # the trampoline fix, T1's instant cache-hit edit consumed the
+        # only render slot, the FRESH "Starting…" render bailed, and no
+        # further edit fired until FRESH completed (skipping the
+        # 📊 row entirely).
+        progress_edits = [e["text"] for e in app.bot.edits]
+        fresh_visible_as_analyzing = [
+            t for t in progress_edits if "FRESH" in t and "📊" in t
+        ]
+        assert fresh_visible_as_analyzing, (
+            "FRESH never appeared in 📊 state during fan-out — trampoline "
+            f"didn't fire. Edits seen: {progress_edits!r}"
+        )
+    finally:
+        runner.watchlist_storage = orig_w
+        runner._analyze_one_for_digest = orig_a
+        runner._DIGEST_PROGRESS_INTERVAL = orig_iv
+
+
 async def test_progress_completed_row_matches_summary() -> None:
     """A completed ticker should render identically in the progress
     view and the final summary — same signal emoji + Telegraph link, no
@@ -1689,6 +1764,10 @@ SCENARIOS = [
     (
         "deferred render captures latest state",
         test_render_deferred_captures_latest_state,
+    ),
+    (
+        "render trampolines after cache-hit neighbour",
+        test_render_trampolines_after_cache_hit_neighbour,
     ),
     (
         "progress completed row matches summary",
