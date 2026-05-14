@@ -131,32 +131,27 @@ jobs:
               targeted line range — keep it syntactically complete)
             - `confirmed: true` so the comment posts immediately
 
-            For **cross-cutting findings** — invariant violations
-            spanning multiple files, dataflow drift, missing smoke
-            across suites — call
-            `gh pr comment $PR_NUMBER --body "$body"` with a markdown
-            body. Heading "## Cross-cutting findings" + numbered list
-            with file:line refs for each.
+            **ALWAYS post one `gh pr comment $PR_NUMBER --body "$body"`,
+            even on clean PRs.** This is the visibility signal — without
+            it, "review ran and found nothing" is indistinguishable from
+            "review broke silently." The body shape varies:
 
-            Empty cases (post nothing in either tool):
-            - No findings → done. The summary path stays empty.
-            - All findings posted inline (no cross-cutting) → done. The
-              summary stays empty; the inline comments are the review.
+            - **Cross-cutting findings exist** (invariant violations
+              spanning files, dataflow drift, missing smoke across
+              suites): body = `## Cross-cutting findings` + numbered
+              list with file:line refs. If you also posted inline
+              comments, prepend one line: `📝 Also posted N inline
+              finding(s) below.`
+            - **Only inline findings (no cross-cutting)**: body = one
+              line: `🤖 Auto-review: posted N inline finding(s) — see
+              file comments.`
+            - **No findings**: body = one line: `🤖 Auto-review: clean
+              — <one-sentence reason why this diff is OK>.`
+
+            Always prefix the body with the hidden marker
+            `<!-- claude-auto-review:summary -->` on its own first line.
+            Future tooling may use it to find + update the comment in
+            place across re-reviews; including it preemptively keeps
+            us forward-compatible.
 
             Cap 5 findings TOTAL across inline + summary.
-
-            **Final signal** — REQUIRED. As the last line of your
-            assistant response (your `result` field), print exactly one
-            of these (no other text after, no markdown around):
-
-              signal: posted <N> inline, <M> summary
-
-            …with the actual counts you posted via tools. OR, if you
-            found nothing actionable:
-
-              signal: clean — <one-sentence reason why this diff is OK>
-
-            This line is parsed downstream to distinguish "no findings"
-            from "posting was silently denied." A run with no comments
-            and no signal line is treated as broken. Do not include the
-            review text in the response — only this signal line.
