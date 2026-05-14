@@ -579,7 +579,7 @@ async def _run_analysis_for_ticker(
             summary=summary,
             config_summary=key.caption(),
         )
-        await context.bot.edit_message_caption(
+        context.bot.edit_message_caption(
             chat_id=chat_id,
             message_id=progress_msg.message_id,
             caption=caption,
