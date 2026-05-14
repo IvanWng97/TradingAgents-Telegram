@@ -1,4 +1,4 @@
-"""Smoke tests for the same-day result cache (`tg_bot.cache`).
+"""Smoke tests for the same-day result cache (`tg_bot.pipeline.cache`).
 
 The cache API now takes `AnalysisConfigKey` directly (no positional
 provider/deep/quick/rounds/effort explosion), and the cache-hygiene
@@ -36,7 +36,7 @@ FAIL = "\033[91m✗\033[0m"
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from tg_bot.config_key import AnalysisConfigKey  # noqa: E402
+from tg_bot.pipeline.config_key import AnalysisConfigKey  # noqa: E402
 
 
 def _fresh_data_dir() -> Path:
@@ -67,14 +67,14 @@ PLACEHOLDER_URL = "https://telegra.ph/test-placeholder"
 
 async def test_lookup_miss_returns_none() -> None:
     _fresh_data_dir()
-    from tg_bot import cache
+    from tg_bot.pipeline import cache
 
     assert cache.lookup(DEFAULT_KEY, "NVDA", "2026-05-09") is None
 
 
 async def test_store_then_lookup_roundtrip() -> None:
     _fresh_data_dir()
-    from tg_bot import cache
+    from tg_bot.pipeline import cache
 
     cache.store(
         DEFAULT_KEY,
@@ -95,7 +95,7 @@ async def test_different_config_isolates() -> None:
     """Different (provider, deep, quick) combos must NOT collide — the
     LLM output for two providers on the same ticker is genuinely different."""
     _fresh_data_dir()
-    from tg_bot import cache
+    from tg_bot.pipeline import cache
 
     key_openai = DEFAULT_KEY
     key_deepseek = AnalysisConfigKey(
@@ -122,7 +122,7 @@ async def test_same_config_shares_across_users() -> None:
     """The cache key has no user_id — two users on the same config get
     a shared hit on the second tap. This is the core correctness guarantee."""
     _fresh_data_dir()
-    from tg_bot import cache
+    from tg_bot.pipeline import cache
 
     key = AnalysisConfigKey(
         provider="deepseek", deep="deepseek-v4", quick="deepseek-chat"
@@ -139,7 +139,7 @@ async def test_lazy_eviction_drops_old_dates() -> None:
     """When a fresh date lands for the same (config, ticker), older
     date files in that directory are swept. Bounds disk growth."""
     _fresh_data_dir()
-    from tg_bot import cache
+    from tg_bot.pipeline import cache
 
     # Yesterday's run.
     cache.store(DEFAULT_KEY, "NVDA", "2026-05-08", SAMPLE_STATE, "BUY", PLACEHOLDER_URL)
@@ -164,7 +164,7 @@ async def test_lazy_eviction_drops_old_dates() -> None:
 async def test_corrupt_file_returns_none() -> None:
     """A truncated / hand-edited cache file should never crash a run."""
     _fresh_data_dir()
-    from tg_bot import cache
+    from tg_bot.pipeline import cache
 
     cache.store(DEFAULT_KEY, "NVDA", "2026-05-09", SAMPLE_STATE, "BUY", PLACEHOLDER_URL)
     # Stomp the file with garbage.
@@ -184,7 +184,7 @@ async def test_slug_handles_special_chars() -> None:
     """Provider/model strings with `/`, `:`, etc. don't blow up the path —
     `AnalysisConfigKey.slug()` sanitizes these to filesystem-safe form."""
     _fresh_data_dir()
-    from tg_bot import cache
+    from tg_bot.pipeline import cache
 
     key = AnalysisConfigKey(
         provider="openrouter/anthropic",
@@ -202,7 +202,7 @@ async def test_non_serializable_objects_in_state() -> None:
     these via `default=` instead of failing the whole write — otherwise
     every run leaves an orphan .tmp and the next lookup misses."""
     _fresh_data_dir()
-    from tg_bot import cache
+    from tg_bot.pipeline import cache
 
     class FakeMessage:
         """Pydantic-v1 style — has .dict() returning a serializable form."""
@@ -242,7 +242,7 @@ async def test_default_rounds_effort_keeps_slug() -> None:
     shape (`provider__deep__quick`) so existing on-disk cache entries
     don't get orphaned when the rounds/effort feature ships."""
     _fresh_data_dir()
-    from tg_bot import cache
+    from tg_bot.pipeline import cache
 
     cache.store(DEFAULT_KEY, "NVDA", "2026-05-09", SAMPLE_STATE, "BUY", PLACEHOLDER_URL)
     expected = (
@@ -259,7 +259,7 @@ async def test_custom_rounds_isolate_slot() -> None:
     """rounds=1 vs rounds=2 must NOT share a cache file — they produce
     genuinely different LLM output."""
     _fresh_data_dir()
-    from tg_bot import cache
+    from tg_bot.pipeline import cache
 
     key_r1 = AnalysisConfigKey(
         provider="openai", deep="gpt-4o", quick="o4-mini", rounds=1
@@ -278,7 +278,7 @@ async def test_custom_rounds_isolate_slot() -> None:
 async def test_custom_effort_isolates_slot() -> None:
     """Different effort levels (or None vs set) must isolate cache slots."""
     _fresh_data_dir()
-    from tg_bot import cache
+    from tg_bot.pipeline import cache
 
     key_high = AnalysisConfigKey(
         provider="openai", deep="gpt-4o", quick="o4-mini", effort="high"
@@ -295,7 +295,7 @@ async def test_generated_at_persisted() -> None:
     """Every store() stamps `generated_at` (ISO UTC) so cache-hit renders
     can show the original analysis time instead of the moment-of-tap."""
     _fresh_data_dir()
-    from tg_bot import cache
+    from tg_bot.pipeline import cache
 
     cache.store(DEFAULT_KEY, "NVDA", "2026-05-09", SAMPLE_STATE, "BUY", PLACEHOLDER_URL)
     got = cache.lookup(DEFAULT_KEY, "NVDA", "2026-05-09")
@@ -309,7 +309,7 @@ async def test_atomic_write_is_complete_json() -> None:
     """Reading right after a store must always yield valid JSON — no
     partial writes (the rename pattern guarantees this)."""
     _fresh_data_dir()
-    from tg_bot import cache
+    from tg_bot.pipeline import cache
 
     cache.store(
         DEFAULT_KEY, "NVDA", "2026-05-09", SAMPLE_STATE, "BUY", "https://example.com"
@@ -338,7 +338,7 @@ async def test_store_gate_skips_falsy_telegraph_url() -> None:
     gate prevents that at the write site, so callers can pass the URL
     directly without remembering to gate."""
     _fresh_data_dir()
-    from tg_bot import cache
+    from tg_bot.pipeline import cache
 
     # None URL → no-op
     cache.store(DEFAULT_KEY, "INTU", "2026-05-11", SAMPLE_STATE, "HOLD", None)
@@ -360,7 +360,7 @@ async def test_today_iso_returns_local_iso_date() -> None:
     """`today_iso()` returns the LOCAL-date ISO string — matches both the
     cache key AND tradingagents' on-disk log filename convention. Using a
     UTC stamp would 404 for late-night runs from negative-UTC zones."""
-    from tg_bot import cache
+    from tg_bot.pipeline import cache
     from datetime import date
 
     out = cache.today_iso()

@@ -33,8 +33,8 @@ from telegram.error import Forbidden
 from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
-from tg_bot import cache as result_cache
-from tg_bot.analysis import (
+from tg_bot.pipeline import cache as result_cache
+from tg_bot.pipeline.analysis import (
     TRADINGAGENTS_AVAILABLE,
     build_user_config,
     check_llm_configured,
@@ -42,9 +42,9 @@ from tg_bot.analysis import (
     run_trading_analysis,
 )
 from tg_bot.config import Config
-from tg_bot.config_key import AnalysisConfigKey
-from tg_bot.chart import finviz_chart_url
-from tg_bot.formatters import (
+from tg_bot.pipeline.config_key import AnalysisConfigKey
+from tg_bot.rendering.chart import finviz_chart_url
+from tg_bot.rendering.formatters import (
     DECISION_EMOJI,
     caption_summary,
     format_analysis_result_markdown,
@@ -52,14 +52,17 @@ from tg_bot.formatters import (
     format_short_message,
 )
 from tg_bot.history import load_historical_state
-from tg_bot.progress import (
+from tg_bot.pipeline.progress import (
     TOTAL_STEPS,
     CancelledByUserError,
     ProgressReporter,
     resolve_step,
 )
 from tg_bot.storage import user_config_storage, watchlist_storage
-from tg_bot.telegraph_client import _path_from_telegraph_url, publish_to_telegraph
+from tg_bot.rendering.telegraph_client import (
+    _path_from_telegraph_url,
+    publish_to_telegraph,
+)
 
 
 logger = logging.getLogger(__name__)

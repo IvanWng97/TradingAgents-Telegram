@@ -14,7 +14,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
-from tg_bot.analysis import (
+from tg_bot.pipeline.analysis import (
     check_llm_configured,
     get_model_options,
     has_model_catalog,
@@ -30,7 +30,7 @@ from tg_bot.handlers.analysis_runner import (
     cancel_digest_job,
     register_digest_job,
 )
-from tg_bot.handlers.commands import (
+from tg_bot.handlers.pickers import (
     build_del_keyboard,
     build_history_dates_response,
     build_history_response,

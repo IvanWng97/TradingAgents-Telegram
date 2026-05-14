@@ -35,7 +35,7 @@ FAIL = "\033[91m✗\033[0m"
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import tg_bot.telegraph_client as tc  # noqa: E402
+import tg_bot.rendering.telegraph_client as tc  # noqa: E402
 
 
 class _StubClient:

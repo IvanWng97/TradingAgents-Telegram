@@ -11,7 +11,7 @@ from datetime import date
 from telegram.helpers import escape_markdown
 
 from tg_bot.config import Config
-from tg_bot.progress import (
+from tg_bot.pipeline.progress import (
     ProgressReporter,
     delegating_progress_callback,
     set_reporter,
@@ -402,7 +402,7 @@ def _get_or_create_pool(config: dict) -> GraphPool:
     # Using it here keeps invariant #1 enforced structurally: any future
     # knob added to the dataclass flows into the pool key automatically,
     # so there's no manual sync risk.
-    from tg_bot.config_key import AnalysisConfigKey
+    from tg_bot.pipeline.config_key import AnalysisConfigKey
 
     key = AnalysisConfigKey.from_config(config)
 

@@ -46,7 +46,7 @@ from datetime import date as _date, datetime, UTC
 from pathlib import Path
 from typing import Any
 
-from tg_bot.config_key import AnalysisConfigKey
+from tg_bot.pipeline.config_key import AnalysisConfigKey
 
 
 logger = logging.getLogger(__name__)

@@ -65,7 +65,7 @@ class AnalysisConfigKey:
         analysis at module load would create a cycle. The dict is
         module-level on analysis so the lookup is O(1) once the import
         is cached after first call."""
-        from tg_bot.analysis import EFFORT_KEY_BY_PROVIDER
+        from tg_bot.pipeline.analysis import EFFORT_KEY_BY_PROVIDER
 
         return cls(
             provider=config.get("llm_provider", "unknown"),

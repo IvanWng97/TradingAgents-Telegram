@@ -1021,7 +1021,7 @@ async def test_fanout_cancel_pending_via_task_cancel() -> None:
             started.set()
             while not release.is_set():
                 await asyncio.sleep(0.02)
-            from tg_bot.progress import CancelledByUserError
+            from tg_bot.pipeline.progress import CancelledByUserError
 
             raise CancelledByUserError("simulated mid-flight cancel")
         finally:
@@ -1109,7 +1109,7 @@ async def test_fanout_forbidden_during_progress_edit() -> None:
         for _ in range(50):
             await asyncio.sleep(0.05)
             if reporter and reporter.cancel_event and reporter.cancel_event.is_set():
-                from tg_bot.progress import CancelledByUserError
+                from tg_bot.pipeline.progress import CancelledByUserError
 
                 raise CancelledByUserError("forbidden auto-cancel")
         return {"ticker": _t, "signal": "BUY", "telegraph_url": None}
@@ -1251,7 +1251,7 @@ async def test_fanout_cancel_mid_run() -> None:
                 break
         # Raise the canonical "user-cancelled" exception so _wrapped's
         # except branch fires.
-        from tg_bot.progress import CancelledByUserError
+        from tg_bot.pipeline.progress import CancelledByUserError
 
         raise CancelledByUserError("cancelled in test")
 
@@ -1683,7 +1683,7 @@ async def test_fanout_empty_filter_reminder() -> None:
 async def test_llm_precheck_no_provider() -> None:
     """Without /config, the precheck reports a `no provider` reason —
     callers render a 'tap /config' message instead of running analysis."""
-    from tg_bot.analysis import check_llm_configured
+    from tg_bot.pipeline.analysis import check_llm_configured
 
     s, _ = fresh_storage()
     reason = check_llm_configured("42", s)
@@ -1692,7 +1692,7 @@ async def test_llm_precheck_no_provider() -> None:
 
 async def test_llm_precheck_missing_env_key() -> None:
     """Provider picked but matching env var unset → reason names the var."""
-    from tg_bot.analysis import check_llm_configured
+    from tg_bot.pipeline.analysis import check_llm_configured
 
     s, _ = fresh_storage()
     await s.set_llm_provider("42", "deepseek")
@@ -1707,7 +1707,7 @@ async def test_llm_precheck_missing_env_key() -> None:
 
 async def test_llm_precheck_ok() -> None:
     """Provider set + matching env var present → returns None (gate opens)."""
-    from tg_bot.analysis import check_llm_configured
+    from tg_bot.pipeline.analysis import check_llm_configured
 
     s, _ = fresh_storage()
     await s.set_llm_provider("42", "deepseek")
@@ -1723,7 +1723,7 @@ async def test_llm_precheck_openrouter_missing_env_key() -> None:
     OPENROUTER_API_KEY when unset, instead of the user hitting the
     cryptic 'OPENAI_API_KEY missing' from the openai SDK at LLM-init
     time."""
-    from tg_bot.analysis import check_llm_configured
+    from tg_bot.pipeline.analysis import check_llm_configured
 
     s, _ = fresh_storage()
     await s.set_llm_provider("42", "openrouter")
@@ -1742,7 +1742,7 @@ async def test_openrouter_model_catalog_patched_in() -> None:
     Without this, runs silently use DEFAULT_CONFIG (the openai catalog) —
     works against openrouter today but accidental + fragile if openrouter
     tightens model-ID validation."""
-    from tg_bot.analysis import get_model_options, has_model_catalog
+    from tg_bot.pipeline.analysis import get_model_options, has_model_catalog
 
     assert has_model_catalog("openrouter"), (
         "openrouter must have a catalog so /config can pick models"

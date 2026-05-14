@@ -46,7 +46,7 @@ from _smoke_helpers import (  # noqa: E402
 set_smoke_data_dir("smoke_runner_")
 
 from tg_bot.handlers import analysis_runner as runner  # noqa: E402
-from tg_bot import analysis as analysis_mod  # noqa: E402
+from tg_bot.pipeline import analysis as analysis_mod  # noqa: E402
 
 
 # --- Mock analysis function ------------------------------------------------

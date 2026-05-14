@@ -27,7 +27,7 @@ FAIL = "\033[91m✗\033[0m"
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from tg_bot.config_key import AnalysisConfigKey  # noqa: E402
+from tg_bot.pipeline.config_key import AnalysisConfigKey  # noqa: E402
 
 
 # ---------- from_config ----------

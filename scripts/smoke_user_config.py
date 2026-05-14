@@ -128,7 +128,7 @@ async def test_set_provider_preserves_rounds_effort() -> None:
 async def test_build_user_config_default_rounds_no_effort() -> None:
     s = _make_storage()
     await s.set_llm_provider("u1", "openai")
-    from tg_bot.analysis import build_user_config
+    from tg_bot.pipeline.analysis import build_user_config
 
     config = build_user_config("u1", s)
     assert config["max_debate_rounds"] == 1
@@ -139,7 +139,7 @@ async def test_build_user_config_default_rounds_no_effort() -> None:
 async def test_build_user_config_maps_effort_per_provider() -> None:
     """Same vocabulary value 'high' lands under three different keys
     depending on which provider the user has picked."""
-    from tg_bot.analysis import build_user_config
+    from tg_bot.pipeline.analysis import build_user_config
 
     cases = [
         ("openai", "openai_reasoning_effort"),
@@ -159,7 +159,7 @@ async def test_build_user_config_maps_effort_per_provider() -> None:
 async def test_build_user_config_skips_effort_for_unsupported_provider() -> None:
     """Providers not in PROVIDERS_WITH_EFFORT (deepseek, qwen, etc.) must
     silently ignore the effort knob — no provider key gets set, no warning."""
-    from tg_bot.analysis import build_user_config
+    from tg_bot.pipeline.analysis import build_user_config
 
     s = _make_storage()
     await s.set_llm_provider("u1", "deepseek")
@@ -174,7 +174,7 @@ async def test_build_user_config_writes_rounds_even_without_provider() -> None:
     """A user who never ran /config still gets max_debate_rounds=1 in the
     resolved config (matches DEFAULT_CONFIG, doesn't trip tradingagents)."""
     s = _make_storage()
-    from tg_bot.analysis import build_user_config
+    from tg_bot.pipeline.analysis import build_user_config
 
     config = build_user_config("u1", s)
     assert config["max_debate_rounds"] == 1
@@ -192,7 +192,7 @@ async def test_openrouter_migration_rewrites_stale_sonnet_slug() -> None:
     s = _make_storage()
     await s.set_llm_provider("u1", "openrouter")
     await s.set_llm_model("u1", "deep", "anthropic/claude-3.5-sonnet")
-    from tg_bot.analysis import _resolve_models
+    from tg_bot.pipeline.analysis import _resolve_models
 
     deep, _quick = _resolve_models("u1", s, "openrouter")
     assert deep == "anthropic/claude-sonnet-4.5", deep
@@ -205,7 +205,7 @@ async def test_openrouter_migration_scoped_to_openrouter_provider() -> None:
     s = _make_storage()
     await s.set_llm_provider("u1", "anthropic")
     await s.set_llm_model("u1", "deep", "anthropic/claude-3.5-sonnet")
-    from tg_bot.analysis import _resolve_models
+    from tg_bot.pipeline.analysis import _resolve_models
 
     deep, _quick = _resolve_models("u1", s, "anthropic")
     # Migration is openrouter-only — the value passes through unchanged.
@@ -222,7 +222,7 @@ async def test_openrouter_migration_passes_through_unknown_slugs() -> None:
     s = _make_storage()
     await s.set_llm_provider("u1", "openrouter")
     await s.set_llm_model("u1", "deep", "meta-llama/llama-3.3-70b-instruct:free")
-    from tg_bot.analysis import _resolve_models
+    from tg_bot.pipeline.analysis import _resolve_models
 
     deep, _quick = _resolve_models("u1", s, "openrouter")
     assert deep == "meta-llama/llama-3.3-70b-instruct:free", deep
@@ -232,7 +232,7 @@ async def test_openrouter_migration_passes_through_unknown_slugs() -> None:
 
 
 async def test_config_summary_default() -> None:
-    from tg_bot.config_key import AnalysisConfigKey
+    from tg_bot.pipeline.config_key import AnalysisConfigKey
 
     out = AnalysisConfigKey.from_config(
         {
@@ -246,7 +246,7 @@ async def test_config_summary_default() -> None:
 
 
 async def test_config_summary_custom_rounds() -> None:
-    from tg_bot.config_key import AnalysisConfigKey
+    from tg_bot.pipeline.config_key import AnalysisConfigKey
 
     out = AnalysisConfigKey.from_config(
         {
@@ -263,7 +263,7 @@ async def test_config_summary_custom_rounds() -> None:
 
 
 async def test_config_summary_with_effort() -> None:
-    from tg_bot.config_key import AnalysisConfigKey
+    from tg_bot.pipeline.config_key import AnalysisConfigKey
 
     out = AnalysisConfigKey.from_config(
         {
@@ -287,7 +287,7 @@ async def test_provider_env_keys_match_upstream() -> None:
     the GLM `ZHIPUAI_API_KEY` → `ZHIPU_API_KEY` rename in v0.2.5) silently
     breaks: the bot's precheck passes by reading the old env var while
     tradingagents itself reads the new one and 401s on first API call."""
-    from tg_bot.analysis import PROVIDER_ENV_KEYS
+    from tg_bot.pipeline.analysis import PROVIDER_ENV_KEYS
     from tradingagents.llm_clients.api_key_env import PROVIDER_API_KEY_ENV
 
     shared = set(PROVIDER_ENV_KEYS) & set(PROVIDER_API_KEY_ENV)

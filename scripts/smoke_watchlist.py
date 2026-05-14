@@ -56,20 +56,27 @@ def _seed_storage(tickers: list[str]) -> None:
 def _reload_storage_singletons():
     """The storage singletons are constructed at import time against the
     env var; for tests that swap data dirs we need to drop and re-import.
-    Returns the live `commands` module so callers can use the rebuilt
-    references."""
+    Returns a SimpleNamespace exposing both `commands` and `pickers`
+    modules — the picker builders moved out of `commands.py` in the
+    handlers/ split, so tests need both."""
     import importlib
 
     for mod in [
         "tg_bot.storage",
         "tg_bot.storage.user_config",
         "tg_bot.storage.watchlist",
+        "tg_bot.handlers.pickers",
         "tg_bot.handlers.commands",
     ]:
         if mod in sys.modules:
             importlib.reload(sys.modules[mod])
-    from tg_bot.handlers import commands
+    from tg_bot.handlers import commands, pickers
 
+    # Expose `pickers` as an attribute on the returned `commands` module
+    # so tests that do `commands = _reload_storage_singletons()` can keep
+    # the existing single-name pattern; new builder calls write
+    # `commands.pickers.build_X(...)` (or unpack manually).
+    commands.pickers = pickers
     return commands
 
 
@@ -80,7 +87,7 @@ async def test_watch_mode_header_and_done_label() -> None:
     _fresh_data_dir()
     _seed_storage(["NVDA", "AAPL"])
     commands = _reload_storage_singletons()
-    text, kb = commands.build_watchlist_response(
+    text, kb = commands.pickers.build_watchlist_response(
         "1", selected={"NVDA"}, page=0, mode="watch"
     )
     assert "Your Watchlist" in text and "Force Refresh" not in text, text
@@ -95,7 +102,7 @@ async def test_refresh_mode_header_and_done_label() -> None:
     _fresh_data_dir()
     _seed_storage(["NVDA", "AAPL"])
     commands = _reload_storage_singletons()
-    text, kb = commands.build_watchlist_response(
+    text, kb = commands.pickers.build_watchlist_response(
         "1", selected={"NVDA"}, page=0, mode="refresh"
     )
     assert "Force Refresh" in text and "Drops today's cached result" in text, text
@@ -116,10 +123,10 @@ async def test_keyboard_structure_identical_across_modes() -> None:
         ["NVDA", "AAPL", "TSLA", "MSFT", "GOOGL", "AMZN", "META", "NFLX", "ORCL", "CRM"]
     )
     commands = _reload_storage_singletons()
-    _, kb_watch = commands.build_watchlist_response(
+    _, kb_watch = commands.pickers.build_watchlist_response(
         "1", selected=set(), page=0, mode="watch"
     )
-    _, kb_refresh = commands.build_watchlist_response(
+    _, kb_refresh = commands.pickers.build_watchlist_response(
         "1", selected=set(), page=0, mode="refresh"
     )
     # Same number of rows.
@@ -216,7 +223,7 @@ async def test_empty_watchlist_no_keyboard() -> None:
     _seed_storage([])
     commands = _reload_storage_singletons()
     for mode in ("watch", "refresh"):
-        text, kb = commands.build_watchlist_response(
+        text, kb = commands.pickers.build_watchlist_response(
             "1", selected=set(), page=0, mode=mode
         )
         assert kb is None, f"{mode}: expected None keyboard, got {kb}"
