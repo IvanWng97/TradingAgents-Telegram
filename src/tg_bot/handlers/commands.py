@@ -343,27 +343,24 @@ async def list_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 _LIST_ROW_WIDTH = 4
 
 
-def _digest_enrolled_set(digest: dict | None, watchlist: list[str]) -> set[str] | None:
-    """Effective digest enrolment for the current watchlist.
+def _digest_enrolled_set(
+    user_id: str, digest: dict | None, watchlist: list[str]
+) -> set[str] | None:
+    """`/list`-specific wrapper around `UserConfigStorage.get_enrolled_tickers`.
 
-    None → digest off (caller suppresses the digest header line entirely).
-    Set → enrolled tickers intersected with the live watchlist (drops
-    stragglers the user removed from the watchlist after enrolling them).
-    Legacy save with `tickers` key absent is treated as "all watchlist"
-    per the backward-compat rule documented in CLAUDE.md's "Digest
-    schedule" key contract.
-
-    Duplicates the intersection logic in `analysis_runner.run_user_digest`
-    + 3 sites in `digest.py`. See the GitHub issue "extract
-    get_enrolled_tickers" — keeping inline here so this PR stays scoped
-    to the UX add.
+    The storage method returns `list[str]` (order-preserved for the
+    fan-out's iteration semantics). `/list` needs a `set` for fast `in`
+    checks during grid rendering AND a distinct sentinel for "digest
+    off entirely" vs "digest on but resolves to empty enrolled" —
+    those two states render different footer copy. The storage method
+    can't distinguish them because it deliberately doesn't gate on
+    `enabled` (the run-now path needs the filter even when scheduled
+    runs are disabled). So this wrapper does the `enabled` check + the
+    `None` sentinel here.
     """
     if not digest or not digest.get("enabled"):
         return None
-    tickers = digest.get("tickers")
-    if tickers is None:
-        return set(watchlist)
-    return {t.upper() for t in tickers} & set(watchlist)
+    return set(user_config_storage.get_enrolled_tickers(user_id, watchlist))
 
 
 def _format_list_view(
@@ -435,7 +432,7 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     digest = user_config_storage.get_digest(uid_str)
-    enrolled = _digest_enrolled_set(digest, watchlist)
+    enrolled = _digest_enrolled_set(uid_str, digest, watchlist)
     text = _format_list_view(watchlist, digest, enrolled)
     await update.message.reply_text(text, parse_mode="MarkdownV2")
 

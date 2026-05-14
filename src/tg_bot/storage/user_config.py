@@ -160,6 +160,53 @@ class UserConfigStorage(JsonStorage):
         before mutating."""
         return self._data.get(str(user_id), {}).get(self.DIGEST_KEY)
 
+    def get_enrolled_tickers(self, user_id: str, watchlist: list[str]) -> list[str]:
+        """Effective digest enrolment intersected with the live watchlist.
+        Single source of truth for runtime "which tickers fire if we run
+        the fan-out right now" — used by both the daily fan-out
+        (`run_user_digest`) and the `/list` UX view, which previously
+        inlined this logic with subtle drift risk across legacy-fallback
+        handling and case-normalization.
+
+        Contract:
+          - Digest block absent → `[]`
+          - Legacy save (`tickers` key absent entirely) → full watchlist.
+            This is the documented backward-compat rule in CLAUDE.md's
+            "Digest schedule" key contract — `_post_init` backfills these
+            on startup, so this branch is only hit on the first run after
+            a legacy save migrates.
+          - Otherwise: `tickers ∩ watchlist`, preserving watchlist order
+            (sorted on-disk per `set_digest_tickers`) so the fan-out
+            iterates a deterministic order.
+
+        Deliberately does NOT gate on `enabled`. The "▶ Run now" path
+        fires `run_user_digest` for an explicitly disabled digest (a
+        user tapping run-now from the open picker), and that path must
+        still respect the configured filter — gating on `enabled` here
+        would suppress run-now's filter. Callers that need an
+        "is digest scheduled?" check (e.g. `/list`'s decision to render
+        the digest header section at all) should call `get_digest` and
+        check `enabled` themselves.
+
+        Note: picker-internal sites in `digest.py` deliberately do NOT use
+        this method — they show the user's *currently saved* set during
+        editing, where a fallback would mislead ("0/12 tickers" is the
+        right pre-pick state, not "all enrolled"). This method is for
+        runtime evaluation only.
+        """
+        digest = self.get_digest(user_id)
+        if not digest:
+            return []
+        raw = digest.get("tickers")
+        if raw is None:
+            # Legacy save predating the filter feature → all watchlist.
+            return list(watchlist)
+        # Stored tickers are already uppercase (set_digest_tickers
+        # canonicalizes), but be defensive — a hand-edited json or a
+        # forward-compat shape with mixed case shouldn't silently miss.
+        filter_set = {t.upper() for t in raw}
+        return [t for t in watchlist if t in filter_set]
+
     async def set_digest_hour(self, user_id: str, hour: int, chat_id: int) -> bool:
         """Set hour (0-23), enable the digest, and capture chat_id.
 

@@ -1010,18 +1010,11 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
         return
 
     # Apply the digest filter, intersected with the live watchlist (auto-prune
-    # tickers the user removed since the filter was last edited). When `tickers`
-    # is missing entirely (legacy save predating the filter feature), fall back
-    # to the full watchlist for backward compat — the _post_init migration
-    # backfills these on next startup.
-    digest_block = user_config_storage.get_digest(user_id) or {}
-    raw_filter = digest_block.get("tickers")
-    if raw_filter is None:
-        watchlist = full_watchlist
-    else:
-        # `t in full_watchlist` is implicit — t is iterated from it.
-        filter_set = set(raw_filter)
-        watchlist = [t for t in full_watchlist if t in filter_set]
+    # tickers the user removed since the filter was last edited). Legacy
+    # fallback (`tickers` key absent → all watchlist) lives in the storage
+    # method so the `/list` UX view shares the same definition — see
+    # `UserConfigStorage.get_enrolled_tickers`.
+    watchlist = user_config_storage.get_enrolled_tickers(user_id, full_watchlist)
 
     if not watchlist:
         # Filter is set but resolved to nothing (user has cleared it, or every

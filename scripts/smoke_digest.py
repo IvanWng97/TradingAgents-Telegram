@@ -576,6 +576,32 @@ class _FakeFanOutApp:
         self.chat_data: dict[int, dict] = _ChatDataDict()
 
 
+class _AllEnrolledUserConfig:
+    """Test fake for `runner.user_config_storage` — treats the entire
+    watchlist as digest-enrolled. Many fan-out tests want this
+    "everything fires" semantic without setting up a full digest block;
+    previously this was implicit via the legacy `tickers absent →
+    watchlist` fallback in the inline run_user_digest filter. Now that
+    the intersection lives in `UserConfigStorage.get_enrolled_tickers`
+    and explicitly requires a digest block, this fake lets the same
+    tests keep their concise setup.
+
+    Use in tests where the digest-filter semantic isn't the thing under
+    test (most fan-out / cancel / progress tests). Tests that DO
+    exercise the filter set up a real storage via `fresh_storage()`.
+    """
+
+    def get_enrolled_tickers(self, _uid, watchlist):
+        return list(watchlist)
+
+    def get_digest(self, _uid):
+        # Returned dict is unused by the call paths these tests exercise.
+        return {"enabled": True, "tickers": None}
+
+    async def disable_digest(self, _uid):
+        return True
+
+
 class _ChatDataDict(dict):
     """Minimal stand-in for PTB's chat_data — auto-creates {} on access."""
 
@@ -746,8 +772,10 @@ async def test_fanout_summary_renders() -> None:
         return canned[ticker]
 
     orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
     orig_a = runner._analyze_one_for_digest
     runner.watchlist_storage = _W()
+    runner.user_config_storage = _AllEnrolledUserConfig()
     runner._analyze_one_for_digest = _fake_analyze
     try:
         app = _FakeFanOutApp()
@@ -772,6 +800,7 @@ async def test_fanout_summary_renders() -> None:
         assert "📄" in body
     finally:
         runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
         runner._analyze_one_for_digest = orig_a
 
 
@@ -800,9 +829,11 @@ async def test_render_deferred_captures_latest_state() -> None:
         return {"ticker": ticker, "signal": "BUY", "telegraph_url": None}
 
     orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
     orig_a = runner._analyze_one_for_digest
     orig_iv = runner._DIGEST_PROGRESS_INTERVAL
     runner.watchlist_storage = _W()
+    runner.user_config_storage = _AllEnrolledUserConfig()
     runner._analyze_one_for_digest = _fake
     runner._DIGEST_PROGRESS_INTERVAL = 0.3
     try:
@@ -826,6 +857,7 @@ async def test_render_deferred_captures_latest_state() -> None:
         )
     finally:
         runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
         runner._analyze_one_for_digest = orig_a
         runner._DIGEST_PROGRESS_INTERVAL = orig_iv
 
@@ -878,9 +910,11 @@ async def test_render_trampolines_after_cache_hit_neighbour() -> None:
         return {"ticker": ticker, "signal": "BUY", "telegraph_url": None}
 
     orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
     orig_a = runner._analyze_one_for_digest
     orig_iv = runner._DIGEST_PROGRESS_INTERVAL
     runner.watchlist_storage = _W()
+    runner.user_config_storage = _AllEnrolledUserConfig()
     runner._analyze_one_for_digest = _fake
     runner._DIGEST_PROGRESS_INTERVAL = 0.1
     try:
@@ -901,6 +935,7 @@ async def test_render_trampolines_after_cache_hit_neighbour() -> None:
         )
     finally:
         runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
         runner._analyze_one_for_digest = orig_a
         runner._DIGEST_PROGRESS_INTERVAL = orig_iv
 
@@ -993,8 +1028,10 @@ async def test_fanout_cancel_pending_via_task_cancel() -> None:
             sem.release()
 
     orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
     orig_a = runner._analyze_one_for_digest
     runner.watchlist_storage = _W()
+    runner.user_config_storage = _AllEnrolledUserConfig()
     runner._analyze_one_for_digest = _slow
     try:
         app = _FakeFanOutApp()
@@ -1030,6 +1067,7 @@ async def test_fanout_cancel_pending_via_task_cancel() -> None:
         assert "3 cancelled" in body and "of 3" in body
     finally:
         runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
         runner._analyze_one_for_digest = orig_a
         runner._run_semaphore = orig_sem
 
@@ -1218,8 +1256,10 @@ async def test_fanout_cancel_mid_run() -> None:
         raise CancelledByUserError("cancelled in test")
 
     orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
     orig_a = runner._analyze_one_for_digest
     runner.watchlist_storage = _W()
+    runner.user_config_storage = _AllEnrolledUserConfig()
     runner._analyze_one_for_digest = _slow_analyze
     try:
         app = _FakeFanOutApp()
@@ -1254,6 +1294,7 @@ async def test_fanout_cancel_mid_run() -> None:
         assert "3 cancelled" in body and "of 3" in body
     finally:
         runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
         runner._analyze_one_for_digest = orig_a
 
 
