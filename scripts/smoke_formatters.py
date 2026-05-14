@@ -199,6 +199,40 @@ def test_sanitizer_anchor_empty_drops_open() -> None:
     assert "</a>" not in out, out
 
 
+def test_sanitizer_bare_anchor_drops_both_tags() -> None:
+    """Bare `<a>foo</a>` (no href) — open is silently dropped via the
+    `bare_anchor_depth` counter; the matching close must also be dropped.
+    Without the counter, `</a>` would leak through and Telegram would
+    reject the caption with "Bad Request: can't parse entities."
+    Real-world trigger: LLM emits raw HTML in its prose."""
+    out = sanitize_html_for_telegram("<a>important</a>")
+    assert "<a" not in out, f"bare anchor open leaked: {out!r}"
+    assert "</a>" not in out, f"dangling close leaked: {out!r}"
+    assert "important" in out, f"inner text dropped: {out!r}"
+
+
+def test_sanitizer_nested_bare_anchors_balanced() -> None:
+    """Two bare `<a>` opens nested with two `</a>` closes should drop
+    every anchor tag and keep the inner text. Depth-counter test —
+    a single-flag implementation would mis-handle this case."""
+    out = sanitize_html_for_telegram("<a><a>x</a>y</a>")
+    assert "<a" not in out and "</a>" not in out, out
+    assert "x" in out and "y" in out, out
+
+
+def test_sanitizer_mixed_bare_and_href_anchors() -> None:
+    """Mixed: one bare `<a>`, one anchor with href. Counter must distinguish
+    so the href-anchor's `</a>` is correctly preserved."""
+    out = sanitize_html_for_telegram(
+        '<a>bare</a> and <a href="https://x.test/">linked</a>'
+    )
+    # Bare anchor: dropped open + dropped close, inner text kept.
+    # Href anchor: open + close preserved.
+    assert out.count("<a href=") == 1, f"expected exactly one href anchor: {out!r}"
+    assert out.count("</a>") == 1, f"expected exactly one close: {out!r}"
+    assert "bare" in out and "linked" in out, out
+
+
 def test_sanitizer_escapes_inner_text() -> None:
     """The parser decodes entities; emit MUST re-escape so the resulting
     HTML stays valid for Telegram."""
@@ -806,6 +840,18 @@ SCENARIOS = [
     (
         "sanitizer: empty <a></a> drops the open tag",
         test_sanitizer_anchor_empty_drops_open,
+    ),
+    (
+        "sanitizer: bare <a>foo</a> drops both tags, keeps text",
+        test_sanitizer_bare_anchor_drops_both_tags,
+    ),
+    (
+        "sanitizer: nested bare anchors stay balanced via depth counter",
+        test_sanitizer_nested_bare_anchors_balanced,
+    ),
+    (
+        "sanitizer: mixed bare + href anchors handled correctly",
+        test_sanitizer_mixed_bare_and_href_anchors,
     ),
     (
         "sanitizer keeps blockquote expandable attribute",

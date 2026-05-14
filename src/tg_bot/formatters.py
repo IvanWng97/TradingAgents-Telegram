@@ -82,6 +82,12 @@ class _TelegramHtmlSanitizer(HTMLParser):
         # (tables, images). All data + nested tags are suppressed until
         # the matching close decrements back to 0.
         self._skip_depth = 0
+        # Track <a> tags that were opened without an href and silently
+        # dropped. The matching </a> must also be dropped — otherwise a
+        # bare `<a>foo</a>` from LLM-emitted raw HTML produces a dangling
+        # `</a>` in the output and Telegram returns
+        # `Bad Request: can't parse entities`.
+        self._bare_anchor_depth = 0
 
     def _emit_block_break(self, count: int = 2) -> None:
         # Don't stack multiple blank lines on top of each other.
@@ -116,7 +122,10 @@ class _TelegramHtmlSanitizer(HTMLParser):
         if tag == "a":
             href = next((v for k, v in attrs if k == "href" and v), None)
             if not href:
-                # bare <a>; drop the tag, keep inner text
+                # Bare <a>; drop the tag, keep inner text. Bump the depth
+                # counter so the matching </a> also gets dropped — otherwise
+                # we'd emit a dangling close tag that Telegram rejects.
+                self._bare_anchor_depth += 1
                 return
             self._parts.append(f'<a href="{_html_lib.escape(href, quote=True)}">')
             return
@@ -153,9 +162,17 @@ class _TelegramHtmlSanitizer(HTMLParser):
             self._parts.append("\n")
             return
         if tag == "a":
-            # Close only if we actually opened a tag (skipped bare <a>).
+            # If the matching open was a bare `<a>` that we silently
+            # dropped, drop this close too. Without this, a bare
+            # `<a>foo</a>` from LLM-emitted raw HTML produces `foo</a>`
+            # and Telegram rejects it with "can't parse entities".
+            if self._bare_anchor_depth > 0:
+                self._bare_anchor_depth -= 1
+                return
+            # Empty link (no inner content between open + close): drop
+            # the unclosed open tag rather than emitting `<a href="...">`
+            # followed immediately by `</a>`.
             if self._parts and self._parts[-1].startswith('<a href="'):
-                # nothing was emitted inside — drop the unclosed open tag
                 self._parts.pop()
                 return
             self._parts.append("</a>")
