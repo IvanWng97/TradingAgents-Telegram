@@ -523,7 +523,7 @@ SCENARIOS = [
         test_list_format_digest_all_watchlist,
     ),
     (
-        "_format_list_view: filter → 'K of N enrolled' + 🔔 markers",
+        "_format_list_view: filter → '→ T1, T2' header + no bell markers in grid",
         test_list_format_digest_with_filter,
     ),
     (

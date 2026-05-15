@@ -302,8 +302,9 @@ def _format_list_view(
     if digest is not None and enrolled is not None:
         hour = digest.get("hour_local", 0)
         tz_label = tz_short(digest.get("tz"))
-        # tz_label may contain a slash from raw IANA fallback ("America/Los_Angeles")
-        # which is MarkdownV2-special and must be escaped outside code spans.
+        # tz_label may be the raw IANA name on uncurated zones ("America/Los_Angeles");
+        # periods, underscores and other MarkdownV2-special characters must be escaped
+        # outside code spans.
         safe_tz = escape_markdown(tz_label, version=2)
 
         all_watchlist = enrolled == set(watchlist)
