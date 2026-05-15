@@ -224,8 +224,6 @@ async def list_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(text, reply_markup=kb, parse_mode="MarkdownV2")
 
 
-_LIST_ROW_WIDTH = 4
-
 # Pre-block grid layout for /list. The whole grid renders inside a
 # MarkdownV2 triple-backtick block so spaces inside it stay monospace —
 # inline code-span padding wobbles because Telegram renders BETWEEN-span
@@ -285,47 +283,58 @@ def _format_list_view(
     digest: dict | None,
     enrolled: set[str] | None,
 ) -> str:
-    """MarkdownV2 grid renderer for `/list`. Tickers in monospace,
-    `_LIST_ROW_WIDTH` per row. 🔔 prefix only when there's an active
-    filter (not when 'all watchlist fires') — a marker on every ticker
-    is noise."""
+    """MarkdownV2 view for `/list`.
+
+    Composition:
+      - Title line: "📋 *Watchlist* — N tickers"
+      - Digest header (when enabled is true): "🔔 *Digest* — HH:00 TZ"
+        plus either "· all N fire daily" suffix (legacy all-enrolled),
+        or an indented "   → `T1`, `T2`, ..." subset line below.
+      - Grid in a MarkdownV2 pre block. Bullet (🔔) markers are NEVER
+        in the grid — they would break monospace alignment.
+      - Footer: state-dependent reminder when digest is off OR enabled
+        but no tickers enrolled.
+    """
     parts: list[str] = []
     parts.append(f"📋 *Watchlist* — {len(watchlist)} tickers")
 
+    # Digest header section
     if digest is not None and enrolled is not None:
         hour = digest.get("hour_local", 0)
         tz_label = tz_short(digest.get("tz"))
+        # tz_label may contain a slash from raw IANA fallback ("America/Los_Angeles")
+        # which is MarkdownV2-special and must be escaped outside code spans.
+        safe_tz = escape_markdown(tz_label, version=2)
+
         all_watchlist = enrolled == set(watchlist)
         if all_watchlist:
-            tally = f"all {len(watchlist)} fire daily"
+            parts.append(
+                f"🔔 *Digest* — `{hour:02d}:00` {safe_tz} · "
+                f"all {len(watchlist)} fire daily"
+            )
         else:
-            tally = f"{len(enrolled)} of {len(watchlist)} enrolled"
-        # tz_label may contain a slash from raw IANA fallback ("America/Los_Angeles")
-        # which is a MarkdownV2 special char and must be escaped outside code spans.
-        parts.append(
-            f"🔔 *Digest* — `{hour:02d}:00` {escape_markdown(tz_label, version=2)} · {tally}"
-        )
+            parts.append(f"🔔 *Digest* — `{hour:02d}:00` {safe_tz}")
+            # Only emit the "→ T1, T2" line when there's at least one
+            # enrolled ticker. Empty enrolled set gets a footer reminder
+            # instead (see below) — the picker UX is already a tap away.
+            if enrolled:
+                # Watchlist order preserved (sorted on-disk per
+                # set_digest_tickers). Each ticker in monospace code span.
+                cells = ", ".join(f"`{t}`" for t in watchlist if t in enrolled)
+                parts.append(f"   → {cells}")
 
     parts.append("")  # blank line between header and grid
+    parts.append(_format_ticker_grid(watchlist))
 
-    show_markers = (
-        digest is not None and enrolled is not None and enrolled != set(watchlist)
-    )
-    for i in range(0, len(watchlist), _LIST_ROW_WIDTH):
-        row_tickers = watchlist[i : i + _LIST_ROW_WIDTH]
-        cells = []
-        for t in row_tickers:
-            marker = "🔔 " if show_markers and t in enrolled else "    "
-            cells.append(f"{marker}`{t}`")
-        parts.append("  ".join(cells))
-
-    parts.append("")  # blank line before footer
+    # Footer section
     if digest is None:
+        parts.append("")
         parts.append("_Daily digest off — use /digest to enable\\._")
     elif enrolled is not None and not enrolled:
         # Digest enabled but filter set excludes the entire watchlist.
         # The fan-out treats this as "nothing to do" and sends a reminder;
-        # surface that state so the user understands why.
+        # surface that state here so the user understands why.
+        parts.append("")
         parts.append("_Digest enabled but no tickers enrolled — /digest to fix\\._")
 
     return "\n".join(parts)
