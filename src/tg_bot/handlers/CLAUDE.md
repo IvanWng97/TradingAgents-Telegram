@@ -2,7 +2,7 @@
 
 Registers PTB handlers (CommandHandler, CallbackQueryHandler, TypeHandler) OR is the direct callback implementation for a registered handler (e.g. `pickers.py` builds the keyboards that handlers return). NOT "anything called by a handler" — that's too broad and creates junk-drawer drift.
 
-See root `CLAUDE.md` for the request lifecycle, state ownership table, and Invariants #2, #3, #5, #7 — all relevant here.
+See root `CLAUDE.md` for the request lifecycle, state ownership table, and Invariants #2, #3, #5, #7 — all relevant here. Storage singletons (`watchlist_storage`, `user_config_storage`) are imported from `tg_bot.storage`; never construct your own — see `storage/CLAUDE.md` for the full singleton contracts.
 
 ## Commands
 
