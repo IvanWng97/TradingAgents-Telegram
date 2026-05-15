@@ -226,6 +226,39 @@ async def list_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 _LIST_ROW_WIDTH = 4
 
+# Pre-block grid layout for /list. The whole grid renders inside a
+# MarkdownV2 triple-backtick block so spaces inside it stay monospace —
+# inline code-span padding wobbles because Telegram renders BETWEEN-span
+# whitespace in the proportional message font.
+_GRID_GUTTER = 2  # spaces between cells in the grid
+_GRID_TARGET_WIDTH = 36  # mobile-safe target line width (≈ iPhone SE)
+_GRID_MAX_COLS = 4  # cap regardless of viewport
+
+
+def _format_ticker_grid(watchlist: list[str]) -> str:
+    """Render a ticker grid inside a MarkdownV2 pre block.
+
+    Cell width = max(len(t) for t in watchlist) + _GRID_GUTTER. Column
+    count is clamped so a row fits within _GRID_TARGET_WIDTH characters
+    on mobile viewports; falls back to 1 column on pathologically long
+    tickers (≥ _GRID_TARGET_WIDTH chars).
+
+    All cells in all rows pad to the same width, so a long ticker like
+    `RELIANCE.NS` does not push subsequent cells out of column
+    alignment — the entire grid widens uniformly.
+
+    Tickers can only contain `[A-Z0-9.\\-]` (enforced by validation.py:
+    TICKER_RE), so no escaping is needed inside the pre block — neither
+    `\\`` nor `\\` characters can appear.
+    """
+    cell_width = max(len(t) for t in watchlist) + _GRID_GUTTER
+    ncols = max(1, min(_GRID_MAX_COLS, _GRID_TARGET_WIDTH // cell_width))
+    rows: list[str] = []
+    for i in range(0, len(watchlist), ncols):
+        row = "".join(f"{t:<{cell_width}}" for t in watchlist[i : i + ncols])
+        rows.append(row.rstrip())
+    return "```\n" + "\n".join(rows) + "\n```"
+
 
 def _digest_enrolled_set(
     user_id: str, digest: dict | None, watchlist: list[str]

@@ -326,6 +326,91 @@ async def test_list_format_digest_with_filter() -> None:
     assert text.count("🔔") >= 2, f"expected 🔔 on enrolled tickers: {text!r}"
 
 
+# ─── _format_ticker_grid helper ─────────────────────────────────────────
+
+
+async def test_grid_renders_inside_pre_block() -> None:
+    """Grid output is wrapped in MarkdownV2 triple-backtick fences so the
+    entire block is one monospace context. Without this, spaces BETWEEN
+    inline code-spans render in the proportional message font and rows
+    wobble."""
+    _fresh_data_dir()
+    _seed_storage(["AAPL"])
+    commands = _reload_storage_singletons()
+
+    text = commands._format_ticker_grid(["AAPL"])
+    assert text.startswith("```\n"), repr(text[:10])
+    assert text.endswith("\n```"), repr(text[-10:])
+
+
+async def test_grid_short_tickers_4_cols() -> None:
+    """Short US tickers (≤5 chars) → 4-column grid, cells padded to
+    max_len + _GRID_GUTTER. With 4 tickers `AAPL NVDA TSLA MSFT`,
+    cell_width = 4 + 2 = 6, ncols = min(4, 36//6) = 4 → 1 row."""
+    _fresh_data_dir()
+    _seed_storage(["AAPL"])
+    commands = _reload_storage_singletons()
+
+    text = commands._format_ticker_grid(["AAPL", "NVDA", "TSLA", "MSFT"])
+    # Strip pre fences: "```\n" prefix (4 chars), "\n```" suffix (4 chars).
+    body = text[4:-4]
+    lines = body.split("\n")
+    assert len(lines) == 1, lines
+    # Each cell = "AAPL  ", joined → "AAPL  NVDA  TSLA  MSFT  ", rstripped
+    # to "AAPL  NVDA  TSLA  MSFT".
+    assert lines[0] == "AAPL  NVDA  TSLA  MSFT", repr(lines[0])
+
+
+async def test_grid_8_tickers_wraps_to_2_rows() -> None:
+    """8 short tickers at 4 cols → exactly 2 rows."""
+    _fresh_data_dir()
+    _seed_storage(["AAPL"])
+    commands = _reload_storage_singletons()
+
+    text = commands._format_ticker_grid(
+        ["AAPL", "NVDA", "TSLA", "MSFT", "GOOG", "AMZN", "META", "NFLX"]
+    )
+    body = text[4:-4]
+    lines = body.split("\n")
+    assert len(lines) == 2, lines
+
+
+async def test_grid_long_ticker_drops_to_2_cols() -> None:
+    """Indian NSE-style ticker `RELIANCE.NS` (11 chars) forces
+    cell_width = 13, ncols = min(4, 36//13) = 2. All rows pad to 13
+    so alignment is uniform regardless of which row holds the long
+    ticker."""
+    _fresh_data_dir()
+    _seed_storage(["AAPL"])
+    commands = _reload_storage_singletons()
+
+    text = commands._format_ticker_grid(["AAPL", "NVDA", "RELIANCE.NS", "MSFT"])
+    body = text[4:-4]
+    lines = body.split("\n")
+    assert len(lines) == 2, lines
+    # Row 1: "AAPL         NVDA         " → rstrip → "AAPL         NVDA"
+    assert lines[0] == "AAPL         NVDA", repr(lines[0])
+    # Row 2: "RELIANCE.NS  MSFT         " → rstrip → "RELIANCE.NS  MSFT"
+    assert lines[1] == "RELIANCE.NS  MSFT", repr(lines[1])
+
+
+async def test_grid_extreme_ticker_drops_to_1_col() -> None:
+    """Pathological 20-char ticker → cell_width = 22, ncols = max(1, 36//22)
+    = 1 → vertical list. The guard `max(1, ...)` prevents ncols=0 on
+    impossibly long tickers."""
+    _fresh_data_dir()
+    _seed_storage(["AAPL"])
+    commands = _reload_storage_singletons()
+
+    text = commands._format_ticker_grid(["AAPL", "X" * 20])
+    body = text[4:-4]
+    lines = body.split("\n")
+    assert len(lines) == 2, lines
+    # cell_width = 22, both rows pad to 22 then rstrip
+    assert lines[0].rstrip() == "AAPL"
+    assert lines[1].rstrip() == "X" * 20
+
+
 async def test_list_handler_non_empty_path_sets_parse_mode() -> None:
     """The non-empty `_format_list_view` output is MarkdownV2; the
     handler must pass `parse_mode="MarkdownV2"` on the reply for the
@@ -378,6 +463,24 @@ SCENARIOS = [
     (
         "/list handler sets parse_mode=MarkdownV2 on non-empty path",
         test_list_handler_non_empty_path_sets_parse_mode,
+    ),
+    # --- _format_ticker_grid helper ---
+    ("_format_ticker_grid: wrapped in pre block", test_grid_renders_inside_pre_block),
+    (
+        "_format_ticker_grid: 4 short tickers → 4 cols, 1 row",
+        test_grid_short_tickers_4_cols,
+    ),
+    (
+        "_format_ticker_grid: 8 short tickers → 2 rows",
+        test_grid_8_tickers_wraps_to_2_rows,
+    ),
+    (
+        "_format_ticker_grid: RELIANCE.NS → drops to 2 cols",
+        test_grid_long_ticker_drops_to_2_cols,
+    ),
+    (
+        "_format_ticker_grid: 20-char ticker → 1 col",
+        test_grid_extreme_ticker_drops_to_1_col,
     ),
 ]
 
