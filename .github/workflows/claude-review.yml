@@ -1,10 +1,14 @@
 name: Claude Review
 
 # Dual-trigger structured PR review:
-#   1. Auto-fires on `pull_request` (opened / reopened / ready_for_review).
-#      `synchronize` deliberately omitted — a typical PR sees 3-8 push
-#      events while iterating; auto-reviewing each one burns quota on
-#      diffs you already know about. Comment `/claude-review` to re-trigger.
+#   1. Auto-fires on `pull_request` (opened / reopened / ready_for_review /
+#      synchronize). `synchronize` is included because the job-level
+#      `cancel-in-progress: true` below coalesces pushing bursts: a typical
+#      PR sees 3-8 pushes while iterating, but the in-flight review is
+#      cancelled by each new push, so you get *one* review at the end of
+#      the quiescent burst — on the current diff. Burn is modest in
+#      practice and matches the anthropics/claude-code-action recommended
+#      defaults.
 #   2. Manual re-trigger via `/claude-review` comment on a PR. Same rules,
 #      same output shape — predictable across both paths.
 #
@@ -13,7 +17,7 @@ name: Claude Review
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review]
+    types: [opened, reopened, ready_for_review, synchronize]
   issue_comment:
     types: [created]
 

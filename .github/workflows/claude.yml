@@ -18,6 +18,31 @@ jobs:
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest
+    # Job-level concurrency (not workflow-level) — same load-bearing
+    # reason as claude-review.yml: the action's progress-tracking comments
+    # fire `issue_comment created` and queue a second run of this
+    # workflow. At workflow-level, that second run shares the group and
+    # would cancel the first BEFORE its `if:` gate evaluates. At
+    # job-level, the group is only entered AFTER the gate passes — so
+    # the self-triggered comment is filtered out (body doesn't contain
+    # `@claude`) and never touches the group.
+    #
+    # `cancel-in-progress: true` because the common case is *self-
+    # correction*: user taps `@claude fix this`, realizes they meant
+    # something else, taps `@claude fix the auth bug specifically`. The
+    # first request is stale; running both wastes quota AND posts two
+    # responses (one on stale intent). Cancelling the in-flight first
+    # run is the right call. Two-different-users case (both tag Claude
+    # on the same PR within seconds) is rare; the first user can just
+    # re-tap to retry.
+    #
+    # Group key handles both issue and PR event shapes:
+    #   - issue_comment (issue OR PR) → event.issue.number
+    #   - pull_request_review         → event.pull_request.number
+    #   - issues                      → event.issue.number
+    concurrency:
+      group: claude-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: true
     permissions:
       contents: read
       pull-requests: read
