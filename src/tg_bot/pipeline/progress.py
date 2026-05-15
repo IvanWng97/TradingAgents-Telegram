@@ -173,8 +173,6 @@ class _DelegatingProgressCallback(BaseCallbackHandler):
     langgraph back to our `to_thread` await.
     """
 
-    raise_error = True
-
     def on_chat_model_start(
         self,
         serialized: dict | None,

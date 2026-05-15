@@ -110,3 +110,18 @@ async def validate_ticker(raw: str) -> tuple[str | None, str | None]:
         f"{symbol}: not found on Yahoo Finance. "
         "Double-check the symbol — for class shares use a dash (e.g. BRK-B)."
     )
+
+
+def normalize_ticker_for_display(ticker: str, *, uppercase: bool = True) -> str:
+    """Return a display-formatted ticker string.
+
+    Helper for future UI surfaces that may want to render tickers consistently
+    across pickers, captions, and headers. Currently a thin wrapper around
+    `.upper()` / `.strip()`, but centralizes the logic so future formatting
+    rules (e.g. dot→dash rewriting at the display layer, locale-specific
+    capitalization) land in one place.
+    """
+    cleaned = ticker.strip()
+    if uppercase:
+        cleaned = cleaned.upper()
+    return cleaned
