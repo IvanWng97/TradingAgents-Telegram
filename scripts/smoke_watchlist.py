@@ -257,23 +257,29 @@ async def test_list_empty_watchlist() -> None:
 
 
 async def test_list_format_no_digest() -> None:
-    """`_format_list_view`: watchlist + None digest → no header, footer
-    says 'off'. Pure formatter test — no storage involvement.
-    Intersection logic moved to smoke_user_config:get_enrolled_tickers."""
+    """`_format_list_view`: watchlist + None digest → no digest header,
+    grid in pre block, footer says 'off'. Pure formatter test — no
+    storage involvement."""
     _fresh_data_dir()
     _seed_storage(["AAPL", "NVDA"])
     commands = _reload_storage_singletons()
 
     text = commands._format_list_view(["AAPL", "NVDA"], None, None)
+    # Header
     assert "Watchlist" in text and "2 tickers" in text, text
     assert "Digest" not in text, "no digest header should render"
+    # Grid in pre block
+    assert "```\n" in text and "\n```" in text, "grid must be in pre block"
+    # Footer
     assert "Daily digest off" in text, text
-    assert "🔔" not in text, "no markers when digest off"
+    # No bell markers anywhere
+    assert "🔔" not in text, "no bell markers when digest off"
 
 
 async def test_list_format_digest_all_watchlist() -> None:
-    """`_format_list_view`: enrolled == set(watchlist) → 'all N fire
-    daily' tally, NO per-ticker 🔔 markers (would be noise)."""
+    """`_format_list_view`: enrolled == set(watchlist) (legacy save) →
+    digest header reads 'all N fire daily', no per-ticker bell markers
+    needed (every ticker is enrolled), grid stays clean."""
     _fresh_data_dir()
     _seed_storage(["AAPL", "NVDA"])
     commands = _reload_storage_singletons()
@@ -287,24 +293,25 @@ async def test_list_format_digest_all_watchlist() -> None:
     enrolled = {"AAPL", "NVDA"}
 
     text = commands._format_list_view(["AAPL", "NVDA"], digest, enrolled)
+    # Digest header line present
     assert "Digest" in text and "09:00" in text, text
     assert "all 2 fire daily" in text, text
-    # The 🔔 in the *header* is always present when digest is on; the
-    # per-ticker marker (🔔 prefix on a grid cell `AAPL`) must NOT appear
-    # since all watchlist already fires.
-    grid_lines = [
-        line for line in text.split("\n") if "`" in line and "Digest" not in line
-    ]
-    assert grid_lines, f"expected grid lines: {text!r}"
-    for line in grid_lines:
-        assert "🔔" not in line, (
-            f"per-ticker markers must be suppressed when all enrolled: {line!r}"
-        )
+    # Grid in pre block
+    assert "```\n" in text and "\n```" in text, "grid must be in pre block"
+    # No per-ticker bell in the grid block — the digest header has its own bell
+    # icon, but rows in the grid must not.
+    grid_start = text.index("```\n") + 4
+    grid_end = text.index("\n```", grid_start)
+    grid_body = text[grid_start:grid_end]
+    assert "🔔" not in grid_body, f"grid must not contain bell markers: {grid_body!r}"
+    # No "→" enrolled-tickers list either (all-enrolled case skips it)
+    assert "→" not in text, text
 
 
 async def test_list_format_digest_with_filter() -> None:
-    """`_format_list_view`: enrolled ⊂ watchlist → 'K of N enrolled'
-    tally + 🔔 prefix on enrolled tickers only."""
+    """`_format_list_view`: enrolled is a proper subset of watchlist →
+    header has the digest line AND an indented `→ T1, T2` line naming
+    the enrolled tickers. Grid stays clean (no inline markers)."""
     _fresh_data_dir()
     _seed_storage(["AAPL", "NVDA", "TSLA", "MSFT"])
     commands = _reload_storage_singletons()
@@ -321,9 +328,154 @@ async def test_list_format_digest_with_filter() -> None:
     text = commands._format_list_view(
         ["AAPL", "NVDA", "TSLA", "MSFT"], digest, enrolled
     )
-    assert "2 of 4 enrolled" in text, text
-    # 🔔 must appear at least twice (header + per-ticker markers).
-    assert text.count("🔔") >= 2, f"expected 🔔 on enrolled tickers: {text!r}"
+    # Header
+    assert "Digest" in text and "08:00" in text, text
+    # Pin the exact → line so a regression that drops the
+    # `if t in enrolled` filter (which would name every watchlist
+    # ticker) is caught — checking just `"AAPL" in text` is trivially
+    # true since AAPL also appears in the grid below.
+    arrow_line = next(
+        (line for line in text.splitlines() if "→" in line),
+        None,
+    )
+    assert arrow_line is not None, f"expected '→' line in: {text!r}"
+    assert arrow_line == "   → `AAPL`, `TSLA`", repr(arrow_line)
+    # Grid in pre block
+    assert "```\n" in text and "\n```" in text, "grid must be in pre block"
+    # Grid body has no bell markers
+    grid_start = text.index("```\n") + 4
+    grid_end = text.index("\n```", grid_start)
+    grid_body = text[grid_start:grid_end]
+    assert "🔔" not in grid_body, (
+        f"per-ticker bell markers must not appear in grid: {grid_body!r}"
+    )
+
+
+async def test_list_format_digest_zero_enrolled() -> None:
+    """`_format_list_view`: digest enabled but no tickers enrolled
+    (empty filter set, K=0) → digest header line present (so user sees
+    the schedule), no `→` line (nothing to list), footer reminds the
+    user to fix their filter."""
+    _fresh_data_dir()
+    _seed_storage(["AAPL", "NVDA"])
+    commands = _reload_storage_singletons()
+
+    digest = {
+        "enabled": True,
+        "hour_local": 9,
+        "tz": "UTC",
+        "chat_id": 999,
+        "tickers": [],
+    }
+    enrolled: set[str] = set()
+
+    text = commands._format_list_view(["AAPL", "NVDA"], digest, enrolled)
+    assert "Digest" in text and "09:00" in text, text
+    assert "→" not in text, "no '→' line when enrolled set is empty"
+    assert "Digest enabled but no tickers enrolled" in text, text
+
+
+async def test_list_format_no_inline_backticks_per_ticker() -> None:
+    """The new grid uses a single triple-backtick pre block, NOT per-
+    ticker inline backticks. Verifies the layout regression doesn't
+    accidentally revert to inline code-span styling, which is what
+    caused the original alignment wobble."""
+    _fresh_data_dir()
+    _seed_storage(["AAPL", "NVDA", "TSLA"])
+    commands = _reload_storage_singletons()
+
+    text = commands._format_list_view(["AAPL", "NVDA", "TSLA"], None, None)
+    grid_start = text.index("```\n") + 4
+    grid_end = text.index("\n```", grid_start)
+    grid_body = text[grid_start:grid_end]
+    # No backticks inside the grid body (which would imply nested
+    # inline code spans — wrong format).
+    assert "`" not in grid_body, f"no inline backticks in grid: {grid_body!r}"
+
+
+# ─── _format_ticker_grid helper ─────────────────────────────────────────
+
+
+async def test_grid_renders_inside_pre_block() -> None:
+    """Grid output is wrapped in MarkdownV2 triple-backtick fences so the
+    entire block is one monospace context. Without this, spaces BETWEEN
+    inline code-spans render in the proportional message font and rows
+    wobble."""
+    _fresh_data_dir()
+    _seed_storage(["AAPL"])
+    commands = _reload_storage_singletons()
+
+    text = commands._format_ticker_grid(["AAPL"])
+    assert text.startswith("```\n"), repr(text[:10])
+    assert text.endswith("\n```"), repr(text[-10:])
+
+
+async def test_grid_short_tickers_4_cols() -> None:
+    """Short US tickers (≤5 chars) → 4-column grid, cells padded to
+    max_len + _GRID_GUTTER. With 4 tickers `AAPL NVDA TSLA MSFT`,
+    cell_width = 4 + 2 = 6, ncols = min(4, 36//6) = 4 → 1 row."""
+    _fresh_data_dir()
+    _seed_storage(["AAPL"])
+    commands = _reload_storage_singletons()
+
+    text = commands._format_ticker_grid(["AAPL", "NVDA", "TSLA", "MSFT"])
+    # Strip pre fences: "```\n" prefix (4 chars), "\n```" suffix (4 chars).
+    body = text[4:-4]
+    lines = body.split("\n")
+    assert len(lines) == 1, lines
+    # Each cell = "AAPL  ", joined → "AAPL  NVDA  TSLA  MSFT  ", rstripped
+    # to "AAPL  NVDA  TSLA  MSFT".
+    assert lines[0] == "AAPL  NVDA  TSLA  MSFT", repr(lines[0])
+
+
+async def test_grid_8_tickers_wraps_to_2_rows() -> None:
+    """8 short tickers at 4 cols → exactly 2 rows."""
+    _fresh_data_dir()
+    _seed_storage(["AAPL"])
+    commands = _reload_storage_singletons()
+
+    text = commands._format_ticker_grid(
+        ["AAPL", "NVDA", "TSLA", "MSFT", "GOOG", "AMZN", "META", "NFLX"]
+    )
+    body = text[4:-4]
+    lines = body.split("\n")
+    assert len(lines) == 2, lines
+
+
+async def test_grid_long_ticker_drops_to_2_cols() -> None:
+    """Indian NSE-style ticker `RELIANCE.NS` (11 chars) forces
+    cell_width = 13, ncols = min(4, 36//13) = 2. All rows pad to 13
+    so alignment is uniform regardless of which row holds the long
+    ticker."""
+    _fresh_data_dir()
+    _seed_storage(["AAPL"])
+    commands = _reload_storage_singletons()
+
+    text = commands._format_ticker_grid(["AAPL", "NVDA", "RELIANCE.NS", "MSFT"])
+    body = text[4:-4]
+    lines = body.split("\n")
+    assert len(lines) == 2, lines
+    # Row 1: "AAPL         NVDA         " → rstrip → "AAPL         NVDA"
+    assert lines[0] == "AAPL         NVDA", repr(lines[0])
+    # Row 2: "RELIANCE.NS  MSFT         " → rstrip → "RELIANCE.NS  MSFT"
+    assert lines[1] == "RELIANCE.NS  MSFT", repr(lines[1])
+
+
+async def test_grid_extreme_ticker_drops_to_1_col() -> None:
+    """Pathological 20-char ticker → cell_width = 22, ncols = max(1, 36//22)
+    = 1 → vertical list. The guard `max(1, ...)` prevents ncols=0 on
+    impossibly long tickers."""
+    _fresh_data_dir()
+    _seed_storage(["AAPL"])
+    commands = _reload_storage_singletons()
+
+    text = commands._format_ticker_grid(["AAPL", "X" * 20])
+    body = text[4:-4]
+    lines = body.split("\n")
+    assert len(lines) == 2, lines
+    # cell_width = 22, both rows pad to 22 then rstrip
+    assert lines[0].rstrip() == "AAPL"
+    assert lines[1].rstrip() == "X" * 20
 
 
 async def test_list_handler_non_empty_path_sets_parse_mode() -> None:
@@ -348,9 +500,15 @@ async def test_list_handler_non_empty_path_sets_parse_mode() -> None:
     await commands.list_cmd(update, SimpleNamespace(chat_data={}))
     assert len(sent) == 1, sent
     assert sent[0]["parse_mode"] == "MarkdownV2", sent[0]
-    # Body sanity: header + ticker grid present.
-    assert "Watchlist" in sent[0]["text"], sent[0]["text"]
-    assert "`AAPL`" in sent[0]["text"] and "`NVDA`" in sent[0]["text"], sent[0]["text"]
+    # Body sanity: header + ticker grid present. The grid now lives in
+    # a triple-backtick pre block instead of per-ticker inline code
+    # spans, so check inside the pre block for the tickers.
+    body = sent[0]["text"]
+    assert "Watchlist" in body, body
+    grid_start = body.index("```\n") + 4
+    grid_end = body.index("\n```", grid_start)
+    grid_body = body[grid_start:grid_end]
+    assert "AAPL" in grid_body and "NVDA" in grid_body, grid_body
 
 
 SCENARIOS = [
@@ -372,12 +530,38 @@ SCENARIOS = [
         test_list_format_digest_all_watchlist,
     ),
     (
-        "_format_list_view: filter → 'K of N enrolled' + 🔔 markers",
+        "_format_list_view: filter → '→ T1, T2' header + no bell markers in grid",
         test_list_format_digest_with_filter,
     ),
     (
         "/list handler sets parse_mode=MarkdownV2 on non-empty path",
         test_list_handler_non_empty_path_sets_parse_mode,
+    ),
+    # --- _format_ticker_grid helper ---
+    ("_format_ticker_grid: wrapped in pre block", test_grid_renders_inside_pre_block),
+    (
+        "_format_ticker_grid: 4 short tickers → 4 cols, 1 row",
+        test_grid_short_tickers_4_cols,
+    ),
+    (
+        "_format_ticker_grid: 8 short tickers → 2 rows",
+        test_grid_8_tickers_wraps_to_2_rows,
+    ),
+    (
+        "_format_ticker_grid: RELIANCE.NS → drops to 2 cols",
+        test_grid_long_ticker_drops_to_2_cols,
+    ),
+    (
+        "_format_ticker_grid: 20-char ticker → 1 col",
+        test_grid_extreme_ticker_drops_to_1_col,
+    ),
+    (
+        "_format_list_view: digest on, zero enrolled → reminder footer",
+        test_list_format_digest_zero_enrolled,
+    ),
+    (
+        "_format_list_view: grid uses pre block, no inline backticks",
+        test_list_format_no_inline_backticks_per_ticker,
     ),
 ]
 
