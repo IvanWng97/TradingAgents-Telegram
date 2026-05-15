@@ -40,7 +40,7 @@ Sample published analysis: [BRK-B — 2026-05-05](https://telegra.ph/BRK-B-Analy
 
 | `/add` + `/watch` analysis | `/digest` daily summary | Telegraph Instant View |
 |:---:|:---:|:---:|
-| <img src="assets/screenshots/watch.jpg" width="260" alt="Watchlist analysis with finviz chart, signal emoji, summary, an Instant View Telegraph button, and a Download .md button"> | <img src="assets/screenshots/digest.jpg" width="260" alt="Daily Digest message listing each ticker with signal emoji and a Telegraph instant-view preview"> | <img src="assets/screenshots/telegraph.jpg" width="260" alt="Telegraph page rendered in Telegram's Instant View — full multi-agent analysis with chart"> |
+| <img src="assets/screenshots/watch.png" width="260" alt="Watchlist analysis with finviz chart, signal emoji, summary, an Instant View Telegraph button, and a Download .md button"> | <img src="assets/screenshots/digest.png" width="260" alt="Daily Digest message listing each ticker with signal emoji and a Telegraph instant-view preview"> | <img src="assets/screenshots/telegraph.png" width="260" alt="Telegraph page rendered in Telegram's Instant View — full multi-agent analysis with chart"> |
 
 </div>
 
