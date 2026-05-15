@@ -330,9 +330,16 @@ async def test_list_format_digest_with_filter() -> None:
     )
     # Header
     assert "Digest" in text and "08:00" in text, text
-    # Enrolled tickers named in the → line (not in the grid)
-    assert "→" in text, "expected '→ T1, T2' header line for subset"
-    assert "AAPL" in text and "TSLA" in text
+    # Pin the exact → line so a regression that drops the
+    # `if t in enrolled` filter (which would name every watchlist
+    # ticker) is caught — checking just `"AAPL" in text` is trivially
+    # true since AAPL also appears in the grid below.
+    arrow_line = next(
+        (line for line in text.splitlines() if "→" in line),
+        None,
+    )
+    assert arrow_line is not None, f"expected '→' line in: {text!r}"
+    assert arrow_line == "   → `AAPL`, `TSLA`", repr(arrow_line)
     # Grid in pre block
     assert "```\n" in text and "\n```" in text, "grid must be in pre block"
     # Grid body has no bell markers
