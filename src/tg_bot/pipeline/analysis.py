@@ -96,7 +96,13 @@ def llm_setup_error_message(reason: str) -> str:
 # semaphore prevents over-subscription, so the pool's blocking branch is
 # unreachable. Key-level LRU at GRAPH_CACHE_MAX evicts the oldest pool
 # (and all its instances) when too many distinct LLM-config keys exist.
-GRAPH_CACHE_MAX = 4
+# Floor at MAX_CONCURRENT_ANALYSES so an evicted pool can't be holding an
+# in-use instance: with N concurrent runs across N distinct configs and
+# the cache capped below N, the first-evicted pool's `finally:` would
+# return its instance to a queue belonging to a dropped pool. 4 is the
+# historical minimum (default `MAX_CONCURRENT_ANALYSES=3` + 1 headroom
+# for /config switches before LRU pressure kicks in).
+GRAPH_CACHE_MAX = max(4, Config.MAX_CONCURRENT_ANALYSES)
 
 
 class GraphPool:
