@@ -17,14 +17,6 @@ on:
   issue_comment:
     types: [created]
 
-# Cancel an in-flight review when a new event lands on the same PR.
-# Coalesces across event types: PR events expose number at
-# `event.pull_request.number`; issue_comment events on PRs expose it at
-# `event.issue.number`.
-concurrency:
-  group: claude-review-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
-
 jobs:
   review:
     # Gate: auto-fire on PR events (skip dependabot), OR manual /claude-review
@@ -36,6 +28,21 @@ jobs:
        contains(github.event.comment.body, '/claude-review'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Concurrency at job-level (not workflow-level) is load-bearing here.
+    # `track_progress: true` posts a tracking comment at the START of the
+    # review, which fires `issue_comment created` and queues a second run
+    # of this workflow. With workflow-level concurrency, that second run
+    # would share the group and cancel the in-flight first run before
+    # its `if:` gate even evaluates (PR #58 surfaced exactly this). At
+    # job-level, the group is only entered AFTER the gate passes — so
+    # the tracking-comment re-trigger evaluates `if:` first, skips
+    # (body doesn't contain `/claude-review`), and never touches the
+    # group. Coalesces PR number across event types: PR events expose
+    # number at `event.pull_request.number`; issue_comment events on
+    # PRs expose it at `event.issue.number`.
+    concurrency:
+      group: claude-review-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
     permissions:
       contents: read
       pull-requests: write    # Post inline + tracking comments.
