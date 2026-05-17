@@ -118,8 +118,14 @@ PROVIDER_ENV_KEYS: dict[str, str | None] = {
     "xai": "XAI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "qwen": "DASHSCOPE_API_KEY",
+    # qwen-cn / glm-cn / minimax-cn use distinct CN-suffixed env vars upstream
+    # — not shared with the non-CN siblings. Verified via tradingagents'
+    # `PROVIDER_API_KEY_ENV`; pinned by `test_provider_env_keys_match_upstream`.
+    "qwen-cn": "DASHSCOPE_CN_API_KEY",
     "glm": "ZHIPU_API_KEY",
+    "glm-cn": "ZHIPU_CN_API_KEY",
     "minimax": "MINIMAX_API_KEY",
+    "minimax-cn": "MINIMAX_CN_API_KEY",
     "ollama": None,  # local; no key needed (point at remote via OLLAMA_BASE_URL)
     # openrouter routes via tradingagents' OpenAIClient to
     # https://openrouter.ai/api/v1; listing it here makes `check_llm_configured`

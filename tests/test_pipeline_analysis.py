@@ -214,6 +214,29 @@ async def test_check_llm_configured_ollama_no_env_needed() -> None:
     assert check_llm_configured({"llm_provider": "ollama"}) is None
 
 
+async def test_check_llm_configured_cn_variant_names_cn_suffixed_key() -> None:
+    """CN provider variants (qwen-cn / glm-cn / minimax-cn) use DISTINCT
+    CN-suffixed env vars upstream — not shared with their non-CN siblings.
+    Without `qwen-cn` registered in `PROVIDER_ENV_KEYS`, the precheck would
+    silently pass when only `DASHSCOPE_API_KEY` (non-CN) is set but the user
+    has `TRADINGAGENTS_LLM_PROVIDER=qwen-cn` — analysis then 401s at
+    upstream API-call time with a cryptic message instead of the targeted
+    'DASHSCOPE_CN_API_KEY not set' warning at the entry point."""
+    saved_cn = os.environ.pop("DASHSCOPE_CN_API_KEY", None)
+    saved_base = os.environ.pop("DASHSCOPE_API_KEY", None)
+    # Set the non-CN sibling to prove the precheck doesn't fall back to it.
+    os.environ["DASHSCOPE_API_KEY"] = "sk-test-irrelevant"
+    try:
+        reason = check_llm_configured({"llm_provider": "qwen-cn"})
+        assert reason is not None and "DASHSCOPE_CN_API_KEY" in reason, reason
+    finally:
+        os.environ.pop("DASHSCOPE_API_KEY", None)
+        if saved_base is not None:
+            os.environ["DASHSCOPE_API_KEY"] = saved_base
+        if saved_cn is not None:
+            os.environ["DASHSCOPE_CN_API_KEY"] = saved_cn
+
+
 async def test_check_llm_configured_defaults_to_build_config() -> None:
     """Calling with no args reads `build_config()` — keeps callers terse
     and ensures the precheck always asks 'is THE CURRENT config valid'."""
