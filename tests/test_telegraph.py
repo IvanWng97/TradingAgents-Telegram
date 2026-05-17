@@ -17,13 +17,12 @@ The SDK is monkeypatched (no network) by swapping `_telegraph_client()`
 for a stub recorder. `asyncio.sleep` is also monkeypatched in the retry
 path so the suite stays fast.
 
-Run with: .venv/bin/python3 scripts/smoke_telegraph.py
+Run with: pytest tests/test_telegraph.py
 """
 
 from __future__ import annotations
 
 import asyncio
-import inspect
 import sys
 from pathlib import Path
 
@@ -265,67 +264,3 @@ async def test_non_transient_error_returns_none_without_retry() -> None:
 
 
 # ---------- ordering ----------
-
-
-SCENARIOS = [
-    ("path extraction (canonical)", test_path_extraction_canonical),
-    ("path extraction (None/empty)", test_path_extraction_handles_none_and_empty),
-    (
-        "path extraction rejects non-telegraph urls",
-        test_path_extraction_rejects_non_telegraph_urls,
-    ),
-    ("edit_path → edit_page first (URL stable)", test_edit_path_calls_edit_page_first),
-    (
-        "edit_page non-transient failure → create_page fallback",
-        test_edit_failure_falls_back_to_create,
-    ),
-    (
-        "edit_page transient error → retry → success (URL stable)",
-        test_edit_transient_error_retries_then_succeeds,
-    ),
-    (
-        "edit_page transient exhausted → None (NOT create_page fallback)",
-        test_edit_transient_error_exhausted_returns_none,
-    ),
-    ("no edit_path → create_page directly", test_no_edit_path_goes_directly_to_create),
-    (
-        "transient error → one retry → success",
-        test_transient_network_error_retries_once_and_succeeds,
-    ),
-    (
-        "transient error → retries exhausted → None",
-        test_transient_network_error_exhausts_retries_returns_none,
-    ),
-    (
-        "non-transient error → no retry → None",
-        test_non_transient_error_returns_none_without_retry,
-    ),
-]
-
-
-async def main() -> int:
-    failures = 0
-    for label, fn in SCENARIOS:
-        try:
-            if inspect.iscoroutinefunction(fn):
-                await fn()
-            else:
-                fn()
-        except AssertionError as e:
-            failures += 1
-            print(f"  {FAIL} {label}: {e}")
-        except Exception as e:
-            failures += 1
-            print(f"  {FAIL} {label}: {type(e).__name__}: {e}")
-        else:
-            print(f"  {PASS} {label}")
-    print()
-    if failures:
-        print(f"{FAIL} {failures} of {len(SCENARIOS)} failed")
-        return 1
-    print(f"{PASS} all {len(SCENARIOS)} passed")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))

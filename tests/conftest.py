@@ -1,25 +1,20 @@
-"""Pytest config for the smoke suites.
+"""Pytest config for the `tests/` suite.
 
-Pytest discovers `scripts/smoke_*.py` files in place (see
-`[tool.pytest.ini_options]` in `pyproject.toml`). The migration was
-additive — `bash scripts/run_smoke.sh` still works for parity checks,
-and the same 235 `async def test_*` / `def test_*` functions run under
-both runners.
+Pytest discovers `tests/test_*.py` files via the default rule (no
+`python_files` override needed; see `[tool.pytest.ini_options]` in
+`pyproject.toml`). 235 `async def test_*` / `def test_*` scenarios.
 
-This conftest carries the cross-cutting setup that used to live in each
-smoke file's `main()`:
+Cross-cutting setup carried here:
 
-1. `src/` on `sys.path` so `tg_bot.*` imports resolve. Each smoke file
+1. `src/` on `sys.path` so `tg_bot.*` imports resolve. Each test file
    already does this at module top, but conftest fires earlier (during
-   collection, before any smoke is imported) so the precheck-disable
+   collection, before any test file is imported) so the precheck-disable
    fixture below can import `tg_bot.handlers.*` cleanly.
 
-2. Digest precheck disable. `smoke_digest.py`'s fan-out / cancel /
+2. Digest precheck disable. `test_digest.py`'s fan-out / cancel /
    progress tests assume `check_llm_configured` is a no-op so they
-   don't have to arm a provider + matching env var. The original
-   `main()` called `_disable_llm_precheck_globally()` once before
-   iterating its SCENARIOS list. Pytest skips `main()`, so we replicate
-   the call as an autouse session fixture here. Safe across all suites
+   don't have to arm a provider + matching env var. We replicate the
+   patch as an autouse session fixture here. Safe across all suites
    because `test_llm_precheck_*` tests import `check_llm_configured`
    directly from `tg_bot.pipeline.analysis` (the source) — not the
    patched-out module-level imports in `callbacks` / `analysis_runner`.
@@ -44,9 +39,8 @@ def _disable_digest_llm_precheck():
     """Patch the module-level `check_llm_configured` import in both
     handlers that bind it — `callbacks` (used by `_handle_digest`'s
     `digest:run` branch) and `analysis_runner` (used by
-    `run_user_digest`'s entry guard). Mirrors `smoke_digest.py`'s
-    original `_disable_llm_precheck_globally()` helper, hoisted here
-    so it applies session-wide without each test needing to opt in.
+    `run_user_digest`'s entry guard). Applied session-wide so each test
+    doesn't need to opt in.
 
     The source function at `tg_bot.pipeline.analysis.check_llm_configured`
     is NOT touched — `test_llm_precheck_*` tests call it directly and

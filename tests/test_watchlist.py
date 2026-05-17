@@ -7,12 +7,11 @@ callback prefixes are identical so paging/selection works the same in
 both. The Done handler reads `chat_data["watch_mode"]` to decide
 whether to invalidate the cache before running.
 
-Run with: .venv/bin/python3 scripts/smoke_watchlist.py
+Run with: pytest tests/test_watchlist.py
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
@@ -538,87 +537,3 @@ async def test_list_handler_non_empty_path_sets_parse_mode() -> None:
     grid_end = body.index("\n```", grid_start)
     grid_body = body[grid_start:grid_end]
     assert "AAPL" in grid_body and "NVDA" in grid_body, grid_body
-
-
-SCENARIOS = [
-    (
-        "remove_ticker prunes user key when list empties",
-        test_remove_last_ticker_drops_user_key,
-    ),
-    ("watch mode header + Done label", test_watch_mode_header_and_done_label),
-    ("refresh mode header + Done label", test_refresh_mode_header_and_done_label),
-    (
-        "keyboard structure identical across modes",
-        test_keyboard_structure_identical_across_modes,
-    ),
-    ("empty watchlist short-circuits in both modes", test_empty_watchlist_no_keyboard),
-    (
-        "force-reply /add fires only on exact ADD_PROMPT match",
-        test_add_via_reply_fires_only_on_exact_prompt_match,
-    ),
-    ("/list empty watchlist → nudge", test_list_empty_watchlist),
-    ("_format_list_view: no digest → footer 'off'", test_list_format_no_digest),
-    (
-        "_format_list_view: all watchlist fires → 'all N fire daily' + no markers",
-        test_list_format_digest_all_watchlist,
-    ),
-    (
-        "_format_list_view: filter → '→ T1, T2' header + no bell markers in grid",
-        test_list_format_digest_with_filter,
-    ),
-    (
-        "/list handler sets parse_mode=MarkdownV2 on non-empty path",
-        test_list_handler_non_empty_path_sets_parse_mode,
-    ),
-    # --- _format_ticker_grid helper ---
-    ("_format_ticker_grid: wrapped in pre block", test_grid_renders_inside_pre_block),
-    (
-        "_format_ticker_grid: 4 short tickers → 4 cols, 1 row",
-        test_grid_short_tickers_4_cols,
-    ),
-    (
-        "_format_ticker_grid: 8 short tickers → 2 rows",
-        test_grid_8_tickers_wraps_to_2_rows,
-    ),
-    (
-        "_format_ticker_grid: RELIANCE.NS → drops to 2 cols",
-        test_grid_long_ticker_drops_to_2_cols,
-    ),
-    (
-        "_format_ticker_grid: 20-char ticker → 1 col",
-        test_grid_extreme_ticker_drops_to_1_col,
-    ),
-    (
-        "_format_list_view: digest on, zero enrolled → reminder footer",
-        test_list_format_digest_zero_enrolled,
-    ),
-    (
-        "_format_list_view: grid uses pre block, no inline backticks",
-        test_list_format_no_inline_backticks_per_ticker,
-    ),
-]
-
-
-async def main() -> int:
-    failures = 0
-    for label, fn in SCENARIOS:
-        try:
-            await fn()
-        except AssertionError as e:
-            failures += 1
-            print(f"  {FAIL} {label}: {e}")
-        except Exception as e:
-            failures += 1
-            print(f"  {FAIL} {label}: {type(e).__name__}: {e}")
-        else:
-            print(f"  {PASS} {label}")
-    print()
-    if failures:
-        print(f"{FAIL} {failures} of {len(SCENARIOS)} failed")
-        return 1
-    print(f"{PASS} all {len(SCENARIOS)} passed")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))

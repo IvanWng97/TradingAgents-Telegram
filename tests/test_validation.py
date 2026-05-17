@@ -12,7 +12,7 @@ single `.` or `-`, no consecutive separators, no leading/trailing
 separator. Keep both modules in lockstep — they share the same security
 contract.
 
-Run with: .venv/bin/python3 scripts/smoke_validation.py
+Run with: pytest tests/test_validation.py
 """
 
 from __future__ import annotations
@@ -73,41 +73,3 @@ def test_lowercase_input_round_trips() -> None:
     assert validation_normalize("brk-b") == "BRK-B"
     assert history_normalize("..") is None
     assert validation_normalize("..") is None
-
-
-SCENARIOS = [
-    (
-        "history.normalize_ticker accepts legit, rejects traversal",
-        test_history_normalize_ticker,
-    ),
-    (
-        "validation._normalize accepts legit, rejects traversal",
-        test_validation_normalize,
-    ),
-    ("both helpers handle lowercase + traversal", test_lowercase_input_round_trips),
-]
-
-
-def main() -> int:
-    failures = 0
-    for label, fn in SCENARIOS:
-        try:
-            fn()
-        except AssertionError as e:
-            failures += 1
-            print(f"  {FAIL} {label}: {e}")
-        except Exception as e:
-            failures += 1
-            print(f"  {FAIL} {label}: {type(e).__name__}: {e}")
-        else:
-            print(f"  {PASS} {label}")
-    print()
-    if failures:
-        print(f"{FAIL} {failures} of {len(SCENARIOS)} failed")
-        return 1
-    print(f"{PASS} all {len(SCENARIOS)} passed")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

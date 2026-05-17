@@ -15,12 +15,11 @@ full /watch and digest fan-out is exercised by the existing
 `smoke_digest.py` fan-out tests (which see the cache via
 `_analyze_one_for_digest`).
 
-Run with: .venv/bin/python3 scripts/smoke_cache.py
+Run with: pytest tests/test_cache.py
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
@@ -365,50 +364,3 @@ async def test_today_iso_returns_local_iso_date() -> None:
 
     out = cache.today_iso()
     assert out == date.today().isoformat()
-
-
-SCENARIOS = [
-    ("lookup miss returns None", test_lookup_miss_returns_none),
-    ("store + lookup round-trip", test_store_then_lookup_roundtrip),
-    ("different config keys isolate", test_different_config_isolates),
-    ("same config shares across users", test_same_config_shares_across_users),
-    ("lazy eviction drops old dates", test_lazy_eviction_drops_old_dates),
-    ("corrupt file returns None", test_corrupt_file_returns_none),
-    ("slug handles special chars", test_slug_handles_special_chars),
-    ("non-serializable LangChain objects", test_non_serializable_objects_in_state),
-    ("atomic write is complete JSON", test_atomic_write_is_complete_json),
-    ("default rounds/effort don't shift slug", test_default_rounds_effort_keeps_slug),
-    ("custom rounds isolate cache slot", test_custom_rounds_isolate_slot),
-    ("custom effort isolate cache slot", test_custom_effort_isolates_slot),
-    ("generated_at stored on every write", test_generated_at_persisted),
-    (
-        "store gate skips falsy telegraph_url (cache-hygiene at write site)",
-        test_store_gate_skips_falsy_telegraph_url,
-    ),
-    ("today_iso() returns local-date ISO", test_today_iso_returns_local_iso_date),
-]
-
-
-async def main() -> int:
-    failures = 0
-    for label, fn in SCENARIOS:
-        try:
-            await fn()
-        except AssertionError as e:
-            failures += 1
-            print(f"  {FAIL} {label}: {e}")
-        except Exception as e:
-            failures += 1
-            print(f"  {FAIL} {label}: {type(e).__name__}: {e}")
-        else:
-            print(f"  {PASS} {label}")
-    print()
-    if failures:
-        print(f"{FAIL} {failures} of {len(SCENARIOS)} failed")
-        return 1
-    print(f"{PASS} all {len(SCENARIOS)} passed")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))

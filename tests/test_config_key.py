@@ -11,7 +11,7 @@ Callers (cache.py, callbacks.py, analysis.py) consume the dataclass
 directly — there are no longer any thin delegators (`cache._slug` and
 `formatters.build_config_summary` were inlined in the cleanup PR).
 
-Run with: .venv/bin/python3 scripts/smoke_config_key.py
+Run with: pytest tests/test_config_key.py
 """
 
 from __future__ import annotations
@@ -251,83 +251,3 @@ def test_telegraph_title_differs_across_configs_preventing_collision() -> None:
 
 
 # ---------- ordering ----------
-
-
-SCENARIOS = [
-    (
-        "from_config default rounds + no effort",
-        test_from_config_default_rounds_no_effort,
-    ),
-    ("from_config custom rounds", test_from_config_custom_rounds),
-    ("from_config openai effort picked up", test_from_config_openai_effort_picks_up),
-    (
-        "from_config anthropic effort picked up",
-        test_from_config_anthropic_effort_picks_up,
-    ),
-    (
-        "from_config stale provider effort key wins first (first-truthy-wins)",
-        test_from_config_stale_provider_effort_key_wins_first,
-    ),
-    (
-        "from_config missing provider → unknown",
-        test_from_config_missing_provider_falls_back,
-    ),
-    (
-        "slug() default shape omits suffixes",
-        test_slug_default_shape_omits_rounds_and_effort,
-    ),
-    ("slug() appends __r{n} when customized", test_slug_appends_rounds_when_nondefault),
-    ("slug() appends __e{level} when set", test_slug_appends_effort_when_set),
-    (
-        "slug() appends both when both customized",
-        test_slug_appends_both_when_both_customized,
-    ),
-    (
-        "slug() sanitizes filesystem-unsafe chars",
-        test_slug_sanitizes_filesystem_unsafe_chars,
-    ),
-    ("caption() default shape", test_caption_default_shape),
-    (
-        "caption() appends `· r{n}` when customized",
-        test_caption_appends_rounds_when_nondefault,
-    ),
-    ("caption() appends `· e={level}`", test_caption_appends_effort_with_equals_prefix),
-    ("caption() both customized in order", test_caption_both_customized_in_order),
-    (
-        "telegraph_title() includes caption",
-        test_telegraph_title_includes_ticker_and_caption,
-    ),
-    (
-        "telegraph_title() extends with suffixes",
-        test_telegraph_title_extends_with_customization_suffixes,
-    ),
-    (
-        "telegraph_title() differs across configs",
-        test_telegraph_title_differs_across_configs_preventing_collision,
-    ),
-]
-
-
-def main() -> int:
-    failures = 0
-    for label, fn in SCENARIOS:
-        try:
-            fn()
-        except AssertionError as e:
-            failures += 1
-            print(f"  {FAIL} {label}: {e}")
-        except Exception as e:
-            failures += 1
-            print(f"  {FAIL} {label}: {type(e).__name__}: {e}")
-        else:
-            print(f"  {PASS} {label}")
-    print()
-    if failures:
-        print(f"{FAIL} {failures} of {len(SCENARIOS)} failed")
-        return 1
-    print(f"{PASS} all {len(SCENARIOS)} passed")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
