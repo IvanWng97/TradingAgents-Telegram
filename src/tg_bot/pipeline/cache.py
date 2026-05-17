@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from datetime import date as _date, datetime, UTC
 from pathlib import Path
 from typing import Any
@@ -123,6 +124,16 @@ def lookup(key: AnalysisConfigKey, ticker: str, date_iso: str) -> dict[str, Any]
     dict, or `None` on miss. Quietly returns `None` on any read error — a
     corrupt or partially-written file should never block a fresh run.
 
+    Self-healing on `JSONDecodeError`: the corrupt file is renamed aside
+    to `<date>.json.corrupt-<unix_ts>` so subsequent same-day taps stop
+    burning LLM credits in a loop trying to read it. Mirrors the same
+    two-tier recovery pattern `JsonStorage._load` uses for the bot's
+    persistent state files. Without this, a corrupt entry stuck around
+    until the next-day `store` swept it — every tap in between forced a
+    fresh LLM run. Other exception classes (OSError on read permission
+    issues, etc.) log + return None but do NOT rename — the file might
+    still be valid and recoverable on retry.
+
     Poisoned entries (`telegraph_url=None`) are returned as-is. The cache
     module stays out of the rendering policy; callers that care about the
     missing URL surface `⚠️ Instant View unavailable` and `/refresh` is
@@ -134,6 +145,32 @@ def lookup(key: AnalysisConfigKey, ticker: str, date_iso: str) -> dict[str, Any]
     try:
         with path.open("r") as f:
             return json.load(f)
+    except json.JSONDecodeError as e:
+        # Self-heal: rename the corrupt file aside so the next same-day
+        # tap doesn't fall into this same branch and force a fresh LLM
+        # run. The renamed sibling is preserved for post-mortem — never
+        # auto-cleaned (operators sweep `data/result_cache/**/*.corrupt-*`
+        # manually, same convention as the storage layer's backups).
+        backup = path.with_name(f"{path.name}.corrupt-{int(time.time())}")
+        try:
+            os.rename(path, backup)
+            logger.warning(
+                "result_cache: corrupt JSON at %s (%s) — preserved as %s; "
+                "next tap will recompute",
+                path,
+                e,
+                backup,
+            )
+        except OSError as rename_err:
+            logger.error(
+                "result_cache: corrupt JSON at %s (%s) and rename to backup "
+                "failed (%s); subsequent same-day taps will keep hitting "
+                "this branch until the next-day store sweeps it",
+                path,
+                e,
+                rename_err,
+            )
+        return None
     except Exception as e:
         logger.warning("result_cache: failed to read %s: %s", path, e)
         return None
