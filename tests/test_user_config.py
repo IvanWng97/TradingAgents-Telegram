@@ -9,12 +9,11 @@ Covers:
   google_thinking_level)
 - AnalysisConfigKey.caption() line shape
 
-Run with: .venv/bin/python3 scripts/smoke_user_config.py
+Run with: pytest tests/test_user_config.py
 """
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
 import tempfile
@@ -434,111 +433,3 @@ async def test_enrolled_explicit_empty_filter_returns_empty() -> None:
     # Sanity: the stored value is `[]`, NOT missing — distinguishes from legacy.
     assert s.get_digest("u1")["tickers"] == []
     assert s.get_enrolled_tickers("u1", ["AAPL", "NVDA"]) == []
-
-
-SCENARIOS = [
-    ("rounds default is 1", test_rounds_default_is_one),
-    ("rounds set/get round-trip", test_rounds_set_get_roundtrip),
-    ("rounds reject out-of-range", test_rounds_rejects_out_of_range),
-    ("effort default is None", test_effort_default_is_none),
-    ("effort set/get round-trip", test_effort_set_get_roundtrip),
-    ("effort clear via None", test_effort_clear_via_none),
-    ("effort reject invalid", test_effort_rejects_invalid),
-    ("clear() wipes rounds+effort", test_clear_wipes_rounds_effort),
-    ("set_provider preserves rounds+effort", test_set_provider_preserves_rounds_effort),
-    (
-        "build_user_config default rounds, no effort",
-        test_build_user_config_default_rounds_no_effort,
-    ),
-    (
-        "build_user_config maps effort per provider",
-        test_build_user_config_maps_effort_per_provider,
-    ),
-    (
-        "build_user_config skips effort for unsupported provider",
-        test_build_user_config_skips_effort_for_unsupported_provider,
-    ),
-    (
-        "build_user_config writes rounds even without provider",
-        test_build_user_config_writes_rounds_even_without_provider,
-    ),
-    (
-        "openrouter migration rewrites stale sonnet slug",
-        test_openrouter_migration_rewrites_stale_sonnet_slug,
-    ),
-    (
-        "openrouter migration scoped to openrouter provider",
-        test_openrouter_migration_scoped_to_openrouter_provider,
-    ),
-    (
-        "openrouter migration passes through unknown slugs",
-        test_openrouter_migration_passes_through_unknown_slugs,
-    ),
-    ("config_summary default", test_config_summary_default),
-    ("config_summary with custom rounds", test_config_summary_custom_rounds),
-    ("config_summary with effort", test_config_summary_with_effort),
-    (
-        "PROVIDER_ENV_KEYS aligns with tradingagents upstream",
-        test_provider_env_keys_match_upstream,
-    ),
-    ("VALID_PROVIDERS includes minimax", test_valid_providers_includes_minimax),
-    # --- get_enrolled_tickers (digest filter ∩ watchlist) ---
-    ("enrolled: no digest → []", test_enrolled_no_digest_returns_empty),
-    (
-        "enrolled: legacy save (tickers absent) → all watchlist",
-        test_enrolled_legacy_no_tickers_key_returns_all_watchlist,
-    ),
-    (
-        "enrolled: filter intersects with watchlist",
-        test_enrolled_filter_intersects_with_watchlist,
-    ),
-    (
-        "enrolled: drops tickers removed from watchlist (auto-prune)",
-        test_enrolled_drops_tickers_removed_from_watchlist,
-    ),
-    (
-        "enrolled: preserves watchlist order (not sorted-storage order)",
-        test_enrolled_preserves_watchlist_order,
-    ),
-    (
-        "enrolled: does NOT gate on enabled (run-now path)",
-        test_enrolled_does_not_gate_on_enabled,
-    ),
-    (
-        "enrolled: uppercase normalization (defensive)",
-        test_enrolled_uppercase_normalization_defensive,
-    ),
-    (
-        "enrolled: empty watchlist → []",
-        test_enrolled_empty_watchlist_returns_empty,
-    ),
-    (
-        "enrolled: explicit empty filter (tickers=[]) → []",
-        test_enrolled_explicit_empty_filter_returns_empty,
-    ),
-]
-
-
-async def main() -> int:
-    failures = 0
-    for label, fn in SCENARIOS:
-        try:
-            await fn()
-        except AssertionError as e:
-            failures += 1
-            print(f"  {FAIL} {label}: {e}")
-        except Exception as e:
-            failures += 1
-            print(f"  {FAIL} {label}: {type(e).__name__}: {e}")
-        else:
-            print(f"  {PASS} {label}")
-    print()
-    if failures:
-        print(f"{FAIL} {failures} of {len(SCENARIOS)} failed")
-        return 1
-    print(f"{PASS} all {len(SCENARIOS)} passed")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))

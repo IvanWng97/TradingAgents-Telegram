@@ -8,12 +8,11 @@ behaviors (sort/dedup, digest schema, etc.) are pinned by
 suite covers the shared base contract — primarily the two-tier
 corrupt-JSON recovery documented in storage/CLAUDE.md.
 
-Run with: .venv/bin/python3 scripts/smoke_storage.py
+Run with: pytest tests/test_storage.py
 """
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
 import tempfile
@@ -69,36 +68,3 @@ async def test_corrupt_json_resets_state_and_renames_file() -> None:
     # the contract that lets `/watch` render its empty-watchlist nudge
     # instead of a 500 in the handler.
     assert storage.get_watchlist("1") == []
-
-
-SCENARIOS = [
-    (
-        "corrupt JSON resets _data + renames to <name>.corrupt-<ts>",
-        test_corrupt_json_resets_state_and_renames_file,
-    ),
-]
-
-
-async def main() -> int:
-    failures = 0
-    for label, fn in SCENARIOS:
-        try:
-            await fn()
-        except AssertionError as e:
-            failures += 1
-            print(f"  {FAIL} {label}: {e}")
-        except Exception as e:
-            failures += 1
-            print(f"  {FAIL} {label}: {type(e).__name__}: {e}")
-        else:
-            print(f"  {PASS} {label}")
-    print()
-    if failures:
-        print(f"{FAIL} {failures} of {len(SCENARIOS)} failed")
-        return 1
-    print(f"{PASS} all {len(SCENARIOS)} passed")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))

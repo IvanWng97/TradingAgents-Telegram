@@ -30,16 +30,31 @@ jobs:
           cache: "pip"
           cache-dependency-path: pyproject.toml
 
-      - name: Install package + runtime deps
-        # Full `pip install -e .` so dependabot bumps to tradingagents,
-        # python-telegram-bot, langchain (transitive), etc. actually get
-        # smoke-tested against this PR. Cold cache ~3-4 min; warm ~30s.
-        # `--no-deps` would skip the install path we want to validate.
-        run: pip install -e .
+      - name: Install package + dev deps (pytest + pytest-asyncio)
+        # Full `pip install -e .[dev]` so dependabot bumps to
+        # tradingagents, python-telegram-bot, langchain (transitive),
+        # pytest, etc. actually get smoke-tested against this PR.
+        # Cold cache ~3-4 min; warm ~30s. `--no-deps` would skip the
+        # install path we want to validate.
+        run: pip install -e ".[dev]"
 
-      - name: Run all smoke suites
-        env:
-          # run_smoke.sh defaults to `.venv/bin/python3` for local dev;
-          # CI uses the GitHub-managed interpreter from setup-python.
-          PYTHON: python
-        run: bash scripts/run_smoke.sh
+      - name: Run pytest
+        # `-v` prints per-test PASS/FAIL with the test name so failure
+        # detail is visible in the GH Actions log without expanding any
+        # collapsible section. `--tb=short` keeps tracebacks scannable
+        # in the log. `--junitxml` emits a machine-readable report that
+        # the upload-artifact step archives for download / inline
+        # rendering via third-party actions if added later.
+        run: pytest tests/ -v --tb=short --junitxml=junit.xml
+
+      - name: Upload JUnit report
+        # `if: always()` so the report uploads even when pytest exits
+        # non-zero — that's exactly when the report is most useful.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-report
+          path: junit.xml
+          # 7 days is enough for the typical PR review cycle; older
+          # reports rarely matter and GH Actions storage is finite.
+          retention-days: 7

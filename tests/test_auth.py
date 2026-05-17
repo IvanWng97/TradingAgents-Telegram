@@ -13,12 +13,11 @@ Four scenarios:
   - allowlist set + user NOT in list → raise ApplicationHandlerStop
   - allowlist set + effective_user is None → raise (fail-closed)
 
-Run with: .venv/bin/python3 scripts/smoke_auth.py
+Run with: pytest tests/test_auth.py
 """
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
 from types import SimpleNamespace
@@ -166,47 +165,3 @@ async def test_allowlist_fail_closed_on_missing_user() -> None:
             "fail-closed broken: effective_user=None passed through "
             "with non-empty allowlist"
         )
-
-
-SCENARIOS = [
-    ("open mode passes any user", test_open_mode_passes_any_user),
-    ("open mode passes update with missing user", test_open_mode_passes_missing_user),
-    ("allowlist passes authorized user", test_allowlist_passes_authorized_user),
-    (
-        "allowlist blocks unauthorized command + replies",
-        test_allowlist_blocks_unauthorized_command,
-    ),
-    (
-        "allowlist blocks unauthorized callback + toasts",
-        test_allowlist_blocks_unauthorized_callback,
-    ),
-    (
-        "allowlist fails closed on missing effective_user",
-        test_allowlist_fail_closed_on_missing_user,
-    ),
-]
-
-
-async def main() -> int:
-    failures = 0
-    for label, fn in SCENARIOS:
-        try:
-            await fn()
-        except AssertionError as e:
-            failures += 1
-            print(f"  {FAIL} {label}: {e}")
-        except Exception as e:
-            failures += 1
-            print(f"  {FAIL} {label}: {type(e).__name__}: {e}")
-        else:
-            print(f"  {PASS} {label}")
-    print()
-    if failures:
-        print(f"{FAIL} {failures} of {len(SCENARIOS)} failed")
-        return 1
-    print(f"{PASS} all {len(SCENARIOS)} passed")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))

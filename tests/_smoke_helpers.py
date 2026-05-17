@@ -1,7 +1,7 @@
-"""Shared fixtures for the smoke suites that exercise the analysis runner.
+"""Shared fixtures for the test suites that exercise the analysis runner.
 
-Used by `smoke_runner.py` (cancel + queueing scenarios) and
-`smoke_runner_parallel.py` (wall-clock proof of true parallelism).
+Used by `tests/test_runner.py` (cancel + queueing scenarios) and
+`tests/test_runner_parallel.py` (wall-clock proof of true parallelism).
 Not used by the unit-flavoured suites (cache, config_key, formatters,
 etc.) — those don't need a fake PTB context.
 

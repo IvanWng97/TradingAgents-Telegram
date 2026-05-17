@@ -71,9 +71,10 @@ jobs:
             - `CLAUDE.md` — focus on §"Cross-cutting invariants" (#1–#10),
               §"Request lifecycle (manual /watch tap)", and §"Data flow
               at a glance."
-            - `scripts/smoke_*.py` — pinning suites. Each has a
-              `SCENARIOS` list (or `TESTS` in smoke_runner.py). Treat the
-              registered scenarios as your "covered" set.
+            - `tests/test_*.py` — pinning suites. Pytest-style test
+              functions named `test_*` (sync or async). Treat every
+              `test_*` function as your "covered" set; grep for
+              `^(async )?def test_` to enumerate.
             - `src/tg_bot/handlers/` — runtime. Callback prefixes are
               dispatched via `data.startswith(...)` chains; commands via
               `CommandHandler` registrations in `app.py`.
@@ -83,7 +84,7 @@ jobs:
             1. Enumerate the 10 invariants from CLAUDE.md.
             2. Enumerate every callback prefix in the handlers (grep for
                `data.startswith("`).
-            3. Enumerate every smoke scenario across all `smoke_*.py` files.
+            3. Enumerate every test scenario across all `tests/test_*.py` files.
             4. Cross-reference: which invariants and callback prefixes
                lack at least one pinning scenario? A scenario "pins" an
                invariant when it would FAIL if the invariant were broken.

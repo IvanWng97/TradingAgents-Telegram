@@ -9,7 +9,7 @@ records its actual start/end wall-clock window. After gather, we check:
   2. All 5 (start, end) windows overlap — a single instant exists when
      every run was in flight.
 
-Run with: .venv/bin/python3 scripts/smoke_runner_parallel.py
+Run with: pytest tests/test_runner_parallel.py
 """
 
 from __future__ import annotations
@@ -158,10 +158,3 @@ async def test_real_parallelism() -> None:
     print(f"  ✓ all {len(tickers)} reached 'completed'")
 
     print("\nALL CHECKS PASSED ✅")
-
-
-if __name__ == "__main__":
-    # Backwards-compat entry point so `bash scripts/run_smoke.sh` still
-    # works alongside `pytest scripts/`. Pytest discovers
-    # `test_real_parallelism` directly.
-    asyncio.run(test_real_parallelism())

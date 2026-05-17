@@ -30,17 +30,17 @@ The `[dev]` extra adds `ruff` + `pre-commit`. Wire up the hook so format/lint ru
 pre-commit install   # one-time: lints/formats on every git commit
 ```
 
-## Smoke tests
+## Tests
 
-Smoke tests live under `scripts/`:
+Tests live under `tests/` (pytest standard layout). 235 scenarios as of 2026-05-17, spanning storage, config-key, cache, watchlist, validation, formatters, runner orchestration, runner parallelism, digest fan-out, telegraph publishing, and auth gate. The full suite runs in ~25s:
 
 ```bash
-python scripts/smoke_concurrent.py    # 11 orchestration scenarios: queue, cancel, retry, shutdown
-python scripts/smoke_parallel.py      # parallelism wall-time check (5 tickers, cap=5)
-python scripts/smoke_digest.py        # 57 scenarios: storage, picker, fan-out, cancel, precheck
-python scripts/smoke_cache.py         # 14 scenarios: same-day result cache + slug variants
-python scripts/smoke_user_config.py   # 16 scenarios: rounds + effort knobs, build_user_config, config_summary
-python scripts/smoke_watchlist.py     # 4 scenarios: /watch + /refresh shared picker
+pytest tests/                                  # everything
+pytest tests/test_cache.py                     # one file
+pytest tests/test_runner.py::test_basic_queue  # one scenario
+pytest tests/ -v --tb=short                    # CI's invocation
 ```
+
+This is also what `.github/workflows/smoke.yml` runs on every PR, with a `junit.xml` archived as a build artifact.
 
 See [`CLAUDE.md`](../CLAUDE.md) for architecture notes, key contracts, and current limitations.

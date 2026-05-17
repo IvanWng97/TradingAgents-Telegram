@@ -35,9 +35,9 @@ dependencies = [
 dev = [
     "ruff==0.15.12",
     "pre-commit>=4.6.0",
-    # pytest discovers the existing `scripts/smoke_*.py` files (config in
-    # [tool.pytest.ini_options]). Migration was additive — `bash
-    # scripts/run_smoke.sh` still works for parity checks.
+    # pytest runs the `tests/test_*.py` suite (config in
+    # [tool.pytest.ini_options] below). pytest-asyncio's auto mode lets
+    # `async def test_*` functions run without a per-test marker.
     "pytest>=9.0.0",
     "pytest-asyncio>=1.3.0",
 ]
@@ -65,17 +65,14 @@ select = ["E", "F", "UP", "B"]
 ignore = ["E501"]
 
 [tool.pytest.ini_options]
-# Pytest discovers the existing `scripts/smoke_*.py` files in place.
-# Migration was additive — `bash scripts/run_smoke.sh` keeps working,
-# and the same 235 `async def test_*` / `def test_*` functions execute
-# under both runners. See `scripts/conftest.py` for cross-cutting setup
-# (sys.path wiring + autouse digest-precheck disable).
-testpaths = ["scripts"]
-python_files = ["smoke_*.py"]
-python_functions = ["test_*"]
+# Tests live in `tests/` following the pytest standard layout —
+# `test_*.py` files discovered automatically (no `python_files` override
+# needed). See `tests/conftest.py` for cross-cutting setup (sys.path
+# wiring + autouse digest-precheck disable). 235 scenarios in total.
+testpaths = ["tests"]
 # `asyncio_mode = "auto"` lets pytest run `async def test_*` directly,
-# no `@pytest.mark.asyncio` annotation needed — matches how every smoke
-# is written today.
+# no `@pytest.mark.asyncio` annotation needed — matches how every test
+# in `tests/` is written.
 asyncio_mode = "auto"
 # Silence the deprecation warning about the default event_loop fixture
 # scope changing in a future pytest-asyncio release; pick the new

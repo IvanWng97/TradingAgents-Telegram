@@ -206,6 +206,12 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# Claude Code local state (scheduled task locks, per-machine permission
+# settings). `settings.json` (project-shared) is checked in elsewhere if
+# you want it; this directory is the per-machine / per-session state
+# (e.g. `scheduled_tasks.lock`, `settings.local.json`).
+.claude/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
