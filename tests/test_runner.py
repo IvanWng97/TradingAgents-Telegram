@@ -107,11 +107,11 @@ def reset_state() -> None:
     _STOP_SIGNAL = threading.Event()
     runner._STOP_SIGNAL = _STOP_SIGNAL  # not used, but keep symmetry
     runner._run_semaphore = None
-    # Cancel-ack edit pacing is also module-level state; without a reset the
-    # second scenario's first cancel can stall 1.1s waiting for the prior
-    # scenario's "last edit" timestamp to age out.
-    runner._cancel_edit_lock = None
-    runner._last_cancel_edit_at = 0.0
+    # Cancel-ack edit pacing is also module-level state — now per-chat,
+    # so reset both dicts. Without this, a second scenario's first cancel
+    # would inherit the prior scenario's timestamps and possibly stall.
+    runner._cancel_edit_locks.clear()
+    runner._last_cancel_edit_at.clear()
     analysis_mod._graph_pool.clear()
     with _BUILD_LOCK:
         _BUILD_COUNT = 0
@@ -478,6 +478,55 @@ async def test_send_photo_failure_cleanup() -> None:
     )
     assert not ctx.chat_data.get("analysis_cancels"), (
         f"registry leaked: {ctx.chat_data.get('analysis_cancels')}"
+    )
+
+
+async def test_cancel_edit_lock_is_per_chat() -> None:
+    """`_get_cancel_edit_lock` returns the SAME lock for the same chat_id
+    but DIFFERENT locks for distinct chat_ids. A previous version used
+    one module-wide lock + timestamp pair, so a cancel-ack edit in chat A
+    silently delayed cancel-acks in chat B by up to `_MIN_CANCEL_INTERVAL`
+    even though Telegram's rate limit is per-chat. Per-chat locks remove
+    that cross-chat coupling."""
+    reset_state()
+    lock_a1 = runner._get_cancel_edit_lock(101)
+    lock_a2 = runner._get_cancel_edit_lock(101)
+    lock_b = runner._get_cancel_edit_lock(202)
+    assert lock_a1 is lock_a2, "same chat_id must reuse its lock"
+    assert lock_a1 is not lock_b, "distinct chat_ids must get distinct locks"
+
+
+async def test_analysis_count_only_after_send_photo_success() -> None:
+    """`bot_data["analysis_count"]` must NOT be inflated when send_photo
+    fails (network blip + retries exhausted). The runner returns
+    "completed" on send_photo failure for queue-tally reasons, but the
+    /status counter should reflect actually-delivered analyses — a
+    previous version bumped at function entry and over-reported."""
+    reset_state()
+    bot, ctx = install_mocks(bot_send_photo_failures=10)  # always fails
+
+    # Pre-condition: counter starts at 0.
+    assert ctx.bot_data.get("analysis_count", 0) == 0
+
+    task = asyncio.create_task(runner._run_analysis_for_ticker(ctx, 1, 1, "AAPL"))
+    result = await task
+
+    assert result == "completed"
+    assert ctx.bot_data.get("analysis_count", 0) == 0, (
+        f"counter inflated on send_photo failure: {ctx.bot_data.get('analysis_count')}"
+    )
+
+    # Sanity: a successful run DOES bump the counter (so the assertion
+    # above isn't trivially passing because the increment is broken).
+    reset_state()
+    bot2, ctx2 = install_mocks()
+    task = asyncio.create_task(runner._run_analysis_for_ticker(ctx2, 1, 1, "AAPL"))
+    await asyncio.sleep(0.2)
+    _STOP_SIGNAL.set()
+    await task
+    assert ctx2.bot_data.get("analysis_count") == 1, (
+        f"counter didn't increment on successful delivery: "
+        f"{ctx2.bot_data.get('analysis_count')}"
     )
 
 

@@ -347,6 +347,18 @@ def build_user_config(user_id, user_config_storage) -> dict:
     if effort and user_provider:
         provider_key = EFFORT_KEY_BY_PROVIDER.get(user_provider)
         if provider_key:
+            # Defensive: clear OTHER providers' effort keys before writing
+            # this run's. `DEFAULT_CONFIG.copy()` above carries whatever
+            # tradingagents ships — if a future upstream version sets a
+            # different provider's key by default, `AnalysisConfigKey.
+            # from_config` iterates EFFORT_KEY_BY_PROVIDER.values() and
+            # returns the first truthy value (Invariant #1 footgun;
+            # pinned by `test_from_config_stale_provider_effort_key_wins_first`
+            # in tests/test_config_key.py). Popping siblings here closes
+            # the upstream side of that footgun.
+            for stale_key in EFFORT_KEY_BY_PROVIDER.values():
+                if stale_key != provider_key:
+                    config.pop(stale_key, None)
             config[provider_key] = effort
     return config
 

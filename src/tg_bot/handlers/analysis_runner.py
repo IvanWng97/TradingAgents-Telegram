@@ -176,34 +176,40 @@ def _try_acquire_nonblocking(sem: asyncio.Semaphore) -> bool:
     return False
 
 
-# Serializes cancel-ack caption edits so a multi-cancel burst doesn't
-# overrun Telegram's per-chat edit limit (~1/sec). Each call holds the
-# lock and sleeps if the last edit fired less than _MIN_CANCEL_INTERVAL
-# seconds ago, then executes. Effectively a FIFO queue with rate-aware
-# pacing — toasts already covered the user's immediate feedback, this
-# just lands the persistent "Cancelling…" caption one by one.
+# Per-chat serialization of cancel-ack caption edits — a multi-cancel
+# burst in one chat is paced through that chat's lock + last-edit-at so
+# we don't overrun Telegram's per-chat edit limit (~1/sec). Different
+# chats get independent locks: a cancel tap in chat A must NOT block a
+# cancel tap in chat B, since Telegram's limit is per-chat, not bot-wide.
+# Per-chat is the correct shape — a previous version used one global
+# lock and silently delayed cross-chat cancel-acks by up to 1.1s.
 #
-# Lazy-init the lock on first use so we bind it to the running loop, not
-# the module-import loop. `asyncio.Lock()` at module-level deprecates
-# under 3.10+ and raises in 3.12+ when no loop is running.
-_cancel_edit_lock: "asyncio.Lock | None" = None
-_last_cancel_edit_at: float = 0.0
+# Lazy-create entries on first use so locks bind to the running loop,
+# not the module-import loop. `asyncio.Lock()` at module-level deprecates
+# under 3.10+ and raises in 3.12+ when no loop is running. Dicts grow
+# unbounded with distinct chat_ids — bounded in practice by allowlist
+# size; LRU eviction could be added if multi-tenancy scales.
+_cancel_edit_locks: "dict[int, asyncio.Lock]" = {}
+_last_cancel_edit_at: "dict[int, float]" = {}
 _MIN_CANCEL_INTERVAL = 1.1  # safe margin under Telegram's per-chat limit
 
 
-def _get_cancel_edit_lock() -> asyncio.Lock:
-    global _cancel_edit_lock
-    if _cancel_edit_lock is None:
-        _cancel_edit_lock = asyncio.Lock()
-    return _cancel_edit_lock
+def _get_cancel_edit_lock(chat_id: int) -> asyncio.Lock:
+    lock = _cancel_edit_locks.get(chat_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _cancel_edit_locks[chat_id] = lock
+    return lock
 
 
 async def _queued_cancel_edit(bot, chat_id: int, message_id: int) -> None:
-    """Lock-serialized variant of `edit_message_caption` for cancel-ack."""
-    global _last_cancel_edit_at
-    async with _get_cancel_edit_lock():
+    """Per-chat lock-serialized variant of `edit_message_caption` for
+    cancel-ack — paces multi-cancel bursts within a single chat while
+    keeping different chats independent."""
+    async with _get_cancel_edit_lock(chat_id):
         now = time.monotonic()
-        wait = _MIN_CANCEL_INTERVAL - (now - _last_cancel_edit_at)
+        last_at = _last_cancel_edit_at.get(chat_id, 0.0)
+        wait = _MIN_CANCEL_INTERVAL - (now - last_at)
         if wait > 0:
             await asyncio.sleep(wait)
         try:
@@ -216,7 +222,7 @@ async def _queued_cancel_edit(bot, chat_id: int, message_id: int) -> None:
             )
         except Exception as e:
             logger.warning("queued cancel-ack edit failed: %s", e)
-        _last_cancel_edit_at = time.monotonic()
+        _last_cancel_edit_at[chat_id] = time.monotonic()
 
 
 async def _run_analysis_for_ticker(
@@ -253,10 +259,11 @@ async def _run_analysis_for_ticker(
     # Telegraph title via `key.telegraph_title(ticker)`. If you change
     # one path's handling of any of these, change the other to match.
     #
-    # /status counter — counts each analysis attempt across the whole bot
-    # (both cache hits and live runs, since the user requested an analysis
-    # either way).
-    context.bot_data["analysis_count"] = context.bot_data.get("analysis_count", 0) + 1
+    # /status counter — bumped only AFTER the user actually received
+    # something (cache-hit photo OR fresh-run progress photo). A previous
+    # version bumped at function entry, which inflated the count when
+    # send_photo failed (Telegram network blip → silently undelivered)
+    # since send_photo failure returns "completed" without surfacing.
 
     # Cache short-circuit: if an identical analysis already ran today
     # (same provider + deep + quick + rounds + effort + ticker, any user),
@@ -310,6 +317,10 @@ async def _run_analysis_for_ticker(
                 reply_markup=_full_report_keyboard(
                     ticker, today_iso, cached.get("telegraph_url")
                 ),
+            )
+            # /status counter — bump only on successful delivery.
+            context.bot_data["analysis_count"] = (
+                context.bot_data.get("analysis_count", 0) + 1
             )
         except Exception as e:
             logger.warning("[%s] cache-hit send_photo failed: %s", ticker, e)
@@ -420,6 +431,10 @@ async def _run_analysis_for_ticker(
         return "completed"  # not "cancelled" — counts toward 'failed' tally
     logger.debug("[%s] send_photo OK message_id=%s", ticker, progress_msg.message_id)
     cancel_registry[run_id]["message_id"] = progress_msg.message_id
+    # /status counter — bump only after the progress photo lands so a
+    # network blip in send_photo (handled above with retry-then-fail)
+    # doesn't inflate the count for an analysis the user never saw.
+    context.bot_data["analysis_count"] = context.bot_data.get("analysis_count", 0) + 1
 
     if not TRADINGAGENTS_AVAILABLE:
         if acquired:
