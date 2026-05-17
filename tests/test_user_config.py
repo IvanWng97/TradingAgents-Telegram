@@ -155,6 +155,42 @@ async def test_build_user_config_maps_effort_per_provider() -> None:
         )
 
 
+async def test_build_user_config_clears_other_providers_effort_keys() -> None:
+    """Defensive: `build_user_config` pops every OTHER provider's effort
+    key before writing the active one. Without this, a stale key carried
+    in via `DEFAULT_CONFIG.copy()` (or any upstream layer) would survive
+    into the returned config, and `AnalysisConfigKey.from_config`'s
+    first-truthy-wins iteration would silently return the WRONG
+    provider's value as `key.effort` (Invariant #1 footgun pinned from
+    the other side by `test_from_config_stale_provider_effort_key_wins_first`
+    in test_config_key.py). Closes the upstream side of that footgun.
+    """
+    from tg_bot.pipeline import analysis as analysis_mod
+
+    # Seed DEFAULT_CONFIG with a stale openai key to simulate upstream
+    # carrying a different provider's effort value forward.
+    orig_default = analysis_mod.DEFAULT_CONFIG
+    analysis_mod.DEFAULT_CONFIG = {
+        **orig_default,
+        "openai_reasoning_effort": "high",
+    }
+    try:
+        s = _make_storage()
+        await s.set_llm_provider("u1", "anthropic")
+        await s.set_effort_level("u1", "medium")
+        config = analysis_mod.build_user_config("u1", s)
+        # Active provider's key set correctly.
+        assert config.get("anthropic_effort") == "medium"
+        # Stale openai key cleared so from_config can't pick it up first.
+        assert "openai_reasoning_effort" not in config, (
+            f"stale openai_reasoning_effort survived: {config.get('openai_reasoning_effort')!r}"
+        )
+        # google key was never set; must remain absent.
+        assert "google_thinking_level" not in config
+    finally:
+        analysis_mod.DEFAULT_CONFIG = orig_default
+
+
 async def test_build_user_config_skips_effort_for_unsupported_provider() -> None:
     """Providers not in PROVIDERS_WITH_EFFORT (deepseek, qwen, etc.) must
     silently ignore the effort knob — no provider key gets set, no warning."""
