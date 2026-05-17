@@ -211,7 +211,7 @@ A change in this repo usually touches more than just code — these surfaces dri
 - `smoke.yml` — `pip install -e ".[dev]"` + `pytest tests/ -v --tb=short --junitxml=junit.xml` on every PR + push to main; uploads `junit.xml` as a 7-day-retention artifact.
 - `codeql.yml` — `security-extended` Python, weekly cron.
 - `claude.yml` — on-demand `@claude` review in PR threads.
-- `claude-auto-review.yml` — Claude review on every PR `opened` / `reopened` / `ready_for_review`; skips dependabot only. `synchronize` deliberately omitted so re-pushes don't re-burn credits — use `@claude review` to re-trigger.
+- `claude-review.yml` — Claude review on every PR `opened` / `reopened` / `ready_for_review` / `synchronize`; skips dependabot only. `cancel-in-progress: true` coalesces push bursts — in-flight reviews are cancelled by each new push, so a burst of pushes produces one review at the end of the quiescent burst. Use `/claude-review` to re-trigger manually.
 - `drift-audit.yml` — weekly Mondays 09:00 UTC. Explore-style audit of test coverage vs. CLAUDE.md invariants + handler surface; opens a `drift-audit` issue only when findings exist.
 - `upstream-tag-watch.yml` — daily. Detects new `TauricResearch/TradingAgents` releases via the Releases API (36h window + dedup by issue title), fires Claude to audit each new tag against the bot's integration surface, opens an `upstream-audit` issue per release.
 - `docker-build.yml` — dual-pushes multi-arch images to Docker Hub + GHCR. Daily cron resolves upstream `tradingagents` HEAD via `git ls-remote` and skips the build when the SHA hasn't changed.
