@@ -99,10 +99,16 @@ def llm_setup_error_message(reason: str) -> str:
 # Floor at MAX_CONCURRENT_ANALYSES so an evicted pool can't be holding an
 # in-use instance: with N concurrent runs across N distinct configs and
 # the cache capped below N, the first-evicted pool's `finally:` would
-# return its instance to a queue belonging to a dropped pool. 4 is the
-# historical minimum (default `MAX_CONCURRENT_ANALYSES=3` + 1 headroom
-# for /config switches before LRU pressure kicks in).
-GRAPH_CACHE_MAX = max(4, Config.MAX_CONCURRENT_ANALYSES)
+# return its instance to a queue belonging to a dropped pool — silent leak.
+# Sized at `max(8, 2 * MAX_CONCURRENT_ANALYSES)`: the 2x multiplier gives
+# headroom for `/config` churn (provider/depth switches) so a user toggling
+# between 2–3 configs in a session doesn't thrash builds (each rebuild is
+# ~500ms — LangChain client + ChromaDB init). Floor of 8 covers the default
+# `MAX_CONCURRENT_ANALYSES=3` case where 2x=6 still felt tight under multi-
+# provider experimentation. Cost: each cached pool pins an LLM client +
+# ChromaDB embedder; ~30–60 MB resident per entry, so the cap holds memory
+# bounded.
+GRAPH_CACHE_MAX = max(8, 2 * Config.MAX_CONCURRENT_ANALYSES)
 
 
 class GraphPool:
