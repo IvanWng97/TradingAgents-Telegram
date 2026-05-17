@@ -238,6 +238,15 @@ async def test_cache_hit_skips_llm_and_renders_directly() -> None:
     assert mode == "HTML", f"cache-hit caption must use HTML; got {mode!r}"
     assert "BUY" in cap, f"signal must appear in caption; got {cap!r}"
     assert "<b>AAPL</b>" in cap, f"HTML ticker badge expected; got {cap!r}"
+    # /status counter bumped on cache-hit successful delivery — same
+    # post-`send_photo`-success rule as the fresh-run path. Without this
+    # assertion, the cache-hit branch's `analysis_count` increment was
+    # untested (the dedicated `test_analysis_count_*` scenario only
+    # exercises the fresh-run path).
+    assert ctx.bot_data.get("analysis_count") == 1, (
+        f"cache-hit success must bump /status counter; "
+        f"got {ctx.bot_data.get('analysis_count')!r}"
+    )
 
 
 async def test_force_refresh_bypasses_cache_hit_and_reuses_telegraph_url() -> None:
