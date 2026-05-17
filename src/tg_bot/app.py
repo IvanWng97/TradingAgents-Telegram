@@ -21,7 +21,6 @@ from tg_bot.handlers import (
     add_ticker,
     add_via_reply,
     button_callback,
-    config_cmd,
     del_ticker,
     digest_cmd,
     help_cmd,
@@ -33,6 +32,7 @@ from tg_bot.handlers import (
     status_cmd,
 )
 from tg_bot.handlers.analysis_runner import register_digest_job
+from tg_bot.pipeline.analysis import check_llm_configured
 from tg_bot.storage import user_config_storage, watchlist_storage
 
 
@@ -50,11 +50,10 @@ BOT_COMMANDS = [
     BotCommand("del", "Remove a ticker from your watchlist"),
     BotCommand("watch", "Watchlist picker — tap tickers to analyze"),
     BotCommand("list", "Show your watchlist as text + digest enrolment"),
-    BotCommand("config", "Configure LLM provider and models"),
-    BotCommand("digest", "Schedule a daily summary of your watchlist"),
+    BotCommand("digest", "Schedule a Mon-Fri summary of your watchlist"),
     BotCommand("history", "Look up a past analysis"),
     BotCommand("refresh", "Re-run today's analysis on a ticker"),
-    BotCommand("status", "Show bot uptime, pool, and your LLM config"),
+    BotCommand("status", "Show bot uptime, pool, and active LLM config"),
 ]
 
 
@@ -69,6 +68,13 @@ async def _post_init(application: Application) -> None:
     """
     application.bot_data["start_time"] = time.time()
     await application.bot.set_my_commands(BOT_COMMANDS)
+
+    # Surface LLM misconfiguration at startup instead of waiting for the
+    # first /watch tap to 401. Logged at WARNING — the bot still starts
+    # so the operator can fix .env without restarting twice.
+    reason = check_llm_configured()
+    if reason is not None:
+        logger.warning("LLM not configured — %s", reason)
 
     # One-time backfill for users whose digest predates the ticker-filter
     # feature: copy their current watchlist into the new `tickers` field so
@@ -194,7 +200,6 @@ def _build_application() -> Application:
     application.add_handler(CommandHandler("del", del_ticker))
     application.add_handler(CommandHandler("watch", list_watchlist))
     application.add_handler(CommandHandler("list", list_cmd))
-    application.add_handler(CommandHandler("config", config_cmd))
     application.add_handler(CommandHandler("digest", digest_cmd))
     application.add_handler(CommandHandler("history", history_cmd))
     application.add_handler(CommandHandler("refresh", refresh_cmd))

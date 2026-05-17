@@ -129,7 +129,7 @@ async def test_same_config_shares_across_users() -> None:
     )
     # Simulate user A's run.
     cache.store(key, "NVDA", "2026-05-09", SAMPLE_STATE, "BUY", "https://t.ly/x")
-    # User B (different user_id, same /config) — no second store call.
+    # User B (different user_id, same .env config) — no second store call.
     # Their lookup should hit user A's cache file.
     got = cache.lookup(key, "NVDA", "2026-05-09")
     assert got is not None and got["signal"] == "BUY"

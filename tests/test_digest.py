@@ -178,30 +178,6 @@ async def test_reenable_via_hour_tap() -> None:
     assert s.iter_enabled_digests() == [("42", d)]
 
 
-async def test_clear_preserves_digest() -> None:
-    """The /config Cancel rollback must not wipe an unrelated digest."""
-    s, _ = fresh_storage()
-    await s.set_llm_provider("42", "deepseek")
-    await s.set_llm_model("42", "deep", "deepseek-v4-pro")
-    await s.set_digest_tz("42", "America/Los_Angeles")
-    await s.set_digest_hour("42", 10, 999)
-    await s.clear("42")
-    bucket = s._data.get("42", {})
-    assert "llm_provider" not in bucket
-    assert "deep_think_llm" not in bucket
-    assert "digest" in bucket, "clear() must preserve the digest block"
-    assert bucket["digest"]["enabled"]
-
-
-async def test_clear_drops_empty_user() -> None:
-    """A user with only LLM config (no digest) gets fully removed by clear()."""
-    s, _ = fresh_storage()
-    await s.set_llm_provider("77", "openai")
-    assert "77" in s._data
-    await s.clear("77")
-    assert "77" not in s._data
-
-
 async def test_persistence_round_trip() -> None:
     """Data must survive a re-instantiation (atomic writes hit disk)."""
     s1, path = fresh_storage()
@@ -1791,87 +1767,6 @@ async def test_fanout_empty_filter_reminder() -> None:
         runner.watchlist_storage = orig_w
         runner._analyze_one_for_digest = orig_a
         runner.user_config_storage = orig_uc
-
-
-# --- LLM-setup precheck ----------------------------------------------------
-
-
-async def test_llm_precheck_no_provider() -> None:
-    """Without /config, the precheck reports a `no provider` reason —
-    callers render a 'tap /config' message instead of running analysis."""
-    from tg_bot.pipeline.analysis import check_llm_configured
-
-    s, _ = fresh_storage()
-    reason = check_llm_configured("42", s)
-    assert reason is not None and "no provider" in reason, reason
-
-
-async def test_llm_precheck_missing_env_key() -> None:
-    """Provider picked but matching env var unset → reason names the var."""
-    from tg_bot.pipeline.analysis import check_llm_configured
-
-    s, _ = fresh_storage()
-    await s.set_llm_provider("42", "deepseek")
-    saved = os.environ.pop("DEEPSEEK_API_KEY", None)
-    try:
-        reason = check_llm_configured("42", s)
-        assert reason is not None and "DEEPSEEK_API_KEY" in reason, reason
-    finally:
-        if saved is not None:
-            os.environ["DEEPSEEK_API_KEY"] = saved
-
-
-async def test_llm_precheck_ok() -> None:
-    """Provider set + matching env var present → returns None (gate opens)."""
-    from tg_bot.pipeline.analysis import check_llm_configured
-
-    s, _ = fresh_storage()
-    await s.set_llm_provider("42", "deepseek")
-    os.environ["DEEPSEEK_API_KEY"] = "sk-test-irrelevant-value"
-    try:
-        assert check_llm_configured("42", s) is None
-    finally:
-        os.environ.pop("DEEPSEEK_API_KEY", None)
-
-
-async def test_llm_precheck_openrouter_missing_env_key() -> None:
-    """openrouter is in PROVIDER_ENV_KEYS so the precheck names
-    OPENROUTER_API_KEY when unset, instead of the user hitting the
-    cryptic 'OPENAI_API_KEY missing' from the openai SDK at LLM-init
-    time."""
-    from tg_bot.pipeline.analysis import check_llm_configured
-
-    s, _ = fresh_storage()
-    await s.set_llm_provider("42", "openrouter")
-    saved = os.environ.pop("OPENROUTER_API_KEY", None)
-    try:
-        reason = check_llm_configured("42", s)
-        assert reason is not None and "OPENROUTER_API_KEY" in reason, reason
-    finally:
-        if saved is not None:
-            os.environ["OPENROUTER_API_KEY"] = saved
-
-
-async def test_openrouter_model_catalog_patched_in() -> None:
-    """tradingagents doesn't ship openrouter in its MODEL_OPTIONS catalog;
-    `analysis.py` patches it in at import so /config doesn't short-circuit.
-    Without this, runs silently use DEFAULT_CONFIG (the openai catalog) —
-    works against openrouter today but accidental + fragile if openrouter
-    tightens model-ID validation."""
-    from tg_bot.pipeline.analysis import get_model_options, has_model_catalog
-
-    assert has_model_catalog("openrouter"), (
-        "openrouter must have a catalog so /config can pick models"
-    )
-    quick = get_model_options("openrouter", "quick")
-    deep = get_model_options("openrouter", "deep")
-    assert len(quick) >= 3 and len(deep) >= 3, (quick, deep)
-    # Slugs must be `vendor/model[:variant]` — openrouter rejects bare ids.
-    for _label, slug in quick + deep:
-        assert "/" in slug, f"openrouter slug {slug!r} missing vendor prefix"
-    # Free tier must be reachable (default fallback = first entry).
-    assert ":free" in quick[0][1], f"first quick entry should be free: {quick[0]}"
-    assert ":free" in deep[0][1], f"first deep entry should be free: {deep[0]}"
 
 
 # --- Runner ----------------------------------------------------------------

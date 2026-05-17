@@ -251,3 +251,46 @@ def test_telegraph_title_differs_across_configs_preventing_collision() -> None:
 
 
 # ---------- ordering ----------
+
+# ─── caption rendering — moved from test_user_config.py ─────────────────
+
+
+async def test_config_summary_default() -> None:
+    out = AnalysisConfigKey.from_config(
+        {
+            "llm_provider": "openai",
+            "deep_think_llm": "gpt-4o",
+            "quick_think_llm": "o4-mini",
+            "max_debate_rounds": 1,
+        }
+    ).caption()
+    assert out == "openai · gpt-4o/o4-mini", out
+
+
+async def test_config_summary_custom_rounds() -> None:
+    out = AnalysisConfigKey.from_config(
+        {
+            "llm_provider": "deepseek",
+            "deep_think_llm": "deepseek-v4-pro",
+            "quick_think_llm": "deepseek-v4-flash",
+            "max_debate_rounds": 2,
+        }
+    ).caption()
+    # Both models present, rounds suffix appended, no effort marker.
+    assert "deepseek-v4-pro/deepseek-v4-flash" in out, out
+    assert "· r2" in out, out
+    assert "e=" not in out, out
+
+
+async def test_config_summary_with_effort() -> None:
+    out = AnalysisConfigKey.from_config(
+        {
+            "llm_provider": "anthropic",
+            "deep_think_llm": "claude-sonnet-4",
+            "quick_think_llm": "claude-haiku-4",
+            "max_debate_rounds": 2,
+            "anthropic_effort": "high",
+        }
+    ).caption()
+    assert "claude-sonnet-4/claude-haiku-4" in out, out
+    assert "· r2 · e=high" in out, out

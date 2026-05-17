@@ -20,7 +20,7 @@ src/tg_bot/
 ├── storage/                     # JSON persistence — terminal in the dep DAG
 │   ├── _base.py                 # JsonStorage (atomic + fsync)
 │   ├── watchlist.py             # WatchlistStorage singleton
-│   └── user_config.py           # UserConfigStorage singleton (LLM + digest)
+│   └── user_config.py           # UserConfigStorage singleton (digest schedule only)
 │
 ├── handlers/                    # PTB handlers — register dispatch surfaces
 │   ├── commands.py              # slash commands (/add, /watch, /list, etc.)
@@ -29,7 +29,7 @@ src/tg_bot/
 │   └── pickers.py               # shared keyboard/response builders for commands+callbacks
 │
 ├── pipeline/                    # LLM execution hot path
-│   ├── analysis.py              # run_trading_analysis + GraphPool + model catalog
+│   ├── analysis.py              # run_trading_analysis + GraphPool + .env overlay (build_config)
 │   ├── cache.py                 # same-day result cache, keyed by AnalysisConfigKey
 │   ├── config_key.py            # AnalysisConfigKey (frozen) — slug/caption/title
 │   └── progress.py              # cancel-aware LangChain callback
@@ -61,7 +61,7 @@ Two prior reorgs were considered and rejected: (1) creating a `bot/` or `telegra
 
 - `src/tg_bot/storage/CLAUDE.md` — storage singletons, atomic+fsync, `user_config.json` schema, corrupt-JSON recovery, multi-instance write caveat
 - `src/tg_bot/handlers/CLAUDE.md` — commands surface + bot-internal mechanics, callback dispatch (textual if-elif chain), picker UX, cancel registry, digest fan-out + trampolining, `_try_acquire_nonblocking`, `/history` republish behavior
-- `src/tg_bot/pipeline/CLAUDE.md` — `AnalysisConfigKey`, `GraphPool` + LRU sizing, cache hygiene + corrupt-file path, progress callback + `threading.local` blind spot, `from_config` effort first-truthy-wins
+- `src/tg_bot/pipeline/CLAUDE.md` — `AnalysisConfigKey`, single lazy `GraphPool`, `.env` overlay (`build_config` + `_apply_local_effort_overlay`), cache hygiene + corrupt-file path, progress callback + `threading.local` blind spot, `from_config` effort first-truthy-wins
 - `src/tg_bot/rendering/CLAUDE.md` — caption HTML, Telegraph publish + 4 resilience layers, 7-section packer, two sanitizers, `_normalize_nested_bullets` state machine, `escape_md_v2_url` carve-out, finviz defaults
 
 Top-level: `pyproject.toml`, `Dockerfile`, `docker-compose.yml`, `.env`, `data/` (runtime state, gitignored), `docs/` (DEVELOPMENT / TROUBLESHOOTING / CONFIGURATION / MANUAL_INSTALL / TODO), `.github/workflows/` (lint + Docker build + CodeQL + on-demand Claude review).
@@ -76,10 +76,10 @@ This section gives reviewers — human or LLM — the structural context needed 
 2. **Auth gate** (`auth.py:authorize`, group=-1) — drops Update if user not in `ALLOWED_USER_IDS`. Fail-closed when `effective_user` is missing and an allowlist is set.
 3. **Handler dispatch** — commands match by name; callbacks dispatch by prefix (order-sensitive where overlapping: `cancel_analysis:` before `cancel:`, `digest_cancel:` before `digest:`).
 4. Picker accumulates selection in `chat_data["watch_selection"]`; Done routes through `_handle_done` → `_run_analysis_for_ticker` per ticker.
-5. **Cache lookup** (`cache.lookup(key, ticker, date_iso)`) where `key = AnalysisConfigKey.from_config(config)` — hits short-circuit before semaphore acquire, reuse persisted `telegraph_url`, skip the progress flow.
+5. **Cache lookup** (`cache.lookup(key, ticker, date_iso)`) where `key = AnalysisConfigKey.from_config(build_config())` — `build_config()` reads tradingagents' env-overlaid `DEFAULT_CONFIG` (single source of truth across all users) — hits short-circuit before semaphore acquire, reuse persisted `telegraph_url`, skip the progress flow.
 6. **Cancel registry** — write `chat_data["analysis_cancels"][run_id] = {"cancel_event": threading.Event, "async_event": asyncio.Event, "message_id": None}` on entry (`message_id` filled after `send_photo`); pop in `finally`. Cancel callback is `cancel_analysis:<run_id>` (UUID, not message_id).
 7. **Concurrency gate** — `asyncio.wait([sem.acquire(), cancel_async.wait()])` races slot acquisition vs queued-cancel. Above-cap users see `⏳ Queued`.
-8. **GraphPool acquire** — keyed on `(provider, deep, quick, rounds, effort)`; per-key cap matches the semaphore so the pool's blocking-queue branch is unreachable.
+8. **GraphPool acquire** — single lazy `GraphPool` built once per process (config is process-wide, sourced from `.env`); its `max_size` equals `Config.MAX_CONCURRENT_ANALYSES`, matching the asyncio semaphore so the pool's blocking-queue branch is unreachable.
 9. **`to_thread(propagate)`** — LangGraph runs; tradingagents threads our `BaseCallbackHandler` into LLM kwargs.
 10. **Per-step progress** — `on_chat_model_start` → `ProgressReporter._dispatch` → `editMessageCaption` (re-attaches cancel keyboard; Telegram drops `reply_markup` otherwise). `cancel_event` is checked **before** every step; raising `CancelledByUserError` aborts the in-flight LLM call (requires `raise_error=True` on the handler — LangChain swallows handler exceptions by default).
 11. **Race-close checks** — three: post-`to_thread`, post-Telegraph publish, before final caption edit. A late tap discards instead of overwriting.
@@ -94,9 +94,10 @@ Digest fan-out (`/digest` JobQueue fire) diverges at steps 1+4: `run_user_digest
 | State | Location | Lifetime | Persistence | Writer |
 |---|---|---|---|---|
 | Watchlist | `data/watchlist.json` | Forever | Atomic + fsync | `WatchlistStorage` |
-| User config (LLM + digest) | `data/user_config.json` | Forever | Atomic + fsync | `UserConfigStorage` |
+| User config (digest only) | `data/user_config.json` | Forever | Atomic + fsync | `UserConfigStorage` |
+| Active LLM config | `.env` (`TRADINGAGENTS_*` + per-provider effort overlay) → `build_config()` | Process (re-read on every call; effectively constant) | Memory | tradingagents `_apply_env_overrides` at import + local `_apply_local_effort_overlay` |
 | Same-day cache entries | `data/result_cache/<slug>/<TICKER>/<date>.json` | Until next-date sweep | Atomic per-file + fsync | `cache.store` |
-| Graph instance pool | `analysis._graph_pool` (keyed by `AnalysisConfigKey`) | Process (LRU at `GRAPH_CACHE_MAX`) | Memory | `analysis._get_or_create_pool` |
+| Graph instance pool | `analysis._graph_pool` (single lazy `GraphPool`) | Process (built once, never evicted) | Memory | `analysis._get_or_create_pool` (double-checked locking) |
 | Ticker validation cache | `validation._CACHE` | Process (5min TTL, 1024 FIFO) | Memory | `validate_ticker` |
 | `chat_data["watch_selection"]` / `["watch_page"]` / `["watch_mode"]` | PTB chat memory | Until Done/Cancel | Memory | Picker entry + callbacks |
 | `chat_data["analysis_cancels"]` | PTB chat memory | Per analysis | Memory | `_run_analysis_for_ticker` |
@@ -115,7 +116,7 @@ Quick reference for tracing how data moves between modules. Detailed contracts l
 
 | Flow | Source → transform → sink |
 |---|---|
-| **Config identity** | `user_config.json` → `build_user_config(user_id)` (pipeline/analysis.py) → `AnalysisConfigKey.from_config(config)` (pipeline/config_key.py) → emits `slug()` for cache, `caption()` for caption "via" line, `telegraph_title(ticker)` for Telegraph page title. Also used as the dict key for `_graph_pool` in analysis.py. **Invariant #1** keeps these three surfaces aligned. |
+| **Config identity** | `.env` (`TRADINGAGENTS_*` env vars) → tradingagents' `_apply_env_overrides` overlays onto `DEFAULT_CONFIG` at lib import + `_apply_local_effort_overlay` adds the per-provider effort knobs → `build_config()` (pipeline/analysis.py) returns a fresh copy → `AnalysisConfigKey.from_config(config)` (pipeline/config_key.py) → emits `slug()` for cache, `caption()` for caption "via" line, `telegraph_title(ticker)` for Telegraph page title. Identity is process-wide (one config across all users); the single lazy `GraphPool` is built from this once. **Invariant #1** keeps slug/caption/title aligned. |
 | **Cache** | `cache.lookup(key, ticker, today_iso())` → on hit: render directly + skip LLM. On miss: run LLM → publish Telegraph → `cache.store(key, ticker, date, final_state, signal, telegraph_url)`. `store` enforces the hygiene gate (falsy URL → no-op). |
 | **Ticker** | User text → `validate_ticker` (yfinance + `TICKER_RE` from validation.py — same regex `history.py` uses for path-traversal protection) → `watchlist_storage.add_ticker` (uppercase, sorted, atomic write). Picker reads watchlist → `chat_data["watch_selection"]` → `_run_analysis_for_ticker` per ticker. |
 | **Cancel** | `cancel_analysis:<run_id>` callback → `chat_data["analysis_cancels"][run_id]["cancel_event"].set()` (threading) + `["async_event"].set()` (asyncio). Threading event is checked in `ProgressReporter._dispatch` before every LLM call (with `raise_error=True` on the handler to bubble up `CancelledByUserError`); asyncio event races `sem.acquire()` for queued runs. Three race-close checks in the analysis path discard late-arriving Cancel taps. Digest uses the same `cancel_event` field name in its own `digest_cancels` registry. |
@@ -126,11 +127,11 @@ Quick reference for tracing how data moves between modules. Detailed contracts l
 
 These constraints span multiple files and aren't enforceable by any single test — verify before merging changes that touch the listed surfaces.
 
-1. **Cache key tuple ⊃ GraphPool key tuple ⊃ AnalysisConfigKey.** Cache key = `(AnalysisConfigKey, ticker, date_iso)`; pool key is `AnalysisConfigKey` *itself* (frozen dataclass, hashable). `AnalysisConfigKey` (in `pipeline/config_key.py`) is the **single source of truth** for the three surfaces that identify a config: `slug()` → cache directory, `caption()` → caption "via" line, `telegraph_title(ticker)` → Telegraph page title. Adding a graph-baked knob is a four-edit operation: (a) add the field to `AnalysisConfigKey` (pool/cache identity flows from `__hash__`/`__eq__` automatically), (b) update `from_config` to populate it from the resolved tradingagents config — if the knob is provider-specific (like the effort level today), also register the per-provider key name in `pipeline/analysis.py:EFFORT_KEY_BY_PROVIDER` so `from_config` can resolve it across providers (a uniformly-named knob skips this sub-step), (c) update `slug()` / `caption()` / `telegraph_title()` to emit the field where it should appear, (d) extend `smoke_config_key.py` with a round-trip scenario for the new field. If you add a field and forget any emitter, the slug/caption/title tests fail loudly. Two users on different new-knob values otherwise silently share an instance configured wrong.
+1. **Cache key tuple ⊃ AnalysisConfigKey.** Cache key = `(AnalysisConfigKey, ticker, date_iso)`. `AnalysisConfigKey` (in `pipeline/config_key.py`) is the **single source of truth** for the three surfaces that identify a config: `slug()` → cache directory, `caption()` → caption "via" line, `telegraph_title(ticker)` → Telegraph page title. The graph pool is a single lazy instance (config is process-wide via `.env`), so adding a knob is a three-edit operation: (a) add the field to `AnalysisConfigKey`, (b) update `from_config` to populate it from the resolved tradingagents config — if the knob is provider-specific (like the effort level today), also register the per-provider key name in `pipeline/analysis.py:EFFORT_KEY_BY_PROVIDER` so `from_config` can resolve it across providers (a uniformly-named knob skips this sub-step), (c) update `slug()` / `caption()` / `telegraph_title()` to emit the field where it should appear. New behavior needs a scenario in `tests/test_config_key.py` (see `tests/CLAUDE.md`). If you add a field and forget any emitter, the slug/caption/title tests fail loudly. If you ever re-introduce multi-config support, the pool collapses back to a dict keyed on `AnalysisConfigKey` — the dataclass is already hashable for this.
 2. **`concurrent_updates=True` + `raise_error=True` are co-load-bearing for cancellation.** Without `concurrent_updates`, the cancel-button update queues behind the in-flight analysis. Without `raise_error` on the progress callback, LangChain swallows `CancelledByUserError`. Either alone breaks cancel.
 3. **In-flight `editMessageCaption` must re-attach `reply_markup`.** Telegram drops the cancel keyboard when not re-sent. `ProgressReporter` re-attaches on every per-step caption edit so the ❌ Cancel button stays alive across the analysis. The cancel-ack edit (`_queued_cancel_edit`) intentionally passes `reply_markup=None` to drop the button once cancellation is acknowledged — that's the one path that *should* clear it.
 4. **Two parse_modes — MarkdownV2 (default) and HTML (analysis-output captions only).**
-   - **MarkdownV2** for everything except the analysis-output captions: `/help`, `/status`, `/config` pickers, `/digest` pickers, `/history` ticker/date pickers, transient analysis captions (`Analyzing…`/`Queued`/`Cancelling`), error messages. Variable content → `escape_markdown(version=2)`; URL link targets in `[text](url)` → `rendering/formatters.escape_md_v2_url`; code spans → no escape.
+   - **MarkdownV2** for everything except the analysis-output captions: `/help`, `/status`, `/digest` pickers, `/history` ticker/date pickers, transient analysis captions (`Analyzing…`/`Queued`/`Cancelling`), error messages. Variable content → `escape_markdown(version=2)`; URL link targets in `[text](url)` → `rendering/formatters.escape_md_v2_url`; code spans → no escape.
    - **HTML** for the three analysis-output surfaces: `format_short_message` (final `/watch` caption + cache-hit caption), `commands.build_history_response` (`/history` republish caption), and the digest progress/summary header. These render LLM-produced markdown (`**bold**`, `## headers`, `[links](url)`) via `markdown_to_telegram_html` so the inline formatting actually renders instead of escaping to literal `**bold**`. The summary content is wrapped in `<blockquote expandable>` for the collapse/expand affordance, which only exists in HTML mode. Variable content → `html.escape`; URL hrefs → `html.escape(url, quote=True)`; LLM markdown → `markdown_to_telegram_html` (runs `markdown.markdown` then `sanitize_html_for_telegram` to whitelist Telegram's allowed tag set and drop tables/imgs entirely so they don't blow the 1024-char caption budget).
    - Mixing — passing MarkdownV2-escaped text with `parse_mode="HTML"` or vice versa — produces broken renders or `Bad Request: can't parse entities` at runtime. Per-message `parse_mode` is the single source of truth for which escape rule applies.
 5. **Cancel registry race-close.** Two analysis paths exist and check cancellation differently:
@@ -171,10 +172,20 @@ TELEGRAPH_ACCESS_TOKEN=<required for Telegraph publishing>
 ALLOWED_USER_IDS=123,456              # empty = open (logged at WARNING)
 TG_BOT_DATA_DIR=data                  # default
 TG_BOT_TA_DEBUG=                      # set "1"/"true" to enable TradingAgentsGraph(debug=True)
-TG_BOT_MAX_CONCURRENT_ANALYSES=3      # bot-wide concurrency cap; runs above this show "⏳ Queued" until a slot frees up. Also sizes the per-key graph instance pool.
+TG_BOT_MAX_CONCURRENT_ANALYSES=3      # bot-wide concurrency cap; runs above this show "⏳ Queued" until a slot frees up. Also sizes the graph instance pool.
+# Active LLM config — process-wide via tradingagents' _ENV_OVERRIDES at lib import.
+TRADINGAGENTS_LLM_PROVIDER=deepseek
+TRADINGAGENTS_DEEP_THINK_LLM=deepseek-v4-pro
+TRADINGAGENTS_QUICK_THINK_LLM=deepseek-v4-flash
+TRADINGAGENTS_MAX_DEBATE_ROUNDS=1     # optional; 1/2/3
+# Per-provider thinking-effort knob — local overlay (upstream doesn't expose these).
+# Derived from `EFFORT_KEY_BY_PROVIDER`: add a provider there → env var name follows.
+TRADINGAGENTS_OPENAI_REASONING_EFFORT=    # low/medium/high; only applies when provider=openai
+TRADINGAGENTS_ANTHROPIC_EFFORT=           # low/medium/high; anthropic only
+TRADINGAGENTS_GOOGLE_THINKING_LEVEL=      # low/medium/high; google only
 TRADINGAGENTS_RESULTS_DIR=...         # /history reads from here; defaults to ~/.tradingagents/logs
 TRADINGAGENTS_CACHE_DIR=...           # tradingagents data cache; defaults to ~/.tradingagents/cache
-# Plus provider keys: OPENAI_API_KEY / DEEPSEEK_API_KEY / ANTHROPIC_API_KEY / etc.
+# Plus provider keys for the chosen TRADINGAGENTS_LLM_PROVIDER: OPENAI_API_KEY / DEEPSEEK_API_KEY / ANTHROPIC_API_KEY / etc.
 ```
 
 **Docker persistence caveat.** `TRADINGAGENTS_RESULTS_DIR` and `TRADINGAGENTS_CACHE_DIR` default to paths under `~/.tradingagents`, which is ephemeral inside the container. To persist `/history` data and avoid re-fetching yfinance on every restart, set them to paths under `/app/data/` (which is bind-mounted) — for example `TRADINGAGENTS_RESULTS_DIR=/app/data/ta-logs`.
@@ -183,13 +194,13 @@ TRADINGAGENTS_CACHE_DIR=...           # tradingagents data cache; defaults to ~/
 
 A change in this repo usually touches more than just code — these surfaces drift in parallel and there's no automated check that catches the drift, so verify each pass before declaring done.
 
-1. **Verify the code works.** `.venv/bin/python -m ruff check src/ tests/ && ruff format --check` and `.venv/bin/python -m pytest tests/` (240 scenarios; CI runs the same command via `.github/workflows/smoke.yml`). See `tests/CLAUDE.md` for fixture conventions (`FakeBot` / `FakeContext` / `set_smoke_data_dir`), the `TG_BOT_DATA_DIR` module-import-time gotcha, conftest setup, and the "new behavior needs a scenario" discipline rule. For UI-affecting changes, restart the bot and exercise in Telegram — tests verify code correctness, not feature correctness.
+1. **Verify the code works.** `.venv/bin/python -m ruff check src/ tests/ && ruff format --check` and `.venv/bin/python -m pytest tests/` (232 scenarios; CI runs the same command via `.github/workflows/smoke.yml`). See `tests/CLAUDE.md` for fixture conventions (`FakeBot` / `FakeContext` / `set_smoke_data_dir`), the `TG_BOT_DATA_DIR` module-import-time gotcha, conftest setup, and the "new behavior needs a scenario" discipline rule. For UI-affecting changes, restart the bot and exercise in Telegram — tests verify code correctness, not feature correctness.
 2. **If user-visible behavior changed**, sync four places that drift independently:
    - `README.md` — Commands table + Features bullets.
    - Root `CLAUDE.md` (Architecture / Invariants / Recently fixed) AND the relevant nested `src/tg_bot/<subpkg>/CLAUDE.md` (Commands surface lives in `handlers/CLAUDE.md`; subsystem-specific contracts live with the subsystem). Subsystem changes touch the nested file; cross-cutting changes touch root.
    - `src/tg_bot/handlers/commands.py:start` — onboarding nudge text.
    - `src/tg_bot/handlers/commands.py:help_cmd` and `app.py:BOT_COMMANDS` — slash-menu copy + the canonical command list.
-3. **If env-var surface changed**, sync `.env.example` and `docs/CONFIGURATION.md`. Provider keys also need a row in `pipeline/analysis.py:PROVIDER_ENV_KEYS` so the LLM precheck can flag a missing key.
+3. **If env-var surface changed**, sync `.env.example`, `docs/CONFIGURATION.md`, and `start.sh`. Provider keys also need a row in `pipeline/analysis.py:PROVIDER_ENV_KEYS` so the LLM precheck can flag a missing key. New per-provider effort knobs go in `EFFORT_KEY_BY_PROVIDER` (auto-derives the env-var name); see `tests/test_pipeline_analysis.py` for the round-trip pin.
 4. **If a handler contract, dataflow, or command surface changed**, test coverage moves in lockstep — treat "no scenario" as a merge blocker. Discipline details (per-PR pattern, fixture-update vs. new-scenario decision, drift audit cadence) live in `tests/CLAUDE.md`.
 5. **If any `CLAUDE.md` (root or nested) is touched**, run a Discovery → Quality Assessment → Targeted Updates audit before merge — review all sibling CLAUDE.md files for cross-drift, scope creep, and bullets that grew past their useful density. The `claude-md-management` Claude Code plugin automates this if installed; otherwise do the four phases manually: (a) find every CLAUDE.md, (b) score each for bullet density (>3 lines per concept = extract), cross-drift (same fact stated in >1 file), and scope creep (implementation detail vs. architecture signal), (c) write a per-file report, (d) apply targeted diffs. Don't hand-edit a CLAUDE.md and skip the audit pass.
 6. **Commit messages must end with `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`** — the system prompt mandates this and the GitHub UI uses it to render Claude as a co-author.
@@ -219,7 +230,8 @@ A change in this repo usually touches more than just code — these surfaces dri
 
 ## Known limitations
 
-- `openrouter` and `azure` providers have no model catalog; their selection step short-circuits with a notice and analysis falls back to `DEFAULT_CONFIG` models. Custom-model-ID input UI is not yet wired.
+- **LLM config is process-wide**: every user of the bot shares the active `TRADINGAGENTS_LLM_PROVIDER` + deep / quick / rounds / effort set in `.env`. Multi-tenant per-user config is intentionally not supported — bot is single-operator by design. Re-introducing it means resurrecting `build_user_config` + `UserConfigStorage`'s LLM keys + a `/config` picker, and collapsing the single lazy `GraphPool` back to the per-`AnalysisConfigKey` dict-of-pools with the LRU floor; the dataclass + cache key shapes already support this.
+- **LLM config changes require a bot restart** — `DEFAULT_CONFIG` is read once at tradingagents-lib import time via `_apply_env_overrides`; editing `.env` does NOT hot-swap the active config.
 - `send_photo` / Telegraph publish have no explicit timeouts; if finviz or Telegraph hangs, PTB's defaults apply (~5s) and the user sees no progress beyond the "Analyzing…" caption.
 - `Config.TA_DEBUG` is read once at process start; toggling `TG_BOT_TA_DEBUG` requires a bot restart (and would still only affect graphs built *after* the restart since cached entries carry their `debug` flag from init time).
 - **In-flight LLM call still completes after Cancel**: cancel is cooperative at LLM-call boundaries; we can't kill an HTTP request already on the wire. The current call's tokens are paid for, but no further steps run.
@@ -233,4 +245,4 @@ A change in this repo usually touches more than just code — these surfaces dri
 
 Curated narrative for the latest non-trivial PR. Older entries graduate into the body sections above (Architecture / Key contracts (parent-level leaves) / nested `src/tg_bot/*/CLAUDE.md` / Known limitations) on the next PR cycle — git log carries the full history.
 
-- **`cache.lookup` self-heals on corrupt JSON.** Previously documented in `pipeline/CLAUDE.md` as a known gap: a half-written or hand-edited `result_cache/<slug>/<TICKER>/<date>.json` returned `None` from `lookup` but the bad file persisted until the next-day `store` swept it — every same-day re-tap forced a fresh LLM run while the bad file kept burning credits. Now on `JSONDecodeError` the corrupt file is renamed aside to `<date>.json.corrupt-<unix_ts>` (mirroring the two-tier pattern `JsonStorage._load` uses for the persistent state files), so the next same-day tap is a clean miss → fresh write → no more loop. Other exception classes (`OSError` for permissions / transient disk errors) log + return None but do NOT rename — the file might still be valid on retry. Backups are never auto-cleaned; operators sweep `data/result_cache/**/*.corrupt-*` manually, matching the storage layer's convention. The existing `test_corrupt_file_returns_none` stays (pins the no-crash contract); new `test_corrupt_file_is_self_healed` pins the recovery contract; `test_corrupt_file_rename_failure_returns_none` pins the OSError-on-rename degraded path (added per PR #68 review). 240 scenarios total.
+- **Config flow refactor: `/config` command removed; `.env` is now the single source of truth for LLM config.** Previously: each user picked provider + deep + quick + rounds + effort via a five-step `/config` picker; settings stored in `data/user_config.json` per user; `build_user_config(user_id)` resolved them at run time; `_graph_pool` was a dict-of-pools keyed on `AnalysisConfigKey` with an LRU floor at `GRAPH_CACHE_MAX = max(8, 2 * MAX_CONCURRENT_ANALYSES)` to absorb per-user config churn. Now: the active config is read from `.env` via tradingagents' upstream `_apply_env_overrides` (provider / deep / quick / rounds via `TRADINGAGENTS_LLM_PROVIDER` / `TRADINGAGENTS_DEEP_THINK_LLM` / `TRADINGAGENTS_QUICK_THINK_LLM` / `TRADINGAGENTS_MAX_DEBATE_ROUNDS`) plus a small local `_apply_local_effort_overlay` for the per-provider effort knobs upstream doesn't expose (`TRADINGAGENTS_OPENAI_REASONING_EFFORT` / `TRADINGAGENTS_ANTHROPIC_EFFORT` / `TRADINGAGENTS_GOOGLE_THINKING_LEVEL`). `build_config()` returns a fresh copy of the env-overlaid `DEFAULT_CONFIG`; `_graph_pool` collapses to a single lazy `GraphPool` (double-checked locking) since only one config exists per process; cache slug + Telegraph title + "via" caption still flow through `AnalysisConfigKey.from_config(build_config())`. `UserConfigStorage` is stripped to digest-only. `/status` reads from `build_config()`; startup logs a WARNING via `check_llm_configured()` if the configured provider's API key is missing. Pinning: 17 new scenarios in `tests/test_pipeline_analysis.py` (env-overlay round-trip, `build_config` fresh-copy + populated keys, `check_llm_configured` per-provider + Ollama edge case, upstream `PROVIDER_ENV_KEYS` alignment). 232 scenarios total. See `start.sh` for the canonical first-catalog-entry model writes per provider (now includes `qwen-cn` / `glm-cn` / `minimax` / `minimax-cn` and the `ZHIPUAI_API_KEY` → `ZHIPU_API_KEY` rename from upstream v0.2.5).

@@ -30,8 +30,9 @@ from collections import defaultdict
 from types import SimpleNamespace
 from collections.abc import Callable
 
-# Cap=5 across all tests. Individual tests vary ticker count.
-os.environ["TG_BOT_MAX_CONCURRENT_ANALYSES"] = "5"
+# `TG_BOT_MAX_CONCURRENT_ANALYSES=5` is set in `tests/conftest.py` so it
+# applies before any test module loads `Config` regardless of collection
+# order — see the conftest comment. Test fixtures here assume cap=5.
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -58,12 +59,14 @@ _BUILD_COUNT = 0  # tracks how many fresh graphs the pool built
 _BUILD_LOCK = threading.Lock()
 
 
-def fake_busy_analysis(ticker, user_id, user_config_storage, reporter=None, **kw):
+def fake_busy_analysis(ticker, reporter=None, **kw):
     """Holds slot until stop signal or cancel.
 
     Routes through the real GraphPool so pool-reuse tests can observe
     builder invocations. Uses a fixed config-key so all fake runs share
-    one pool (pool reuse across runs is what we're testing).
+    one pool (pool reuse across runs is what we're testing). Signature
+    matches `run_trading_analysis(ticker, reporter)` — `.env` is the
+    single config source so neither user_id nor storage are needed.
     """
     config = {
         "llm_provider": "test",
@@ -112,7 +115,7 @@ def reset_state() -> None:
     # would inherit the prior scenario's timestamps and possibly stall.
     runner._cancel_edit_locks.clear()
     runner._last_cancel_edit_at.clear()
-    analysis_mod._graph_pool.clear()
+    analysis_mod._graph_pool = None
     with _BUILD_LOCK:
         _BUILD_COUNT = 0
     os.environ["TG_BOT_DATA_DIR"] = tempfile.mkdtemp(prefix="smoke_runner_")
@@ -206,13 +209,13 @@ async def test_cache_hit_skips_llm_and_renders_directly() -> None:
     bot, ctx = install_mocks(analysis_func=trip_wire_analysis)
 
     # Pre-seed the cache with the exact key `_run_analysis_for_ticker`
-    # will look up — derived via the same build_user_config the runner
+    # will look up — derived via the same build_config() the runner
     # uses, so this test stays robust to DEFAULT_CONFIG drift.
     from tg_bot.pipeline import cache as result_cache
     from tg_bot.pipeline.config_key import AnalysisConfigKey
-    from tg_bot.pipeline.analysis import build_user_config
+    from tg_bot.pipeline.analysis import build_config
 
-    config = build_user_config(1, runner.user_config_storage)
+    config = build_config()
     key = AnalysisConfigKey.from_config(config)
     today = result_cache.today_iso()
     cached_url = "https://telegra.ph/AAPL-Cached-Test"
@@ -279,9 +282,9 @@ async def test_force_refresh_bypasses_cache_hit_and_reuses_telegraph_url() -> No
     # has something to pull `prev_telegraph_url` from.
     from tg_bot.pipeline import cache as result_cache
     from tg_bot.pipeline.config_key import AnalysisConfigKey
-    from tg_bot.pipeline.analysis import build_user_config
+    from tg_bot.pipeline.analysis import build_config
 
-    config = build_user_config(1, runner.user_config_storage)
+    config = build_config()
     key = AnalysisConfigKey.from_config(config)
     today = result_cache.today_iso()
     cached_url = "https://telegra.ph/AAPL-Original-Page"
@@ -645,7 +648,7 @@ async def test_race_close_post_to_thread_discards_result() -> None:
     makes the post-to_thread check on the asyncio side flip to 'cancelled'."""
     reset_state()
 
-    def self_cancelling_analysis(ticker, user_id, ucs, reporter=None, **kw):
+    def self_cancelling_analysis(ticker, reporter=None, **kw):
         # Simulate "user tapped Cancel during the last LLM call" — the
         # propagate() returns successfully, but the cancel event was set
         # while it was on the wire. The post-to_thread check (line ~525)
@@ -725,7 +728,7 @@ async def test_progress_edit_reattaches_cancel_keyboard() -> None:
     returning so a per-step edit definitely fires."""
     reset_state()
 
-    def reporting_analysis(ticker, user_id, ucs, reporter=None, **kw):
+    def reporting_analysis(ticker, reporter=None, **kw):
         if reporter is not None:
             # Trigger one per-step caption edit via the reporter. This
             # path uses `bot.edit_message_caption` which goes through
