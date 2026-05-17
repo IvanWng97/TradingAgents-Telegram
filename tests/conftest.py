@@ -2,7 +2,9 @@
 
 Pytest discovers `tests/test_*.py` files via the default rule (no
 `python_files` override needed; see `[tool.pytest.ini_options]` in
-`pyproject.toml`). 240 `async def test_*` / `def test_*` scenarios.
+`pyproject.toml`). `async def test_*` / `def test_*` scenarios — run
+`.venv/bin/python -m pytest tests/ --collect-only -q | tail -1` for the
+live count.
 
 Cross-cutting setup carried here:
 

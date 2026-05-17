@@ -77,6 +77,18 @@ def build_config() -> dict:
     upstream doesn't expose. `.env` is the single source of truth — there
     is no per-user override path.
 
+    Both overlays run ONCE at module-import time, not on every call.
+    Changing env vars at run time (e.g. a test patching `os.environ`)
+    will NOT be reflected — production env vars don't change post-start,
+    and tests that need to round-trip env values should call
+    `_apply_local_effort_overlay(config, env=...)` directly with an
+    explicit env dict.
+
+    Returns a **shallow** copy: top-level scalars are safe to mutate,
+    but if `DEFAULT_CONFIG` ever gains a nested mutable (list / dict),
+    mutating it through the returned dict would leak back into the
+    global. Today every consumed key is a scalar — keep it that way.
+
     Returns an empty dict when tradingagents isn't available (caller
     paths short-circuit via `TRADINGAGENTS_AVAILABLE` before reaching here)."""
     return dict(DEFAULT_CONFIG) if DEFAULT_CONFIG else {}
@@ -298,6 +310,16 @@ try:
     # upstream's `_ENV_OVERRIDES` list doesn't cover. Once applied, every
     # consumer of `DEFAULT_CONFIG` (build_config, AnalysisConfigKey.from_config)
     # sees the env-derived effort.
+    #
+    # **Run-order matters**: we run AFTER upstream, so if upstream ever adds
+    # `TRADINGAGENTS_OPENAI_REASONING_EFFORT` / `TRADINGAGENTS_ANTHROPIC_EFFORT` /
+    # `TRADINGAGENTS_GOOGLE_THINKING_LEVEL` to its own `_ENV_OVERRIDES`, OUR
+    # write wins (last writer). The effective behavior is "this overlay is
+    # the source of truth for the three keys in `EFFORT_KEY_BY_PROVIDER`."
+    # If upstream coverage lands and we want to defer to it, drop the
+    # provider's entry from `EFFORT_KEY_BY_PROVIDER` instead of hoisting
+    # this call before the import — the test in `test_pipeline_analysis.py`
+    # pins the derivation contract.
     _apply_local_effort_overlay(DEFAULT_CONFIG)
     TRADINGAGENTS_AVAILABLE = True
 except ImportError as e:

@@ -586,11 +586,20 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # provider name or custom model ID could. Defensive escape for any
     # string that could carry external content. Numeric values stay
     # un-escaped.
+    # Graph pool render: the pool is built lazily on first /watch tap, so
+    # before any analysis runs `pool_stats()` returns (0, 0). Surface that
+    # as "not yet built" rather than "0 instances" — the latter looks like
+    # a broken state. After init: "1 pool, N instance(s) built".
+    if pool_keys == 0:
+        pool_line = "• Graph pool: `not yet built`\n"
+    else:
+        pool_line = f"• Graph pool: `{pool_instances}` instance\\(s\\) built\n"
+
     message = (
         "*Bot status*\n"
         f"• Uptime: `{escape_markdown(uptime_str, version=2)}`\n"
         f"• Analyses since boot: `{analyses_run}`\n"
-        f"• Graph pool: `{pool_keys}` keys, `{pool_instances}` instances\n"
+        f"{pool_line}"
         f"{digest_line}\n"
         "*LLM config* \\(`\\.env`\\)\n"
         f"• Provider: `{escape_markdown(provider, version=2)}`\n"
