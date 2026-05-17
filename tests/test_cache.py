@@ -179,6 +179,39 @@ async def test_corrupt_file_returns_none() -> None:
     assert got is None
 
 
+async def test_corrupt_file_is_self_healed() -> None:
+    """Pin the self-healing recovery: a `JSONDecodeError` on lookup must
+    (a) rename the corrupt file aside to `<name>.corrupt-<unix_ts>`,
+    (b) leave the original path absent so the next same-day tap reports
+    a clean miss (and recomputes via LLM run), and (c) return None to
+    the caller. Without self-heal, a corrupt entry stuck around until
+    the next-day `store` swept it — every same-day tap forced a fresh
+    LLM run while the bad file persisted. Mirrors the two-tier
+    `JsonStorage._load` recovery pattern from `storage/_base.py`."""
+    _fresh_data_dir()
+    from tg_bot.pipeline import cache
+
+    cache.store(DEFAULT_KEY, "NVDA", "2026-05-09", SAMPLE_STATE, "BUY", PLACEHOLDER_URL)
+    ticker_dir = (
+        Path(os.environ["TG_BOT_DATA_DIR"]) / "result_cache" / DEFAULT_SLUG / "NVDA"
+    )
+    path = ticker_dir / "2026-05-09.json"
+    path.write_text("not valid json {{{")
+
+    got = cache.lookup(DEFAULT_KEY, "NVDA", "2026-05-09")
+    assert got is None
+
+    # Self-heal: original path quarantined, sibling `.corrupt-*` survives.
+    assert not path.is_file(), "corrupt file must be renamed aside"
+    corrupt_siblings = list(ticker_dir.glob("2026-05-09.json.corrupt-*"))
+    assert len(corrupt_siblings) == 1, (
+        f"expected exactly one quarantined sibling, got {corrupt_siblings}"
+    )
+    # Subsequent same-day lookup is a clean miss (None) — no longer
+    # trapped in the corrupt-read branch on every tap.
+    assert cache.lookup(DEFAULT_KEY, "NVDA", "2026-05-09") is None
+
+
 async def test_slug_handles_special_chars() -> None:
     """Provider/model strings with `/`, `:`, etc. don't blow up the path —
     `AnalysisConfigKey.slug()` sanitizes these to filesystem-safe form."""
