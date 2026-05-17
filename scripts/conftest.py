@@ -3,7 +3,8 @@
 Pytest discovers `scripts/smoke_*.py` files in place (see
 `[tool.pytest.ini_options]` in `pyproject.toml`). The migration was
 additive — `bash scripts/run_smoke.sh` still works for parity checks,
-and the same 222 `async def test_*` functions run under both runners.
+and the same 235 `async def test_*` / `def test_*` functions run under
+both runners.
 
 This conftest carries the cross-cutting setup that used to live in each
 smoke file's `main()`:

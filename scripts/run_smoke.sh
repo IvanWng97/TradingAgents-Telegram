@@ -18,6 +18,7 @@ SUITES=(
   config_key
   user_config
   formatters
+  storage
   watchlist
   validation
   digest

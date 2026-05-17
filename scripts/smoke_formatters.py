@@ -28,6 +28,7 @@ from tg_bot.rendering.formatters import (  # noqa: E402
     _normalize_nested_bullets,
     _strip_final_decision_header,
     caption_summary,
+    escape_md_v2_url,
     format_analysis_result_markdown,
     format_full_md_report,
     format_short_message,
@@ -367,6 +368,25 @@ def test_format_short_message_warns_when_telegraph_publish_fails() -> None:
     assert "Instant View unavailable" in out, out
 
 
+def test_escape_md_v2_url_only_escapes_backslash_and_paren() -> None:
+    """`escape_md_v2_url` is NARROWER than `escape_markdown(version=2)` —
+    it only handles the two characters that break a `[text](url)` link
+    target: `\\` and `)`. Other MarkdownV2 specials (`_`, `*`, `?`, `=`,
+    `.`) are LEGAL inside the parens and must NOT be escaped (the full
+    escaper would double-escape them and produce a broken URL). Pin the
+    carve-out so a refactor that "unifies" the two escapers breaks loudly."""
+    # Common URL chars stay verbatim: `_`, `?`, `=`, `.`, `-`, `/`, `:`
+    plain = "https://example.com/a_b?x=1"
+    assert escape_md_v2_url(plain) == plain, (
+        f"common URL chars escaped unexpectedly: {escape_md_v2_url(plain)!r}"
+    )
+
+    # Only `)` and `\` get a leading backslash. Input includes `(` (legal)
+    # so we can also assert open-paren stays unescaped.
+    escaped = escape_md_v2_url("https://example.com/foo(bar)\\baz")
+    assert escaped == "https://example.com/foo(bar\\)\\\\baz", repr(escaped)
+
+
 def test_normalize_indents_bullets_under_numbered_item() -> None:
     """The buggy LLM-emitted shape (col-0 bullets directly under a
     numbered item) gets the 4-space pad required for proper <ol><li><ul>
@@ -434,6 +454,29 @@ def test_normalize_preserves_already_indented_bullets() -> None:
     # No extra 4 spaces stacked on top of the existing 4-space indent
     assert "        - Already indented" not in out, out
     assert "    - Already indented A" in out, out
+
+
+def test_normalize_mixed_indent_stops_padding_after_preindented_bullet() -> None:
+    """Pins the documented state-machine flip in `_normalize_nested_bullets`
+    (rendering/CLAUDE.md): `_is_unindented_bullet` matches col-0 bullets
+    only, so a pre-indented `  - ` line falls through to the `else` branch
+    which flips `inside_ol = False`. Any subsequent col-0 `- ` bullets
+    then render as flat siblings on Telegraph IV instead of nesting under
+    the numbered item. Documenting the regression so a future re-write
+    of the state machine notices."""
+    md = (
+        "1. **Monitor for:**\n"
+        "  - Pre-indented A (3 spaces — not col-0, not 4-space)\n"
+        "- Col-0 bullet that SHOULD nest but won't"
+    )
+    out = _normalize_nested_bullets(md)
+    # State machine flips on the 3-space line → col-0 bullet is NOT padded.
+    assert "    - Col-0 bullet" not in out, (
+        "regression — col-0 bullet got auto-padded; state machine no longer "
+        "flips on pre-indented bullets. Update rendering/CLAUDE.md."
+    )
+    # The col-0 bullet stays at column 0 in the output.
+    assert "\n- Col-0 bullet" in out, out
 
 
 def test_strip_final_decision_default_shape() -> None:
@@ -900,6 +943,10 @@ SCENARIOS = [
     ),
     # Markdown nested-bullet normalization
     (
+        "escape_md_v2_url only escapes \\ and ) (NOT a full md-v2 escaper)",
+        test_escape_md_v2_url_only_escapes_backslash_and_paren,
+    ),
+    (
         "nested bullets get 4-space indent under numbered items",
         test_normalize_indents_bullets_under_numbered_item,
     ),
@@ -914,6 +961,10 @@ SCENARIOS = [
     (
         "already-indented bullets pass through untouched",
         test_normalize_preserves_already_indented_bullets,
+    ),
+    (
+        "normalize: pre-indented bullet flips state → next col-0 bullet NOT padded",
+        test_normalize_mixed_indent_stops_padding_after_preindented_bullet,
     ),
     # final_trade_decision header strip + caption_summary
     (

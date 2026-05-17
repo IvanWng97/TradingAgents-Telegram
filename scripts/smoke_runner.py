@@ -186,6 +186,119 @@ def _trigger_cancel(context: FakeContext, ticker: str) -> None:
 # --- Test scenarios --------------------------------------------------------
 
 
+async def test_cache_hit_skips_llm_and_renders_directly() -> None:
+    """Pin the cache short-circuit: a pre-seeded same-day cache entry
+    for the same (config_key, ticker, today) must skip the LLM run
+    entirely — `run_trading_analysis` is never invoked, no semaphore
+    slot is taken, no Telegraph round-trip, no cancel registry — and
+    the final caption renders directly from the cached `final_state`
+    under HTML mode. Cache miss already covered indirectly by every
+    other scenario; this one pins the hit path."""
+    reset_state()
+    # Sentinel flag flipped if the fake analysis is invoked — must
+    # remain False on a cache hit.
+    invoked: list[str] = []
+
+    def trip_wire_analysis(ticker, *a, **kw):
+        invoked.append(ticker)
+        return ({"final_trade_decision": f"{ticker}: HOLD"}, "HOLD")
+
+    bot, ctx = install_mocks(analysis_func=trip_wire_analysis)
+
+    # Pre-seed the cache with the exact key `_run_analysis_for_ticker`
+    # will look up — derived via the same build_user_config the runner
+    # uses, so this test stays robust to DEFAULT_CONFIG drift.
+    from tg_bot.pipeline import cache as result_cache
+    from tg_bot.pipeline.config_key import AnalysisConfigKey
+    from tg_bot.pipeline.analysis import build_user_config
+
+    config = build_user_config(1, runner.user_config_storage)
+    key = AnalysisConfigKey.from_config(config)
+    today = result_cache.today_iso()
+    cached_url = "https://telegra.ph/AAPL-Cached-Test"
+    result_cache.store(
+        key,
+        "AAPL",
+        today,
+        {"final_trade_decision": "Final Trading Decision: BUY.\n\nReasoning."},
+        "BUY",
+        cached_url,
+    )
+
+    result = await runner._run_analysis_for_ticker(ctx, 1, 1, "AAPL")
+    assert result == "completed", result
+    # Trip-wire stayed unfired — the LLM run was skipped.
+    assert invoked == [], f"cache hit must skip LLM run; saw {invoked}"
+
+    # The cache-hit branch calls send_photo with parse_mode=HTML and
+    # the signal in the caption (no transient "Analyzing…" edits).
+    sends = [(cap, mode) for cap, mode in bot.caption_history]
+    assert len(sends) == 1, f"cache hit should emit exactly one send_photo; got {sends}"
+    cap, mode = sends[0]
+    assert mode == "HTML", f"cache-hit caption must use HTML; got {mode!r}"
+    assert "BUY" in cap, f"signal must appear in caption; got {cap!r}"
+    assert "<b>AAPL</b>" in cap, f"HTML ticker badge expected; got {cap!r}"
+
+
+async def test_force_refresh_bypasses_cache_hit_and_reuses_telegraph_url() -> None:
+    """Pin the `/refresh` invariant: force_refresh=True must (a) bypass
+    the cache-hit short-circuit so a fresh LLM run happens, AND (b) pass
+    the prior cached `telegraph_url`'s path as `edit_path=` to
+    `publish_to_telegraph` so the Telegraph page updates in place (same
+    URL). Without this, refresh would create a fresh page on every tap
+    — URL drifts, old shares go stale, orphan pages accumulate (the
+    exact regression the edit-in-place plumbing was added to prevent)."""
+    reset_state()
+    invoked: list[str] = []
+
+    def trip_wire_analysis(ticker, *a, **kw):
+        invoked.append(ticker)
+        return ({"final_trade_decision": f"{ticker}: SELL"}, "SELL")
+
+    bot, ctx = install_mocks(analysis_func=trip_wire_analysis)
+
+    # Record edit_path from each publish_to_telegraph call.
+    publish_calls: list[dict] = []
+
+    async def recording_publish(title, content, edit_path=None):
+        publish_calls.append({"title": title, "edit_path": edit_path})
+        return f"https://telegra.ph/{title.replace(' ', '-')}-fresh"
+
+    runner.publish_to_telegraph = recording_publish
+
+    # Pre-seed a cache entry with a known Telegraph URL so the runner
+    # has something to pull `prev_telegraph_url` from.
+    from tg_bot.pipeline import cache as result_cache
+    from tg_bot.pipeline.config_key import AnalysisConfigKey
+    from tg_bot.pipeline.analysis import build_user_config
+
+    config = build_user_config(1, runner.user_config_storage)
+    key = AnalysisConfigKey.from_config(config)
+    today = result_cache.today_iso()
+    cached_url = "https://telegra.ph/AAPL-Original-Page"
+    result_cache.store(
+        key,
+        "AAPL",
+        today,
+        {"final_trade_decision": "Final Trading Decision: BUY."},
+        "BUY",
+        cached_url,
+    )
+
+    result = await runner._run_analysis_for_ticker(
+        ctx, 1, 1, "AAPL", force_refresh=True
+    )
+    assert result == "completed", result
+    # Cache short-circuit bypassed — the fake analysis fired.
+    assert invoked == ["AAPL"], f"force_refresh should run analysis; got {invoked}"
+
+    # publish_to_telegraph received the prior URL's path so the page
+    # edits in place. `_path_from_telegraph_url` strips through the
+    # last `/`, leaving `AAPL-Original-Page`.
+    assert len(publish_calls) == 1, f"expected 1 publish call; got {publish_calls}"
+    assert publish_calls[0]["edit_path"] == "AAPL-Original-Page", publish_calls[0]
+
+
 async def test_basic_queue() -> None:
     """10 tickers, cap=5 → 5 analyzing + 5 queued at launch."""
     reset_state()
@@ -544,6 +657,162 @@ async def test_race_close_cancelled_by_user_error_branch() -> None:
 # --- parse_mode contract (CLAUDE.md Invariant #4) --------------------------
 
 
+async def test_progress_edit_reattaches_cancel_keyboard() -> None:
+    """Pin Invariant #3 (root CLAUDE.md): Telegram's editMessageCaption
+    drops `reply_markup` unless re-sent on every edit, so the
+    `ProgressReporter` MUST re-attach the ❌ Cancel button on every
+    per-step caption edit. Without this, the cancel button vanishes
+    after the first per-step update and the user can't abort. Use a
+    fake analysis that fires one `reporter.report` call before
+    returning so a per-step edit definitely fires."""
+    reset_state()
+
+    def reporting_analysis(ticker, user_id, ucs, reporter=None, **kw):
+        if reporter is not None:
+            # Trigger one per-step caption edit via the reporter. This
+            # path uses `bot.edit_message_caption` which goes through
+            # the FakeBot — we then introspect edit_markup_history to
+            # confirm reply_markup is non-None and carries the cancel
+            # callback.
+            future = asyncio.run_coroutine_threadsafe(
+                reporter.report("Bullish Analyst"), reporter.loop
+            )
+            future.result(timeout=5)
+        return ({"final_trade_decision": f"{ticker}: HOLD"}, "HOLD")
+
+    bot, ctx = install_mocks(analysis_func=reporting_analysis)
+    result = await runner._run_analysis_for_ticker(ctx, 1, 1, "AAPL")
+    assert result == "completed", result
+
+    # At least one edit_message_caption call between the initial
+    # send_photo and the final completion must include a reply_markup
+    # carrying a `cancel_analysis:<run_id>` callback_data — proves the
+    # ProgressReporter re-sent the button on its per-step edit.
+    progress_edits = [
+        (cap, mk)
+        for cap, mk in bot.edit_markup_history
+        if cap and "running" in cap.lower() and "Bullish Analyst" in cap
+    ]
+    assert progress_edits, (
+        f"no progress edit found in history: {bot.edit_markup_history!r}"
+    )
+    cap, mk = progress_edits[0]
+    assert mk is not None, (
+        f"reply_markup dropped on progress edit: {cap!r} -> mk={mk!r}"
+    )
+    # Walk the inline keyboard to find the cancel callback.
+    callbacks = [
+        btn.callback_data
+        for row in mk.inline_keyboard
+        for btn in row
+        if btn.callback_data
+    ]
+    assert any(cb.startswith("cancel_analysis:") for cb in callbacks), (
+        f"cancel_analysis:<run_id> callback missing from re-attached keyboard: {callbacks}"
+    )
+
+
+async def test_queued_caption_shown_before_semaphore_wait() -> None:
+    """Pin the UX guarantee that a queued ticker's caption reads
+    "⏳ Queued" BEFORE the holding ticker releases its slot. With cap=1
+    and two parallel tickers, the second must show its queued caption
+    while the first is still in-flight — otherwise the user stares at a
+    blank "Analyzing…" placeholder until the first finishes."""
+    reset_state()
+    # Override the global cap to 1 for this scenario. Restore via
+    # finally so other tests aren't affected.
+    sem_backup = runner._run_semaphore
+    cap_backup = runner.Config.MAX_CONCURRENT_ANALYSES
+    runner.Config.MAX_CONCURRENT_ANALYSES = 1
+    runner._run_semaphore = asyncio.Semaphore(1)
+
+    try:
+        bot, ctx = install_mocks()  # uses fake_busy_analysis (holds on _STOP_SIGNAL)
+        tickers = ["AAA", "BBB"]
+        tasks = [
+            asyncio.create_task(runner._run_analysis_for_ticker(ctx, 1, 1, t))
+            for t in tickers
+        ]
+        # Let both send_photo calls land. AAA gets the slot ("Analyzing"),
+        # BBB shows "⏳ ... queued" since cap=1.
+        await asyncio.sleep(0.3)
+
+        caps = {t: bot.captions.get(_msg_id_for(bot, t)) or "" for t in tickers}
+        assert caps["AAA"].startswith("📊 Analyzing"), (
+            f"AAA should be Analyzing (held the slot); got {caps['AAA']!r}"
+        )
+        assert "queued" in caps["BBB"].lower(), (
+            f"BBB should show queued before AAA releases; got {caps['BBB']!r}"
+        )
+
+        _STOP_SIGNAL.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        runner.Config.MAX_CONCURRENT_ANALYSES = cap_backup
+        runner._run_semaphore = sem_backup
+
+
+async def test_getmd_callback_sends_document_on_hit_and_fallback_on_miss() -> None:
+    """Pin `_handle_get_full_md` (the `📥 Download Full Report` callback).
+    Two paths: (a) state found → builds the .md and posts it via
+    `query.message.chat.send_document` with filename `<TICKER>_<DATE>.md`;
+    (b) state missing → falls back to `context.bot.send_message` with
+    an "unavailable" notice. Without this test, a refactor of either
+    branch silently breaks the .md download UX."""
+    reset_state()
+    bot, ctx = install_mocks()
+
+    # Build a fake `query` that mirrors the PTB Update.callback_query
+    # shape `_handle_get_full_md` reads: query.message.chat_id,
+    # query.message.message_id, query.message.chat.send_document.
+    photo_msg = await bot.send_photo(
+        chat_id=99,
+        photo="http://example/x",
+        caption="placeholder",
+        parse_mode="HTML",
+        reply_markup=None,
+    )
+    query = SimpleNamespace(message=photo_msg)
+
+    # ----- (a) HIT path: monkey-patch load_historical_state to return state.
+    from tg_bot.handlers import analysis_runner as runner_mod
+
+    orig_load = runner_mod.load_historical_state
+    runner_mod.load_historical_state = lambda t, d: {
+        "final_trade_decision": f"Final Trading Decision: BUY for {t} on {d}."
+    }
+    try:
+        await runner_mod._handle_get_full_md(query, ctx, "AAPL", "2026-05-16")
+    finally:
+        runner_mod.load_historical_state = orig_load
+
+    assert len(bot.documents) == 1, (
+        f"hit path must send_document exactly once; got {bot.documents!r}"
+    )
+    doc_call = bot.documents[0]
+    assert doc_call["document"].filename == "AAPL_2026-05-16.md", doc_call["document"]
+    # No fallback message on the happy path.
+    assert bot.messages == [], (
+        f"send_message must not fire on hit path; got {bot.messages!r}"
+    )
+
+    # ----- (b) MISS path: load_historical_state returns None → fallback.
+    runner_mod.load_historical_state = lambda t, d: None
+    try:
+        await runner_mod._handle_get_full_md(query, ctx, "NVDA", "2026-05-15")
+    finally:
+        runner_mod.load_historical_state = orig_load
+
+    assert len(bot.messages) == 1, (
+        f"miss path must send_message once; got {bot.messages!r}"
+    )
+    assert "unavailable" in bot.messages[0]["text"].lower(), bot.messages[0]
+    # No second send_document on the miss path.
+    assert len(bot.documents) == 1, (
+        f"miss path must not send_document; got {bot.documents!r}"
+    )
+
+
 async def test_parse_mode_contract_across_lifecycle() -> None:
     """Pin the per-call parse_mode used by `_run_analysis_for_ticker`:
     initial `send_photo` + transient `Analyzing…` edits use MarkdownV2;
@@ -588,6 +857,14 @@ async def test_parse_mode_contract_across_lifecycle() -> None:
 
 
 TESTS = [
+    (
+        "cache HIT short-circuits LLM + renders directly (HTML)",
+        test_cache_hit_skips_llm_and_renders_directly,
+    ),
+    (
+        "force_refresh bypasses cache hit + reuses prior telegraph URL",
+        test_force_refresh_bypasses_cache_hit_and_reuses_telegraph_url,
+    ),
     ("basic queue (10 tickers, cap=5)", test_basic_queue),
     ("cancel running → queued promotes", test_cancel_running_promotes_queued),
     ("cancel queued → no slot taken", test_cancel_queued_never_takes_slot),
@@ -614,6 +891,18 @@ TESTS = [
     (
         "parse_mode contract across analysis lifecycle (Invariant #4)",
         test_parse_mode_contract_across_lifecycle,
+    ),
+    (
+        "progress edit re-attaches cancel keyboard (Invariant #3)",
+        test_progress_edit_reattaches_cancel_keyboard,
+    ),
+    (
+        "queued caption shown before semaphore wait (cap=1 race)",
+        test_queued_caption_shown_before_semaphore_wait,
+    ),
+    (
+        "getmd callback: hit → send_document; miss → unavailable",
+        test_getmd_callback_sends_document_on_hit_and_fallback_on_miss,
     ),
 ]
 

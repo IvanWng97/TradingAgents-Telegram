@@ -67,9 +67,9 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 # Pytest discovers the existing `scripts/smoke_*.py` files in place.
 # Migration was additive — `bash scripts/run_smoke.sh` keeps working,
-# and the same 222 `async def test_*` functions execute under both
-# runners. See `scripts/conftest.py` for cross-cutting setup (sys.path
-# wiring + autouse digest-precheck disable).
+# and the same 235 `async def test_*` / `def test_*` functions execute
+# under both runners. See `scripts/conftest.py` for cross-cutting setup
+# (sys.path wiring + autouse digest-precheck disable).
 testpaths = ["scripts"]
 python_files = ["smoke_*.py"]
 python_functions = ["test_*"]

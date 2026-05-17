@@ -28,7 +28,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from _smoke_helpers import FakeBot, FakeContext, set_smoke_data_dir  # noqa: E402
 
-set_smoke_data_dir("smoke_runner_parallel_")
+# NOTE: no module-level `set_smoke_data_dir` here. The only test in this
+# file (`test_real_parallelism`) overrides TG_BOT_DATA_DIR inside its body
+# anyway — see the comment there for why. A module-level call would just
+# create an orphan tempdir that neither runner ever reads from.
 
 from tg_bot.handlers import analysis_runner as runner  # noqa: E402
 
@@ -66,16 +69,14 @@ async def fake_publish(title, content, edit_path=None):
 
 
 async def test_real_parallelism() -> None:
-    # Refresh the data dir AT TEST TIME, not at module-import time. Under
-    # `python scripts/smoke_runner_parallel.py` the module-level
-    # `set_smoke_data_dir` at line 31 is fine because the script runs in
-    # isolation. Under pytest, multiple smoke files set TG_BOT_DATA_DIR
-    # at import; the env var ends up pointing at whichever set it LAST,
-    # so this test would otherwise read a cache populated by smoke_runner
-    # for the same AAPL/TSLA/NVDA/MSFT/GOOGL tickers — the cache short-
-    # circuits before fake_busy_analysis runs and no per-ticker window
-    # gets recorded, KeyError on the WINDOWS iteration. Repointing here
-    # gives a guaranteed-empty cache regardless of runner.
+    # Set the data dir AT TEST TIME, not at module-import time. Under
+    # pytest, multiple smoke files set TG_BOT_DATA_DIR at import; the
+    # env var ends up pointing at whichever set it LAST — so this test
+    # would otherwise read a cache populated by smoke_runner for the
+    # same AAPL/TSLA/NVDA/MSFT/GOOGL tickers, the cache short-circuits
+    # before fake_busy_analysis runs, no per-ticker window gets recorded,
+    # and the WINDOWS iteration raises KeyError. Repointing here gives
+    # a guaranteed-empty cache under both pytest and standalone bash.
     set_smoke_data_dir("smoke_runner_parallel_test_")
     WINDOWS.clear()
 
