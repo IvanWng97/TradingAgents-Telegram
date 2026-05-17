@@ -33,12 +33,12 @@ dependencies = [
 # Note: when bumping `ruff`, also bump the same `rev:` in
 # `.pre-commit-config.yaml` so the local hook runs the same version.
 dev = [
-    "ruff==0.15.12",
+    "ruff==0.15.13",
     "pre-commit>=4.6.0",
     # pytest runs the `tests/test_*.py` suite (config in
     # [tool.pytest.ini_options] below). pytest-asyncio's auto mode lets
     # `async def test_*` functions run without a per-test marker.
-    "pytest>=9.0.0",
+    "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
 ]
 
@@ -68,7 +68,7 @@ ignore = ["E501"]
 # Tests live in `tests/` following the pytest standard layout —
 # `test_*.py` files discovered automatically (no `python_files` override
 # needed). See `tests/conftest.py` for cross-cutting setup (sys.path
-# wiring + autouse digest-precheck disable). 238 scenarios in total.
+# wiring + autouse digest-precheck disable). 240 scenarios in total.
 testpaths = ["tests"]
 # `asyncio_mode = "auto"` lets pytest run `async def test_*` directly,
 # no `@pytest.mark.asyncio` annotation needed — matches how every test

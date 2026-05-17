@@ -1,6 +1,6 @@
 # tests/ — pytest suite
 
-238 scenarios across `test_*.py` files; default pytest discovery + `pytest-asyncio` in `auto` mode (so plain `async def test_*` runs without per-test markers). Run: `.venv/bin/python -m pytest tests/`. CI runs the same command via `.github/workflows/smoke.yml` and uploads `junit.xml` as a 7-day artifact.
+240 scenarios across `test_*.py` files; default pytest discovery + `pytest-asyncio` in `auto` mode (so plain `async def test_*` runs without per-test markers). Run: `.venv/bin/python -m pytest tests/`. CI runs the same command via `.github/workflows/smoke.yml` and uploads `junit.xml` as a 7-day artifact.
 
 ## Layout
 

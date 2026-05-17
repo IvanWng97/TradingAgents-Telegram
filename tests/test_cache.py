@@ -25,6 +25,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 PASS = "\033[92m✓\033[0m"
@@ -177,6 +178,73 @@ async def test_corrupt_file_returns_none() -> None:
     path.write_text("not valid json {{{")
     got = cache.lookup(DEFAULT_KEY, "NVDA", "2026-05-09")
     assert got is None
+
+
+async def test_corrupt_file_is_self_healed() -> None:
+    """Pin the self-healing recovery: a `JSONDecodeError` on lookup must
+    (a) rename the corrupt file aside to `<name>.corrupt-<unix_ts>`,
+    (b) leave the original path absent so the next same-day tap reports
+    a clean miss (and recomputes via LLM run), and (c) return None to
+    the caller. Without self-heal, a corrupt entry stuck around until
+    the next-day `store` swept it — every same-day tap forced a fresh
+    LLM run while the bad file persisted. Mirrors the two-tier
+    `JsonStorage._load` recovery pattern from `storage/_base.py`."""
+    _fresh_data_dir()
+    from tg_bot.pipeline import cache
+
+    cache.store(DEFAULT_KEY, "NVDA", "2026-05-09", SAMPLE_STATE, "BUY", PLACEHOLDER_URL)
+    ticker_dir = (
+        Path(os.environ["TG_BOT_DATA_DIR"]) / "result_cache" / DEFAULT_SLUG / "NVDA"
+    )
+    path = ticker_dir / "2026-05-09.json"
+    path.write_text("not valid json {{{")
+
+    got = cache.lookup(DEFAULT_KEY, "NVDA", "2026-05-09")
+    assert got is None
+
+    # Self-heal: original path quarantined, sibling `.corrupt-*` survives.
+    assert not path.is_file(), "corrupt file must be renamed aside"
+    corrupt_siblings = list(ticker_dir.glob("2026-05-09.json.corrupt-*"))
+    assert len(corrupt_siblings) == 1, (
+        f"expected exactly one quarantined sibling, got {corrupt_siblings}"
+    )
+    # Subsequent same-day lookup is a clean miss (None) — no longer
+    # trapped in the corrupt-read branch on every tap.
+    assert cache.lookup(DEFAULT_KEY, "NVDA", "2026-05-09") is None
+
+
+async def test_corrupt_file_rename_failure_returns_none() -> None:
+    """Pin the rename-failure branch of the self-heal path. If `os.rename`
+    raises `OSError` (e.g. concurrent same-day lookup races and the first
+    win moves the file out from under the second, or the filesystem is
+    read-only), `lookup` must still return `None` without raising. The
+    corrupt file stays put — sweep happens on the next-day `store`.
+
+    Without this branch, a concurrent or read-only-FS failure would
+    surface as an uncaught `OSError` from `cache.lookup` and propagate
+    into the analysis path."""
+    _fresh_data_dir()
+    from tg_bot.pipeline import cache
+
+    cache.store(DEFAULT_KEY, "NVDA", "2026-05-09", SAMPLE_STATE, "BUY", PLACEHOLDER_URL)
+    ticker_dir = (
+        Path(os.environ["TG_BOT_DATA_DIR"]) / "result_cache" / DEFAULT_SLUG / "NVDA"
+    )
+    path = ticker_dir / "2026-05-09.json"
+    path.write_text("not valid json {{{")
+
+    with patch("os.rename", side_effect=OSError("rename failed")):
+        got = cache.lookup(DEFAULT_KEY, "NVDA", "2026-05-09")
+    assert got is None
+
+    # Rename was blocked: original corrupt file still in place, no
+    # quarantine sibling created.
+    assert path.is_file(), "rename failed but original file was removed"
+    assert path.read_text() == "not valid json {{{"
+    corrupt_siblings = list(ticker_dir.glob("2026-05-09.json.corrupt-*"))
+    assert not corrupt_siblings, (
+        f"rename was patched to fail but a sibling appeared: {corrupt_siblings}"
+    )
 
 
 async def test_slug_handles_special_chars() -> None:
