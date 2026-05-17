@@ -1072,6 +1072,94 @@ async def test_fanout_cancel_pending_via_task_cancel() -> None:
         runner._run_semaphore = orig_sem
 
 
+async def test_fanout_pending_task_cancel_sets_status_cancelled() -> None:
+    """Companion to `test_fanout_cancel_pending_via_task_cancel`: that
+    test verifies the queued tickers don't take a slot; this one verifies
+    the `_wrapped` `asyncio.CancelledError` branch actually flips
+    `status[ticker] = "cancelled"` (not None / leftover "pending"). The
+    distinction matters — a None would render as ❓ error in the
+    summary, not ⛔ cancelled. Pin the per-row outcome so a refactor of
+    `_wrapped`'s exception handling doesn't silently swap the badge."""
+    import threading
+
+    from tg_bot.handlers import analysis_runner as runner
+
+    class _W:
+        def get_watchlist(self, _u):
+            return ["A", "B"]
+
+    started = threading.Event()
+    release = threading.Event()
+    called: list[str] = []
+
+    orig_sem = runner._run_semaphore
+    runner._run_semaphore = asyncio.Semaphore(1)  # cap=1 so B queues
+
+    async def _slow(_uid, ticker, reporter=None):
+        sem = runner._get_run_semaphore()
+        await sem.acquire()
+        try:
+            called.append(ticker)
+            started.set()
+            while not release.is_set():
+                await asyncio.sleep(0.02)
+            from tg_bot.pipeline.progress import CancelledByUserError
+
+            raise CancelledByUserError("simulated cancel mid-flight")
+        finally:
+            sem.release()
+
+    orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
+    orig_a = runner._analyze_one_for_digest
+    runner.watchlist_storage = _W()
+    runner.user_config_storage = _AllEnrolledUserConfig()
+    runner._analyze_one_for_digest = _slow
+    try:
+        app = _FakeFanOutApp()
+        run_task = asyncio.create_task(runner.run_user_digest(app, 42, 999))
+
+        for _ in range(100):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.02)
+        assert started.is_set(), "A never reached the analyzer"
+
+        digest_cancels = app.chat_data[999]["digest_cancels"]
+        msg_id = next(iter(digest_cancels.keys()))
+
+        class _Ctx:
+            def __init__(self, cd):
+                self.chat_data = cd
+
+        await runner._handle_digest_cancel(
+            _Ctx(app.chat_data[999]), object(), str(msg_id)
+        )
+        release.set()
+        await run_task
+
+        # Only A ran (B was cancelled while queued on the semaphore).
+        assert called == ["A"], f"only A should have run; saw {called}"
+
+        # The summary must render both as cancelled (⛔) — proves
+        # `_wrapped`'s `asyncio.CancelledError` branch fired for B and
+        # set status["B"] = "cancelled", NOT left as None/pending (which
+        # would render as ❓ error).
+        summary = app.bot.edits[-1]["text"]
+        # ⛔ rows for BOTH tickers (proves the cancelled status flip
+        # happened for the pending one, not just the in-flight one).
+        assert "⛔ <b>A</b> — cancelled" in summary, summary
+        assert "⛔ <b>B</b> — cancelled" in summary, summary
+        # And no ❓ rows (would mean the status flip went to None).
+        assert "❓" not in summary, f"unexpected error row in summary: {summary}"
+        assert "2 cancelled" in summary and "of 2" in summary
+    finally:
+        runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
+        runner._analyze_one_for_digest = orig_a
+        runner._run_semaphore = orig_sem
+
+
 async def test_fanout_forbidden_during_progress_edit() -> None:
     """Initial header send succeeds, then the FIRST progress edit fails
     with Forbidden. Digest must auto-disable, JobQueue job must cancel,
@@ -1638,6 +1726,34 @@ async def test_iter_users_with_digest_includes_disabled() -> None:
     assert uids == ["aaa", "bbb", "ccc"], uids
 
 
+async def test_iter_enabled_digests_skips_disabled_users() -> None:
+    """Pins the documented asymmetry in `storage/CLAUDE.md`:
+    `iter_users_with_digest` returns every user with any digest block
+    (enabled or not — used by `_post_init`'s backfill walk), while
+    `iter_enabled_digests` skips disabled users (used as the scheduling
+    input). Mixing them re-registers JobQueue jobs for disabled users,
+    which is the footgun the contract calls out — test the divergence
+    directly so a refactor that "unifies" them breaks loudly."""
+    s, _ = fresh_storage()
+    # Enabled user — must appear in BOTH iterators.
+    await s.set_digest_tz("on", "America/New_York")
+    await s.set_digest_hour("on", 9, 100)
+    # Disabled user (was enabled, then turned off) — must appear in
+    # iter_users_with_digest (back-compat backfill needs to see them)
+    # but NOT in iter_enabled_digests (scheduling must skip).
+    await s.set_digest_tz("off", "Europe/London")
+    await s.set_digest_hour("off", 10, 200)
+    await s.disable_digest("off")
+
+    enabled = [uid for uid, _ in s.iter_enabled_digests()]
+    assert enabled == ["on"], f"only 'on' should schedule; got {enabled}"
+
+    all_with_digest = sorted(s.iter_users_with_digest())
+    assert all_with_digest == ["off", "on"], (
+        f"both users should appear in iter_users_with_digest; got {all_with_digest}"
+    )
+
+
 async def test_fanout_empty_filter_reminder() -> None:
     """User with active digest but empty `tickers` filter: fan-out sends
     a one-line reminder, no analyses run."""
@@ -1799,6 +1915,10 @@ SCENARIOS = [
         test_fanout_cancel_pending_via_task_cancel,
     ),
     (
+        "fanout pending task-cancel flips status to 'cancelled' (⛔ in summary)",
+        test_fanout_pending_task_cancel_sets_status_cancelled,
+    ),
+    (
         "fanout Forbidden mid-progress-edit",
         test_fanout_forbidden_during_progress_edit,
     ),
@@ -1842,6 +1962,10 @@ SCENARIOS = [
     (
         "iter_users_with_digest includes disabled",
         test_iter_users_with_digest_includes_disabled,
+    ),
+    (
+        "iter_enabled_digests skips disabled; iter_users_with_digest doesn't",
+        test_iter_enabled_digests_skips_disabled_users,
     ),
     ("fanout intersects filter with watchlist", test_fanout_filter_intersects),
     ("fanout empty filter sends reminder, no run", test_fanout_empty_filter_reminder),

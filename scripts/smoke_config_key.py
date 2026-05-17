@@ -90,6 +90,35 @@ def test_from_config_anthropic_effort_picks_up() -> None:
     assert k.effort == "medium"
 
 
+def test_from_config_stale_provider_effort_key_wins_first() -> None:
+    """First-truthy-wins iteration over EFFORT_KEY_BY_PROVIDER means a
+    stale `openai_reasoning_effort` lingering in the dict beats the
+    current-provider `anthropic_effort`. This is the silent
+    misattribution flagged in pipeline/CLAUDE.md — pin it so a future
+    iteration-order change (or alphabetical sort) is loud."""
+    k = AnalysisConfigKey.from_config(
+        {
+            "llm_provider": "anthropic",
+            "deep_think_llm": "claude-sonnet-4",
+            "quick_think_llm": "claude-haiku-4",
+            # Stale leftover from a prior provider — should NOT win in
+            # principle, but the iteration order makes it.
+            "openai_reasoning_effort": "high",
+            "anthropic_effort": "medium",
+        }
+    )
+    # provider tracks the user's current selection; effort silently
+    # misattributes to the stale openai value because EFFORT_KEY_BY_PROVIDER
+    # iterates openai → anthropic → google and stops at the first truthy.
+    assert k.provider == "anthropic"
+    assert k.deep == "claude-sonnet-4"
+    assert k.quick == "claude-haiku-4"
+    assert k.effort == "high", (
+        "first-truthy-wins should pick openai's stale value before anthropic's; "
+        "if this fails, the iteration order changed — re-audit pipeline/CLAUDE.md"
+    )
+
+
 def test_from_config_missing_provider_falls_back() -> None:
     """Defensive: bot defaults to 'unknown' if provider key is missing
     so the key still constructs and the slug is still filesystem-safe."""
@@ -234,6 +263,10 @@ SCENARIOS = [
     (
         "from_config anthropic effort picked up",
         test_from_config_anthropic_effort_picks_up,
+    ),
+    (
+        "from_config stale provider effort key wins first (first-truthy-wins)",
+        test_from_config_stale_provider_effort_key_wins_first,
     ),
     (
         "from_config missing provider → unknown",

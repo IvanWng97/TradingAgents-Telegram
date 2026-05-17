@@ -80,6 +80,35 @@ def _reload_storage_singletons():
     return commands
 
 
+# ─── storage layer (WatchlistStorage prune behavior) ───────────────────
+
+
+async def test_remove_last_ticker_drops_user_key() -> None:
+    """Pins the documented prune behavior in `watchlist.py:43-44`: when
+    `remove_ticker` empties a user's list, the user key is dropped from
+    `_data` entirely (not left as `[]`). `get_watchlist` still returns
+    `[]` either way so the user-facing surface is unchanged — but
+    storage/CLAUDE.md flags this as a subtle gotcha for any future code
+    that keys "has the user ever used the bot" on watchlist presence."""
+    _fresh_data_dir()
+    from tg_bot.storage.watchlist import WatchlistStorage
+
+    path = Path(os.environ["TG_BOT_DATA_DIR"]) / "watchlist.json"
+    storage = WatchlistStorage(path)
+
+    await storage.add_ticker("1", "AAPL")
+    assert "1" in storage._data and storage._data["1"] == ["AAPL"]
+
+    removed = await storage.remove_ticker("1", "AAPL")
+    assert removed is True
+    # User key entirely pruned, not left as [].
+    assert "1" not in storage._data, (
+        f"expected '1' to be removed from _data, got {storage._data!r}"
+    )
+    # Public surface still returns [] — caller never sees the prune.
+    assert storage.get_watchlist("1") == []
+
+
 # ─── picker rendering ──────────────────────────────────────────────────
 
 
@@ -512,6 +541,10 @@ async def test_list_handler_non_empty_path_sets_parse_mode() -> None:
 
 
 SCENARIOS = [
+    (
+        "remove_ticker prunes user key when list empties",
+        test_remove_last_ticker_drops_user_key,
+    ),
     ("watch mode header + Done label", test_watch_mode_header_and_done_label),
     ("refresh mode header + Done label", test_refresh_mode_header_and_done_label),
     (

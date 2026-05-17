@@ -32,7 +32,15 @@ dependencies = [
 # via PR — bumping the pin re-runs CI on the new version everywhere.
 # Note: when bumping `ruff`, also bump the same `rev:` in
 # `.pre-commit-config.yaml` so the local hook runs the same version.
-dev = ["ruff==0.15.12", "pre-commit>=4.6.0"]
+dev = [
+    "ruff==0.15.12",
+    "pre-commit>=4.6.0",
+    # pytest discovers the existing `scripts/smoke_*.py` files (config in
+    # [tool.pytest.ini_options]). Migration was additive — `bash
+    # scripts/run_smoke.sh` still works for parity checks.
+    "pytest>=9.0.0",
+    "pytest-asyncio>=1.3.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -55,3 +63,21 @@ select = ["E", "F", "UP", "B"]
 # readability. Ruff's own docs recommend dropping E501 when using
 # `ruff format`.
 ignore = ["E501"]
+
+[tool.pytest.ini_options]
+# Pytest discovers the existing `scripts/smoke_*.py` files in place.
+# Migration was additive — `bash scripts/run_smoke.sh` keeps working,
+# and the same 235 `async def test_*` / `def test_*` functions execute
+# under both runners. See `scripts/conftest.py` for cross-cutting setup
+# (sys.path wiring + autouse digest-precheck disable).
+testpaths = ["scripts"]
+python_files = ["smoke_*.py"]
+python_functions = ["test_*"]
+# `asyncio_mode = "auto"` lets pytest run `async def test_*` directly,
+# no `@pytest.mark.asyncio` annotation needed — matches how every smoke
+# is written today.
+asyncio_mode = "auto"
+# Silence the deprecation warning about the default event_loop fixture
+# scope changing in a future pytest-asyncio release; pick the new
+# function scope explicitly.
+asyncio_default_fixture_loop_scope = "function"

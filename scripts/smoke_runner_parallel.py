@@ -28,7 +28,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from _smoke_helpers import FakeBot, FakeContext, set_smoke_data_dir  # noqa: E402
 
-set_smoke_data_dir("smoke_runner_parallel_")
+# NOTE: no module-level `set_smoke_data_dir` here. The only test in this
+# file (`test_real_parallelism`) overrides TG_BOT_DATA_DIR inside its body
+# anyway — see the comment there for why. A module-level call would just
+# create an orphan tempdir that neither runner ever reads from.
 
 from tg_bot.handlers import analysis_runner as runner  # noqa: E402
 
@@ -53,18 +56,43 @@ def fake_busy_analysis(ticker, user_id, user_config_storage, reporter=None, **kw
     return ({"final_trade_decision": f"Decision for {ticker}: HOLD"}, "HOLD")
 
 
-async def fake_publish(title, content):
+async def fake_publish(title, content, edit_path=None):
+    # `edit_path` is the /refresh code path's "update in place" hook; the
+    # real `publish_to_telegraph` accepts it (None on fresh runs), so the
+    # fake must too — otherwise the call site raises TypeError and the
+    # analysis branches into the catch-all error path. Surfaced when
+    # pytest captured stderr cleanly; bash was hiding it.
     return f"https://telegra.ph/{title.replace(' ', '-')}-test"
 
 
 # --- Test driver -----------------------------------------------------------
 
 
-async def run() -> None:
+async def test_real_parallelism() -> None:
+    # Set the data dir AT TEST TIME, not at module-import time. Under
+    # pytest, multiple smoke files set TG_BOT_DATA_DIR at import; the
+    # env var ends up pointing at whichever set it LAST — so this test
+    # would otherwise read a cache populated by smoke_runner for the
+    # same AAPL/TSLA/NVDA/MSFT/GOOGL tickers, the cache short-circuits
+    # before fake_busy_analysis runs, no per-ticker window gets recorded,
+    # and the WINDOWS iteration raises KeyError. Repointing here gives
+    # a guaranteed-empty cache under both pytest and standalone bash.
+    set_smoke_data_dir("smoke_runner_parallel_test_")
+    WINDOWS.clear()
+
     runner.run_trading_analysis = fake_busy_analysis
     runner.publish_to_telegraph = fake_publish
     runner.TRADINGAGENTS_AVAILABLE = True
-    runner._run_semaphore = None  # reset lazy-init
+    # Force cap=5 explicitly. Setting `runner._run_semaphore = None` and
+    # letting the lazy-init read `Config.MAX_CONCURRENT_ANALYSES` works
+    # when this file is run as a standalone script (the module-level
+    # `os.environ["TG_BOT_MAX_CONCURRENT_ANALYSES"] = "5"` at line 25
+    # fires before Config initializes). But under pytest, earlier test
+    # files import tg_bot.config first — Config's class-body reads the
+    # env var ONCE at that point, so the later os.environ change is a
+    # no-op and the lazy-init builds a Semaphore(3) instead of (5), so
+    # 2 tickers queue and never run before the assertions fire.
+    runner._run_semaphore = asyncio.Semaphore(5)
 
     bot = FakeBot()
     context = FakeContext(bot)
@@ -133,4 +161,7 @@ async def run() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    # Backwards-compat entry point so `bash scripts/run_smoke.sh` still
+    # works alongside `pytest scripts/`. Pytest discovers
+    # `test_real_parallelism` directly.
+    asyncio.run(test_real_parallelism())
