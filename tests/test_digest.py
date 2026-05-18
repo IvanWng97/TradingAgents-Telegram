@@ -687,6 +687,55 @@ async def test_fanout_empty_watchlist_silent() -> None:
         runner.watchlist_storage = original
 
 
+async def test_fanout_all_markets_closed_forbidden_disables() -> None:
+    """If the user blocked the bot WHILE the all-closed heads-up is being
+    sent, Telegram returns Forbidden. The all-closed branch must mirror
+    the regular header path's behavior: auto-disable the digest + cancel
+    the JobQueue job so we stop firing daily into a chat we can't deliver
+    to. Pins this NEW dataflow path (PR #71 added it).
+
+    Test parallels `test_fanout_forbidden_disables` (which covers the
+    normal-header Forbidden path) — same assertions, different trigger
+    point in `run_user_digest`."""
+    from tg_bot.handlers import analysis_runner as runner
+
+    s, _ = fresh_storage()
+    await s.set_digest_tz("42", "America/Los_Angeles")
+    await s.set_digest_hour("42", 10, 999)
+
+    class _W:
+        def get_watchlist(self, _uid):
+            return ["NVDA"]
+
+    orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
+    orig_cal = runner.is_market_open_for
+    runner.watchlist_storage = _W()
+    runner.user_config_storage = s
+    # Force the calendar gate into all-closed mode so the heads-up branch
+    # fires; FakeFanOutApp(forbidden=True) makes send_message raise.
+    runner.is_market_open_for = lambda *_args, **_kw: False
+    try:
+        app = _FakeFanOutApp(forbidden=True)
+        # Pre-register a job to verify it gets cancelled.
+        runner.register_digest_job(app, 42, s.get_digest("42"))
+        assert len(app.job_queue.get_jobs_by_name("digest:42")) == 1
+
+        await runner.run_user_digest(app, 42, 999)
+
+        d = s.get_digest("42")
+        assert d["enabled"] is False, (
+            "all-closed Forbidden path must auto-disable the digest"
+        )
+        assert app.job_queue.get_jobs_by_name("digest:42") == [], (
+            "all-closed Forbidden path must cancel the JobQueue job"
+        )
+    finally:
+        runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
+        runner.is_market_open_for = orig_cal
+
+
 async def test_fanout_all_markets_closed_sends_oneliner_and_skips() -> None:
     """When every enrolled ticker's market is closed today (e.g. user has
     only US tickers and it's Christmas, or only Tokyo tickers on a TSE
