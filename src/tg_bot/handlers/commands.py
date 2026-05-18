@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 # verbatim against `update.message.reply_to_message.text` so the reply
 # handler doesn't fire on every reply to the bot.
 ADD_PROMPT = "📝 Send the ticker symbol(s) to add (e.g. NVDA AAPL TSLA):"
+EMAIL_PROMPT = "📧 Send your email address to mirror the daily digest:"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -169,6 +170,47 @@ async def add_via_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     tokens = (msg.text or "").split()
     summary = await _apply_add(update.effective_user.id, tokens)
     await msg.reply_text(summary)
+
+
+async def email_via_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle replies to our EMAIL_PROMPT message — treat reply text as an
+    email address. Mirrors `add_via_reply`'s strict-prompt-match shape: we
+    early-return on replies that aren't to our specific prompt, so this
+    handler can coexist in a different PTB group from `add_via_reply`
+    without either swallowing the other's traffic.
+    """
+    msg = update.message
+    if msg is None or msg.reply_to_message is None:
+        return
+    replied = msg.reply_to_message
+    if not replied.from_user or not replied.from_user.is_bot:
+        return
+    if (replied.text or "") != EMAIL_PROMPT:
+        return
+
+    user_id = update.effective_user.id
+    addr = (msg.text or "").strip()
+    ok = await user_config_storage.set_digest_email(str(user_id), addr)
+    if not ok:
+        await msg.reply_text(
+            f"❌ `{escape_markdown(addr, version=2)}` doesn't look like a valid "
+            "email\\. Expected format: `name@domain\\.tld`\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    confirmation = (
+        f"✅ Email mirror set to `{escape_markdown(addr, version=2)}`\\. "
+        "Daily digest will mirror here\\."
+    )
+    if not is_email_configured():
+        confirmation += (
+            "\n\n⚠️ `RESEND_API_KEY` / `RESEND_FROM` not set in `\\.env` — "
+            "email won't actually send until the operator wires those\\."
+        )
+    else:
+        confirmation += " Run `/email test` to send a one-off test\\."
+    await msg.reply_text(confirmation, parse_mode="MarkdownV2")
 
 
 async def del_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -553,27 +595,14 @@ async def email_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     current = digest.get("email")
 
     if not args:
-        # Bare `/email` — show current setting + help.
-        if current:
-            line = (
-                f"📧 Current: `{escape_markdown(current, version=2)}`\n\n"
-                "Use `/email off` to disable, `/email test` to verify, "
-                "or `/email <addr>` to change\\."
-            )
-        else:
-            line = (
-                "📧 No email set\\. The daily digest goes to Telegram only\\.\n\n"
-                "To mirror the digest to your inbox, send "
-                "`/email your@address\\.com`\\. Sender is configured by the "
-                "operator via `RESEND_FROM` in `\\.env`\\."
-            )
-        if not is_email_configured():
-            line += (
-                "\n\n⚠️ `RESEND_API_KEY` / `RESEND_FROM` not set in `\\.env` — "
-                "even with an address configured, email won't send until the "
-                "operator wires those\\."
-            )
-        await update.message.reply_text(line, parse_mode="MarkdownV2")
+        # Bare `/email` — open a ForceReply prompt, same UX as bare `/add`.
+        # The current setting (if any) lives in `/status` now; surfacing it
+        # here AND prompting for a new one would be two messages worth of
+        # noise on every check.
+        await update.message.reply_text(
+            EMAIL_PROMPT,
+            reply_markup=ForceReply(selective=True),
+        )
         return
 
     sub = args[0].lower().strip()
@@ -727,6 +756,20 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         except Exception:
             pass
 
+    # Email mirror line: always shown (set OR not set) so users can verify
+    # their own opt-in state from `/status` without invoking `/email`.
+    # When set + env not configured, a trailing ⚠️ flags the operator-side
+    # gap — same signal the digest summary footer surfaces, just visible
+    # outside the daily fire.
+    email_addr = (digest or {}).get("email")
+    if email_addr:
+        email_status = f"`{escape_markdown(email_addr, version=2)}`"
+        if not is_email_configured():
+            email_status += " ⚠️ env not configured"
+    else:
+        email_status = "`not set`"
+    email_line = f"• Email mirror: {email_status}\n"
+
     # MarkdownV2 code spans (backtick-wrapped) suppress most escaping, but
     # a backtick *in the value itself* would break out of the span and
     # cause `Bad Request: can't parse entities`. Provider/model strings
@@ -748,7 +791,8 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"• Uptime: `{escape_markdown(uptime_str, version=2)}`\n"
         f"• Analyses since boot: `{analyses_run}`\n"
         f"{pool_line}"
-        f"{digest_line}\n"
+        f"{digest_line}"
+        f"{email_line}\n"
         "*LLM config* \\(`\\.env`\\)\n"
         f"• Provider: `{escape_markdown(provider, version=2)}`\n"
         f"• Deep: `{escape_markdown(deep, version=2)}`\n"

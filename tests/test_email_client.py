@@ -481,3 +481,185 @@ async def test_email_test_command_reports_success_when_send_succeeds() -> None:
         os.environ.pop("RESEND_API_KEY", None)
         os.environ.pop("RESEND_FROM", None)
         commands.user_config_storage = orig_uc
+
+
+# ─── /email ForceReply UX ────────────────────────────────────────────────
+
+
+async def test_email_cmd_no_args_sends_forcereply_prompt() -> None:
+    """Bare `/email` must open a ForceReply prompt (UX parity with bare
+    `/add`) instead of showing the current setting. The current setting
+    moved to `/status` in this PR — pin both halves so a future revert
+    can't split the surfaces."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from telegram import ForceReply
+
+    from tg_bot.handlers import commands
+
+    reply_mock = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        message=SimpleNamespace(reply_text=reply_mock),
+    )
+    context = SimpleNamespace(args=[])
+
+    class _StubUserConfig:
+        def get_digest(self, _uid):
+            return {"email": "user@example.com"}  # already set
+
+    orig_uc = commands.user_config_storage
+    commands.user_config_storage = _StubUserConfig()
+    try:
+        await commands.email_cmd(update, context)
+        reply_mock.assert_called_once()
+        # First positional is the prompt text.
+        sent_text = reply_mock.call_args[0][0]
+        assert sent_text == commands.EMAIL_PROMPT, (
+            f"expected EMAIL_PROMPT verbatim; got: {sent_text!r}"
+        )
+        # The reply_markup must be a ForceReply — that's what makes the
+        # Telegram client pop the reply box.
+        kwargs = reply_mock.call_args.kwargs
+        assert isinstance(kwargs.get("reply_markup"), ForceReply), (
+            f"expected ForceReply, got: {kwargs.get('reply_markup')!r}"
+        )
+        # Crucially, the current email address must NOT appear in the
+        # prompt — it moved to /status.
+        assert "user@example.com" not in sent_text
+    finally:
+        commands.user_config_storage = orig_uc
+
+
+async def test_email_via_reply_sets_address_and_confirms() -> None:
+    """Reply to the EMAIL_PROMPT message → set the email + send a
+    confirmation. Mirrors `add_via_reply`'s confirm-after-set UX."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from tg_bot.handlers import commands
+
+    os.environ["RESEND_API_KEY"] = "re_fake"
+    os.environ["RESEND_FROM"] = "bot@example.com"
+
+    reply_mock = AsyncMock()
+    bot_user = SimpleNamespace(is_bot=True)
+    # Simulate the user replying to our EMAIL_PROMPT with their address.
+    replied = SimpleNamespace(text=commands.EMAIL_PROMPT, from_user=bot_user)
+    msg = SimpleNamespace(
+        text="user@example.com",
+        reply_to_message=replied,
+        reply_text=reply_mock,
+    )
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        message=msg,
+    )
+    context = SimpleNamespace(args=[])
+
+    saved: list[tuple[str, str]] = []
+
+    class _StubUserConfig:
+        async def set_digest_email(self, uid, addr):
+            saved.append((uid, addr))
+            return True  # valid
+
+    orig_uc = commands.user_config_storage
+    commands.user_config_storage = _StubUserConfig()
+    try:
+        await commands.email_via_reply(update, context)
+        assert saved == [("42", "user@example.com")], (
+            f"expected set_digest_email to fire; got {saved}"
+        )
+        reply_mock.assert_called_once()
+        confirmation = reply_mock.call_args[0][0]
+        assert "✅ Email mirror set to" in confirmation, (
+            f"expected confirmation text; got: {confirmation!r}"
+        )
+    finally:
+        os.environ.pop("RESEND_API_KEY", None)
+        os.environ.pop("RESEND_FROM", None)
+        commands.user_config_storage = orig_uc
+
+
+async def test_email_via_reply_rejects_invalid_address() -> None:
+    """A non-email reply must surface the same `_EMAIL_RE` rejection that
+    `/email <addr>` shows, NOT silently no-op. Pinning so the regression
+    'reply did nothing' never lands."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from tg_bot.handlers import commands
+
+    reply_mock = AsyncMock()
+    bot_user = SimpleNamespace(is_bot=True)
+    replied = SimpleNamespace(text=commands.EMAIL_PROMPT, from_user=bot_user)
+    msg = SimpleNamespace(
+        text="not-an-email",
+        reply_to_message=replied,
+        reply_text=reply_mock,
+    )
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        message=msg,
+    )
+    context = SimpleNamespace(args=[])
+
+    class _StubUserConfig:
+        async def set_digest_email(self, _uid, _addr):
+            return False  # rejected by _EMAIL_RE
+
+    orig_uc = commands.user_config_storage
+    commands.user_config_storage = _StubUserConfig()
+    try:
+        await commands.email_via_reply(update, context)
+        reply_mock.assert_called_once()
+        reply_text = reply_mock.call_args[0][0]
+        assert "doesn't look like a valid" in reply_text, (
+            f"expected rejection message; got: {reply_text!r}"
+        )
+    finally:
+        commands.user_config_storage = orig_uc
+
+
+async def test_email_via_reply_ignores_replies_to_other_prompts() -> None:
+    """If a user replies to the bot's ADD_PROMPT (or any other bot message),
+    email_via_reply must early-return without touching storage. The strict
+    EMAIL_PROMPT match is what allows both add_via_reply and email_via_reply
+    to coexist as MessageHandlers on the same filter."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from tg_bot.handlers import commands
+
+    reply_mock = AsyncMock()
+    bot_user = SimpleNamespace(is_bot=True)
+    # Replying to ADD_PROMPT, not EMAIL_PROMPT.
+    replied = SimpleNamespace(text=commands.ADD_PROMPT, from_user=bot_user)
+    msg = SimpleNamespace(
+        text="NVDA",
+        reply_to_message=replied,
+        reply_text=reply_mock,
+    )
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        message=msg,
+    )
+    context = SimpleNamespace(args=[])
+
+    fired: list[str] = []
+
+    class _StubUserConfig:
+        async def set_digest_email(self, _uid, addr):
+            fired.append(addr)
+            return True
+
+    orig_uc = commands.user_config_storage
+    commands.user_config_storage = _StubUserConfig()
+    try:
+        await commands.email_via_reply(update, context)
+        assert fired == [], "email_via_reply must NOT fire on ADD_PROMPT replies"
+        reply_mock.assert_not_called()
+    finally:
+        commands.user_config_storage = orig_uc
