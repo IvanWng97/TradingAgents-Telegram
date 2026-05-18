@@ -52,7 +52,7 @@ _STEP_MAP: dict[str, tuple[str, int]] = {
 }
 # Derived from `_STEP_MAP` so adding/removing entries auto-updates the
 # "(N/M)" badge. Counts unique ordinals (some node names alias to the same
-# step — e.g. `risk judge` and `portfolio manager` both map to step 12).
+# step — e.g. `sentiment analyst` and `social analyst` both map to step 2).
 TOTAL_STEPS = max(ordinal for _name, ordinal in _STEP_MAP.values())
 
 
