@@ -21,6 +21,7 @@ from tg_bot.pipeline.analysis import (
     pool_stats,
 )
 from tg_bot.handlers.analysis_runner import _run_analysis_for_ticker
+from tg_bot.rendering.email_client import is_email_configured, send_digest_email
 from tg_bot.handlers.pickers import (
     build_del_keyboard,
     build_history_dates_response,
@@ -81,6 +82,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Done to run (parallel for multiple).\n"
         "/digest - Schedule a Mon-Fri auto-run; pick time zone, hour, "
         "and a ticker filter (multi-select).\n"
+        "/email [<addr>|off|test] - Mirror the daily digest to email "
+        "(Resend, opt-in). No args shows current setting.\n"
         "/history [<ticker>] [YYYY-MM-DD] - Browse past analyses. "
         "No args → ticker picker.\n"
         "/refresh <ticker> - Force a fresh re-analysis on a watchlist "
@@ -527,6 +530,143 @@ async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     watchlist = watchlist_storage.get_watchlist(user_id)
     text, kb = build_digest_response(digest, watchlist=watchlist)
     await update.message.reply_text(text, reply_markup=kb, parse_mode="MarkdownV2")
+
+
+async def email_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Configure the daily-digest email mirror.
+
+    Sub-commands (single-word args, kept simple — no ForceReply flow):
+      `/email`                 — show current setting + help
+      `/email foo@bar.com`     — set the address (validates locally)
+      `/email off`             — clear the address (digest stays Telegram-only)
+      `/email test`            — send a one-off test email to confirm Resend
+                                 is wired up. Uses a synthetic empty status
+                                 dict so the operator sees the template
+                                 without waiting for a real digest fire.
+
+    All responses are MarkdownV2 (Invariant #4 — pickers and status lines
+    use MarkdownV2; only the analysis-output captions use HTML)."""
+    user_id = update.effective_user.id
+    args = context.args or []
+
+    digest = user_config_storage.get_digest(user_id) or {}
+    current = digest.get("email")
+
+    if not args:
+        # Bare `/email` — show current setting + help.
+        if current:
+            line = (
+                f"📧 Current: `{escape_markdown(current, version=2)}`\n\n"
+                "Use `/email off` to disable, `/email test` to verify, "
+                "or `/email <addr>` to change\\."
+            )
+        else:
+            line = (
+                "📧 No email set\\. The daily digest goes to Telegram only\\.\n\n"
+                "To mirror the digest to your inbox, send "
+                "`/email your@address\\.com`\\. Sender is configured by the "
+                "operator via `RESEND_FROM` in `\\.env`\\."
+            )
+        if not is_email_configured():
+            line += (
+                "\n\n⚠️ `RESEND_API_KEY` / `RESEND_FROM` not set in `\\.env`\\ — "
+                "even with an address configured, email won't send until the "
+                "operator wires those\\."
+            )
+        await update.message.reply_text(line, parse_mode="MarkdownV2")
+        return
+
+    sub = args[0].lower().strip()
+
+    if sub == "off":
+        ok = await user_config_storage.clear_digest_email(str(user_id))
+        if ok:
+            msg = "📧 Email mirror disabled\\. Digest will go to Telegram only\\."
+        else:
+            msg = "📧 No email was set — nothing to clear\\."
+        await update.message.reply_text(msg, parse_mode="MarkdownV2")
+        return
+
+    if sub == "test":
+        if not current:
+            await update.message.reply_text(
+                "📧 Set an address first with `/email <addr>`\\.",
+                parse_mode="MarkdownV2",
+            )
+            return
+        if not is_email_configured():
+            await update.message.reply_text(
+                "⚠️ `RESEND_API_KEY` / `RESEND_FROM` not set in `\\.env`\\.\n\n"
+                "Ask the operator to add them and restart the bot\\.",
+                parse_mode="MarkdownV2",
+            )
+            return
+        # Synthetic test payload — one fake "HOLD" ticker so the template
+        # renders the same shape a real digest produces, just empty.
+        from datetime import date as _date
+
+        today = _date.today().isoformat()
+        ok = await send_digest_email(
+            to_addr=current,
+            watchlist=["TEST"],
+            status={
+                "TEST": {
+                    "ticker": "TEST",
+                    "signal": "HOLD",
+                    "telegraph_url": None,
+                }
+            },
+            safe_date=today,
+            date_iso=today,
+            skipped_closed=None,
+        )
+        if ok:
+            await update.message.reply_text(
+                f"✅ Test email sent to `{escape_markdown(current, version=2)}`\\. "
+                "Check your inbox \\(and spam folder\\)\\.",
+                parse_mode="MarkdownV2",
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Test email failed — check the bot logs for the Resend error "
+                "\\(likely a bad API key or unverified sender domain\\)\\.",
+                parse_mode="MarkdownV2",
+            )
+        return
+
+    # Any other arg = "treat as address". Single-token only — `/email
+    # foo@bar.com extra junk` is rejected to avoid accidentally swallowing
+    # multi-arg typos.
+    if len(args) > 1:
+        await update.message.reply_text(
+            "📧 Too many arguments\\. Use `/email <single address>` "
+            "or `/email off`/`test`\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    addr = args[0].strip()
+    ok = await user_config_storage.set_digest_email(str(user_id), addr)
+    if not ok:
+        await update.message.reply_text(
+            f"❌ `{escape_markdown(addr, version=2)}` doesn't look like a valid "
+            "email\\. Expected format: `name@domain\\.tld`\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    msg = (
+        f"📧 Saved\\. Daily digest will be mirrored to "
+        f"`{escape_markdown(addr, version=2)}`\\."
+    )
+    if not is_email_configured():
+        msg += (
+            "\n\n⚠️ `RESEND_API_KEY` / `RESEND_FROM` not set in `\\.env` — "
+            "email won't actually send until the operator wires those\\."
+        )
+    else:
+        msg += " Run `/email test` to send a one-off test message\\."
+    await update.message.reply_text(msg, parse_mode="MarkdownV2")
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -116,6 +116,7 @@ async def test_first_time_tz_then_hour() -> None:
         "tz": "America/Los_Angeles",
         "chat_id": None,
         "tickers": [],
+        "email": None,
     }, d
     # Tz set but not yet enabled — partial config, doesn't fire.
     assert s.iter_enabled_digests() == []
@@ -826,6 +827,165 @@ async def test_fanout_partial_market_closure_drops_only_closed() -> None:
         runner.user_config_storage = orig_uc
         runner._analyze_one_for_digest = orig_a
         runner.is_market_open_for = orig_cal
+
+
+class _UserConfigWithEmail:
+    """Like `_AllEnrolledUserConfig` but `get_digest` returns a configurable
+    email field so tests can drive the email-mirror path in `run_user_digest`.
+
+    The mirror branch in run_user_digest reads `digest.get("email")` once
+    after the summary edit. Returning the email here is enough to flip
+    that branch; we don't need full digest schema fidelity."""
+
+    def __init__(self, email: str | None) -> None:
+        self._email = email
+
+    def get_enrolled_tickers(self, _uid, watchlist):
+        return list(watchlist)
+
+    def get_digest(self, _uid):
+        return {"enabled": True, "tickers": None, "email": self._email}
+
+    async def disable_digest(self, _uid):
+        return True
+
+
+async def test_fanout_calls_email_mirror_when_opted_in_and_configured() -> None:
+    """User has email set + RESEND_API_KEY/RESEND_FROM present → after the
+    final summary edit, `send_digest_email` IS called. Pins the happy
+    path of the email-mirror wiring in `run_user_digest`."""
+    import os
+    from unittest.mock import patch
+
+    from tg_bot.handlers import analysis_runner as runner
+
+    class _W:
+        def get_watchlist(self, _uid):
+            return ["NVDA"]
+
+    async def _fake_analyze(_uid, ticker, reporter=None):
+        return {
+            "ticker": ticker,
+            "signal": "BUY",
+            "telegraph_url": f"https://telegra.ph/{ticker}",
+        }
+
+    os.environ["RESEND_API_KEY"] = "re_test"
+    os.environ["RESEND_FROM"] = "bot@example.com"
+    orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
+    orig_a = runner._analyze_one_for_digest
+    runner.watchlist_storage = _W()
+    runner.user_config_storage = _UserConfigWithEmail("user@example.com")
+    runner._analyze_one_for_digest = _fake_analyze
+    try:
+        sent_to: list[str] = []
+
+        async def fake_send(**kwargs):
+            sent_to.append(kwargs["to_addr"])
+            return True
+
+        with patch.object(runner, "send_digest_email", side_effect=fake_send):
+            app = _FakeFanOutApp()
+            await runner.run_user_digest(app, 42, 999)
+
+        assert sent_to == ["user@example.com"], (
+            f"expected one email to user@example.com, got {sent_to}"
+        )
+    finally:
+        os.environ.pop("RESEND_API_KEY", None)
+        os.environ.pop("RESEND_FROM", None)
+        runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
+        runner._analyze_one_for_digest = orig_a
+
+
+async def test_fanout_skips_email_mirror_when_no_opt_in() -> None:
+    """User has NO email set → `send_digest_email` is NOT called. Pins
+    the default Telegram-only path so existing users (who haven't run
+    `/email set`) never get unexpected emails."""
+    from unittest.mock import patch
+
+    from tg_bot.handlers import analysis_runner as runner
+
+    class _W:
+        def get_watchlist(self, _uid):
+            return ["NVDA"]
+
+    async def _fake_analyze(_uid, ticker, reporter=None):
+        return {
+            "ticker": ticker,
+            "signal": "BUY",
+            "telegraph_url": f"https://telegra.ph/{ticker}",
+        }
+
+    orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
+    orig_a = runner._analyze_one_for_digest
+    runner.watchlist_storage = _W()
+    # Email = None ⇒ mirror path must not fire.
+    runner.user_config_storage = _UserConfigWithEmail(None)
+    runner._analyze_one_for_digest = _fake_analyze
+    try:
+        with patch.object(runner, "send_digest_email") as mock_send:
+            app = _FakeFanOutApp()
+            await runner.run_user_digest(app, 42, 999)
+        mock_send.assert_not_called()
+    finally:
+        runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
+        runner._analyze_one_for_digest = orig_a
+
+
+async def test_fanout_email_failure_does_not_break_telegram_path() -> None:
+    """The mirror failing must NEVER affect Telegram delivery. If
+    `send_digest_email` raises or returns False, the digest summary
+    must still have been edited successfully to Telegram. This pins
+    the "email is a mirror, never a replacement" contract."""
+    import os
+    from unittest.mock import patch
+
+    from tg_bot.handlers import analysis_runner as runner
+
+    class _W:
+        def get_watchlist(self, _uid):
+            return ["NVDA"]
+
+    async def _fake_analyze(_uid, ticker, reporter=None):
+        return {
+            "ticker": ticker,
+            "signal": "BUY",
+            "telegraph_url": f"https://telegra.ph/{ticker}",
+        }
+
+    os.environ["RESEND_API_KEY"] = "re_test"
+    os.environ["RESEND_FROM"] = "bot@example.com"
+    orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
+    orig_a = runner._analyze_one_for_digest
+    runner.watchlist_storage = _W()
+    runner.user_config_storage = _UserConfigWithEmail("user@example.com")
+    runner._analyze_one_for_digest = _fake_analyze
+    try:
+
+        async def boom(**_kwargs):
+            raise RuntimeError("Resend API down")
+
+        with patch.object(runner, "send_digest_email", side_effect=boom):
+            app = _FakeFanOutApp()
+            # If the mirror's RuntimeError bubbled, this would raise too.
+            await runner.run_user_digest(app, 42, 999)
+
+        # Telegram summary still landed — last edit contains the signal-emoji.
+        assert app.bot.edits, "Telegram summary edit didn't fire"
+        summary = app.bot.edits[-1]["text"]
+        assert "🟢" in summary and "NVDA" in summary and "BUY" in summary
+    finally:
+        os.environ.pop("RESEND_API_KEY", None)
+        os.environ.pop("RESEND_FROM", None)
+        runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
+        runner._analyze_one_for_digest = orig_a
 
 
 async def test_fanout_forbidden_disables() -> None:

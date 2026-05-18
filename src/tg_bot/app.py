@@ -23,6 +23,7 @@ from tg_bot.handlers import (
     button_callback,
     del_ticker,
     digest_cmd,
+    email_cmd,
     help_cmd,
     history_cmd,
     list_cmd,
@@ -33,6 +34,7 @@ from tg_bot.handlers import (
 )
 from tg_bot.handlers.analysis_runner import register_digest_job
 from tg_bot.pipeline.analysis import check_llm_configured
+from tg_bot.rendering.email_client import is_email_configured
 from tg_bot.storage import user_config_storage, watchlist_storage
 
 
@@ -51,6 +53,7 @@ BOT_COMMANDS = [
     BotCommand("watch", "Watchlist picker — tap tickers to analyze"),
     BotCommand("list", "Show your watchlist as text + digest enrolment"),
     BotCommand("digest", "Schedule a Mon-Fri summary of your watchlist"),
+    BotCommand("email", "Mirror digest to email (Resend) — opt-in"),
     BotCommand("history", "Look up a past analysis"),
     BotCommand("refresh", "Re-run today's analysis on a ticker"),
     BotCommand("status", "Show bot uptime, pool, and active LLM config"),
@@ -75,6 +78,23 @@ async def _post_init(application: Application) -> None:
     reason = check_llm_configured()
     if reason is not None:
         logger.warning("LLM not configured — %s", reason)
+
+    # Surface email-mirror misconfiguration at startup: if any user has
+    # `/email set <addr>` saved but `RESEND_API_KEY` / `RESEND_FROM` are
+    # unset, every digest fire will silently skip the mirror with a
+    # per-run WARNING. Catching it at startup makes the gap visible
+    # immediately so operators can fix .env before the first digest run.
+    users_with_email = [
+        user_id
+        for user_id in user_config_storage.iter_users_with_digest()
+        if (user_config_storage.get_digest(user_id) or {}).get("email")
+    ]
+    if users_with_email and not is_email_configured():
+        logger.warning(
+            "Email mirror opted in by %d user(s) but RESEND_API_KEY/RESEND_FROM "
+            "not set in .env — digest mirror will silently skip until configured",
+            len(users_with_email),
+        )
 
     # One-time backfill for users whose digest predates the ticker-filter
     # feature: copy their current watchlist into the new `tickers` field so
@@ -203,6 +223,7 @@ def _build_application() -> Application:
     application.add_handler(CommandHandler("digest", digest_cmd))
     application.add_handler(CommandHandler("history", history_cmd))
     application.add_handler(CommandHandler("refresh", refresh_cmd))
+    application.add_handler(CommandHandler("email", email_cmd))
     application.add_handler(CommandHandler("status", status_cmd))
     application.add_handler(CallbackQueryHandler(button_callback))
 

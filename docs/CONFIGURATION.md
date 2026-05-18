@@ -37,6 +37,15 @@ Upstream `tradingagents` reads these env vars at library-import time via its `_E
 | `TRADINGAGENTS_RESULTS_DIR` | recommended in Docker | `/history` reads from here. Defaults to `~/.tradingagents/logs` (ephemeral inside containers). Set to `/app/data/ta-logs` to persist via the bind mount. |
 | `TRADINGAGENTS_CACHE_DIR` | recommended in Docker | yfinance cache. Defaults to `~/.tradingagents/cache` (ephemeral). Set to `/app/data/ta-cache` to skip re-downloads on every restart. |
 
+### Digest email mirror (Resend, optional)
+
+Per-user `/email set <addr>` opts in; the bot mirrors each daily digest to that inbox via Resend. Both env vars below must be set for any send to fire — bare `/email` shows the current setting and warns when the env isn't configured.
+
+| Variable | Required | Notes |
+|---|---|---|
+| `RESEND_API_KEY` | no (only if any user opted in) | From [resend.com](https://resend.com) — free tier is 3000 emails/mo, 100/day. Format `re_...`. |
+| `RESEND_FROM` | no (only if any user opted in) | Sender address. The domain must be verified in your Resend dashboard before Resend will accept the send — bare `resend.dev` is the easiest starter (no DNS work; rate-limited). |
+
 ## Supported LLM providers
 
 Set `TRADINGAGENTS_LLM_PROVIDER` to one of:

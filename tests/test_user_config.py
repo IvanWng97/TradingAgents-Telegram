@@ -161,3 +161,78 @@ async def test_enrolled_explicit_empty_filter_returns_empty() -> None:
     # Sanity: the stored value is `[]`, NOT missing — distinguishes from legacy.
     assert s.get_digest("u1")["tickers"] == []
     assert s.get_enrolled_tickers("u1", ["AAPL", "NVDA"]) == []
+
+
+# ─── set_digest_email / clear_digest_email ──────────────────────────────
+
+
+async def test_set_digest_email_accepts_valid_address() -> None:
+    """Common valid-address shapes must round-trip. The regex is intentionally
+    pragmatic — RFC-5322 compliance isn't worth the rejection of practical
+    addresses (`foo+tag@bar.co.uk` is normal)."""
+    s = _make_storage()
+    for addr in [
+        "user@example.com",
+        "foo+tag@example.co.uk",
+        "first.last@subdomain.example.org",
+        "u_99@dash-domain.io",
+    ]:
+        assert await s.set_digest_email("u1", addr) is True, addr
+        assert s.get_digest("u1")["email"] == addr
+
+
+async def test_set_digest_email_rejects_invalid_address() -> None:
+    """Common typos must produce False (caller renders a "bad address"
+    message); storage stays untouched."""
+    s = _make_storage()
+    for bad in [
+        "no-at-sign.com",
+        "trailing@",
+        "@no-local-part.com",
+        "no.tld@bare",
+        "double..dot@example.com" if False else "weird space @example.com",
+        "",
+    ]:
+        assert await s.set_digest_email("u1", bad) is False, bad
+    # Nothing got saved — the digest block doesn't exist yet at all.
+    assert s.get_digest("u1") is None
+
+
+async def test_set_digest_email_does_not_touch_other_digest_fields() -> None:
+    """Email opt-in is independent of schedule. Setting an email on a
+    user who already has a fully-configured digest must leave the
+    schedule fields untouched."""
+    s = _make_storage()
+    await s.set_digest_tz("u1", "UTC")
+    await s.set_digest_hour("u1", 9, 999)
+    await s.set_digest_tickers("u1", ["NVDA", "AAPL"])
+
+    await s.set_digest_email("u1", "user@example.com")
+
+    d = s.get_digest("u1")
+    assert d["tz"] == "UTC"
+    assert d["hour_local"] == 9
+    assert d["chat_id"] == 999
+    assert d["enabled"] is True
+    assert sorted(d["tickers"]) == ["AAPL", "NVDA"]
+    assert d["email"] == "user@example.com"
+
+
+async def test_clear_digest_email_unsets_and_returns_true() -> None:
+    s = _make_storage()
+    await s.set_digest_email("u1", "user@example.com")
+    assert s.get_digest("u1")["email"] == "user@example.com"
+
+    assert await s.clear_digest_email("u1") is True
+    assert s.get_digest("u1")["email"] is None
+
+
+async def test_clear_digest_email_returns_false_when_nothing_to_clear() -> None:
+    """Defensive: clearing when no email was set returns False so callers
+    can render "nothing to clear" instead of "cleared" (a confusing UX)."""
+    s = _make_storage()
+    # No digest block at all → returns False.
+    assert await s.clear_digest_email("u1") is False
+    # Digest block exists but email was never set → also False.
+    await s.set_digest_tz("u1", "UTC")
+    assert await s.clear_digest_email("u1") is False

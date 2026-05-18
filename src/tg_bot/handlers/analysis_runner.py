@@ -60,6 +60,7 @@ from tg_bot.pipeline.progress import (
     resolve_step,
 )
 from tg_bot.storage import user_config_storage, watchlist_storage
+from tg_bot.rendering.email_client import is_email_configured, send_digest_email
 from tg_bot.rendering.telegraph_client import (
     _path_from_telegraph_url,
     publish_to_telegraph,
@@ -1298,6 +1299,47 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
         cancel_digest_job(application, user_id)
     except Exception as e:
         logger.exception("digest: failed to edit summary for user %s: %s", user_id, e)
+
+    # Email mirror — runs AFTER Telegram delivery (success or fail) so
+    # email is independent. Caller-side gates: user opted in (email set
+    # in storage) + env configured (RESEND_API_KEY + RESEND_FROM). Email
+    # is a MIRROR, never a REPLACEMENT — `send_digest_email` swallows
+    # its own exceptions internally, but we wrap it at the call site too
+    # (defense in depth): a future bug in email_client that lets an
+    # exception escape would otherwise break the Telegram digest, which
+    # is the exact failure mode the mirror pattern exists to prevent.
+    digest = user_config_storage.get_digest(user_id)
+    email_to = (digest or {}).get("email")
+    if email_to and is_email_configured():
+        try:
+            await send_digest_email(
+                to_addr=email_to,
+                watchlist=watchlist,
+                status=status,
+                safe_date=safe_date,
+                date_iso=today,
+                skipped_closed=skipped_closed,
+            )
+        except Exception as e:
+            logger.warning(
+                "digest: email mirror to %s raised unexpectedly (%s) — "
+                "Telegram digest unaffected. This is a bug in email_client; "
+                "send_digest_email is supposed to swallow its own failures.",
+                email_to,
+                type(e).__name__,
+            )
+            logger.debug("email mirror unexpected traceback:", exc_info=True)
+    elif email_to and not is_email_configured():
+        # User opted in but env isn't configured. Log loud so the
+        # operator notices — `/email test` would have caught this too,
+        # but a startup-time check in `_post_init` is the canonical
+        # warning surface.
+        logger.warning(
+            "digest: user %s has email %s opt-in but RESEND_API_KEY/RESEND_FROM "
+            "not set in .env; mirror skipped",
+            user_id,
+            email_to,
+        )
 
 
 async def _handle_digest_cancel(
