@@ -34,6 +34,7 @@ import asyncio
 import base64
 import logging
 import os
+from dataclasses import dataclass
 from html import escape as _html_escape
 
 from tg_bot.history import load_historical_state
@@ -42,6 +43,42 @@ from tg_bot.rendering.formatters import DECISION_EMOJI, format_full_md_report
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class EmailSendResult:
+    """Outcome of one `send_digest_email` call.
+
+    `ok=True` only when Resend accepted the send and returned a message
+    id; every other path (env hot-removed, SDK exception, malformed
+    response) is `ok=False` with `error` set to a short failure category
+    for log correlation + summary-line rendering. `recipient` is always
+    populated (caller passes the address in) so the Telegram summary
+    appender doesn't have to re-read storage to render "📧 Sent to
+    <addr>".
+
+    `__post_init__` enforces mutual exclusivity (`ok and not error`,
+    `not ok and not message_id`) — the fields are nominally independent
+    by type, but a misconstruction would silently render the wrong
+    footer line. Raising at construction time prevents the trap from
+    propagating to the renderer.
+    """
+
+    ok: bool
+    recipient: str
+    message_id: str | None = None
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.ok and self.error is not None:
+            raise ValueError(
+                f"EmailSendResult: ok=True must have error=None, got {self.error!r}"
+            )
+        if not self.ok and self.message_id is not None:
+            raise ValueError(
+                f"EmailSendResult: ok=False must have message_id=None, "
+                f"got {self.message_id!r}"
+            )
 
 
 # Inline-style constants. Gmail/Outlook strip <style> blocks; everything
@@ -233,10 +270,10 @@ async def send_digest_email(
     safe_date: str,
     date_iso: str,
     skipped_closed: list[str] | None = None,
-) -> bool:
-    """Send the digest summary email. Returns True on success, False on
-    any failure (logged at WARNING — never raises to the caller, since
-    email is a mirror and must NEVER break the Telegram path).
+) -> EmailSendResult:
+    """Send the digest summary email. Returns an `EmailSendResult` —
+    never raises to the caller, since email is a mirror and must NEVER
+    break the Telegram path.
 
     Caller is responsible for the opt-in gate (`digest.email` is set)
     AND the env-configured gate (`is_email_configured()`); this function
@@ -249,7 +286,7 @@ async def send_digest_email(
             "send_digest_email: RESEND_API_KEY/RESEND_FROM not set, skipping send to %s",
             to_addr,
         )
-        return False
+        return EmailSendResult(ok=False, recipient=to_addr, error="not_configured")
 
     # Cheap pure-Python work stays on the loop thread.
     subject = _build_subject(safe_date, status)
@@ -302,11 +339,11 @@ async def send_digest_email(
                 result["id"],
                 n_attachments,
             )
-            return True
+            return EmailSendResult(ok=True, recipient=to_addr, message_id=result["id"])
         logger.warning(
             "email: unexpected Resend response shape for %s: %r", to_addr, result
         )
-        return False
+        return EmailSendResult(ok=False, recipient=to_addr, error="malformed_response")
     except Exception as e:
         logger.warning(
             "email: send to %s failed (%s) — Telegram digest unaffected",
@@ -314,4 +351,4 @@ async def send_digest_email(
             type(e).__name__,
         )
         logger.debug("email send full traceback:", exc_info=True)
-        return False
+        return EmailSendResult(ok=False, recipient=to_addr, error=type(e).__name__)

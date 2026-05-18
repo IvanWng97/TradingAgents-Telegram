@@ -24,6 +24,7 @@ from tg_bot.handlers import (
     del_ticker,
     digest_cmd,
     email_cmd,
+    email_via_reply,
     help_cmd,
     history_cmd,
     list_cmd,
@@ -230,8 +231,20 @@ def _build_application() -> Application:
     # Reply-driven /add: when the user replies to the bot's add-prompt,
     # parse the reply text as ticker(s). add_via_reply itself filters by
     # exact prompt-text match so other replies to the bot are ignored.
+    #
+    # /email reply uses the SAME filter shape but a different group so PTB
+    # routes the reply to both handlers in sequence rather than only the
+    # first-registered. Each handler early-returns on prompt mismatch, so
+    # only the matching one actually responds.
     application.add_handler(
-        MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, add_via_reply)
+        MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, add_via_reply),
+        group=0,
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.REPLY & filters.TEXT & ~filters.COMMAND, email_via_reply
+        ),
+        group=1,
     )
 
     return application
