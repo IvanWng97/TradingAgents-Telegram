@@ -19,10 +19,6 @@ from tg_bot.pipeline.progress import (
 logger = logging.getLogger(__name__)
 
 
-# Maps the provider name (set via `TRADINGAGENTS_LLM_PROVIDER` in `.env`)
-# → the env var that holds its API key. Used by `check_llm_configured`
-# to give users a targeted error before the LLM call 401s with a generic
-# message. Keep in sync with `.env.example`.
 # Per-provider key for the "thinking effort" knob. Vocabulary
 # (low/medium/high) is shared across providers but the config-dict key
 # differs. Providers absent from this map have no effort knob — we
@@ -111,6 +107,12 @@ def get_current_config_key():
     return AnalysisConfigKey.from_config(build_config())
 
 
+# Maps the provider name (set via `TRADINGAGENTS_LLM_PROVIDER` in `.env`)
+# → the env var that holds its API key. Used by `check_llm_configured`
+# to give users a targeted error before the LLM call 401s with a generic
+# message. Keep in sync with `.env.example` and verified against upstream
+# `tradingagents.llm_clients.api_key_env.PROVIDER_API_KEY_ENV` by
+# `test_provider_env_keys_match_upstream`.
 PROVIDER_ENV_KEYS: dict[str, str | None] = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",

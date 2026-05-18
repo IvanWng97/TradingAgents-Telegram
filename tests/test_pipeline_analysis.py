@@ -269,3 +269,49 @@ async def test_provider_env_keys_match_upstream() -> None:
     assert not mismatches, "bot ↔ upstream env-key drift:\n" + "\n".join(
         f"  {p}: bot={b!r} upstream={u!r}" for p, b, u in mismatches
     )
+
+
+# ─── pool_stats() — backs the /status "Graph pool" line ────────────────
+
+
+async def test_pool_stats_returns_zero_before_lazy_init() -> None:
+    """Before the first `/watch` tap builds the pool, `pool_stats()` must
+    return `(0, 0)`. This drives the "not yet built" branch in `status_cmd`
+    (handlers/commands.py) — without this pin, a future refactor that
+    initialises `_graph_pool` eagerly would silently flip the `/status`
+    text from "not yet built" to "0 instance(s) built" without any test
+    failing."""
+    from tg_bot.pipeline import analysis as analysis_mod
+
+    saved = analysis_mod._graph_pool
+    analysis_mod._graph_pool = None
+    try:
+        assert analysis_mod.pool_stats() == (0, 0)
+    finally:
+        analysis_mod._graph_pool = saved
+
+
+async def test_pool_stats_returns_one_pool_with_instance_count_after_init() -> None:
+    """After the lazy init builds the single `GraphPool`, `pool_stats()`
+    returns `(1, N)` where N tracks `GraphPool.size` — the number of
+    `TradingAgentsGraph` instances actually built so far (NOT the max
+    capacity). Drives the `/status` "N instance(s) built" branch."""
+    from tg_bot.pipeline import analysis as analysis_mod
+    from tg_bot.pipeline.analysis import GraphPool
+
+    saved = analysis_mod._graph_pool
+    # Stub builder — we're testing the size accounting, not the actual
+    # TradingAgentsGraph construction (which would pull in LangChain init).
+    pool = GraphPool(max_size=3, builder=lambda: object())
+    analysis_mod._graph_pool = pool
+    try:
+        # Just-installed pool has zero instances built.
+        assert analysis_mod.pool_stats() == (1, 0)
+        # Acquire one instance to trigger the builder, then release.
+        with pool.acquire():
+            assert analysis_mod.pool_stats() == (1, 1)
+        # Instance returns to the pool; size stays at 1 (it's the
+        # count of built instances, not the in-use count).
+        assert analysis_mod.pool_stats() == (1, 1)
+    finally:
+        analysis_mod._graph_pool = saved
