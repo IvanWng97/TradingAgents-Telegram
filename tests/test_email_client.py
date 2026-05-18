@@ -663,3 +663,188 @@ async def test_email_via_reply_ignores_replies_to_other_prompts() -> None:
         reply_mock.assert_not_called()
     finally:
         commands.user_config_storage = orig_uc
+
+
+# ─── /email diagnose ───────────────────────────────────────────────────
+
+
+async def test_email_diagnose_reports_all_green_on_happy_path() -> None:
+    """End-to-end happy path: env vars set, domain verified in Resend,
+    test send succeeds → message shows ✅ for all four checks. Pins
+    the operator-facing one-shot diagnose UX so a future refactor
+    doesn't drop one of the four surfaces."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from tg_bot.handlers import commands
+
+    os.environ["RESEND_API_KEY"] = "re_fake"
+    os.environ["RESEND_FROM"] = "bot@yifwang.com"
+
+    reply_mock = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        message=SimpleNamespace(reply_text=reply_mock),
+    )
+    context = SimpleNamespace(args=["diagnose"])
+
+    class _StubUserConfig:
+        def get_digest(self, _uid):
+            return {"email": "user@example.com"}
+
+    orig_uc = commands.user_config_storage
+    commands.user_config_storage = _StubUserConfig()
+
+    # Stub resend.Domains.list to return our verified domain.
+    fake_resend_module = SimpleNamespace()
+
+    class _FakeDomains:
+        @staticmethod
+        def list():
+            return {"data": [{"name": "yifwang.com", "status": "verified"}]}
+
+    fake_resend_module.Domains = _FakeDomains
+    fake_resend_module.api_key = ""
+
+    async def fake_send(**kwargs):
+        return EmailSendResult(
+            ok=True, recipient=kwargs["to_addr"], message_id="re_msg_abc"
+        )
+
+    try:
+        with patch.dict("sys.modules", {"resend": fake_resend_module}):
+            with patch.object(commands, "send_digest_email", side_effect=fake_send):
+                await commands.email_cmd(update, context)
+
+        sent = reply_mock.call_args[0][0]
+        # All four checks must show ✅ on the happy path.
+        assert sent.count("✅") >= 4, (
+            f"expected 4+ ✅ markers (api key, from, domain, test send); got: {sent!r}"
+        )
+        # MarkdownV2 escapes `.` and `_` — assert on the wire form.
+        assert "yifwang\\.com` verified" in sent, (
+            f"verified-domain line missing/wrong-escaped: {sent!r}"
+        )
+        assert "re\\_msg\\_abc" in sent, (
+            f"Resend message id missing from test-send line: {sent!r}"
+        )
+    finally:
+        os.environ.pop("RESEND_API_KEY", None)
+        os.environ.pop("RESEND_FROM", None)
+        commands.user_config_storage = orig_uc
+
+
+async def test_email_diagnose_flags_unverified_domain() -> None:
+    """Resend reports the domain as 'pending' → diagnose shows ⏳ on
+    the domain line with the status string included. Pins that a partial
+    setup (env wired, domain added, DNS not propagated) surfaces clearly
+    instead of falsely reporting all-green."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from tg_bot.handlers import commands
+
+    os.environ["RESEND_API_KEY"] = "re_fake"
+    os.environ["RESEND_FROM"] = "bot@yifwang.com"
+
+    reply_mock = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        message=SimpleNamespace(reply_text=reply_mock),
+    )
+    context = SimpleNamespace(args=["diagnose"])
+
+    class _StubUserConfig:
+        def get_digest(self, _uid):
+            return {"email": "user@example.com"}
+
+    orig_uc = commands.user_config_storage
+    commands.user_config_storage = _StubUserConfig()
+
+    fake_resend_module = SimpleNamespace()
+
+    class _FakeDomains:
+        @staticmethod
+        def list():
+            return {"data": [{"name": "yifwang.com", "status": "pending"}]}
+
+    fake_resend_module.Domains = _FakeDomains
+    fake_resend_module.api_key = ""
+
+    async def fake_send(**kwargs):
+        # Send is attempted even when domain pending — Resend rejects it.
+        return EmailSendResult(
+            ok=False, recipient=kwargs["to_addr"], error="DomainNotVerified"
+        )
+
+    try:
+        with patch.dict("sys.modules", {"resend": fake_resend_module}):
+            with patch.object(commands, "send_digest_email", side_effect=fake_send):
+                await commands.email_cmd(update, context)
+
+        sent = reply_mock.call_args[0][0]
+        assert "⏳" in sent, f"expected ⏳ for pending domain; got: {sent!r}"
+        assert "pending" in sent
+        assert "❌" in sent, "expected ❌ on test-send line for unverified domain"
+    finally:
+        os.environ.pop("RESEND_API_KEY", None)
+        os.environ.pop("RESEND_FROM", None)
+        commands.user_config_storage = orig_uc
+
+
+async def test_email_diagnose_handles_resend_api_error_gracefully() -> None:
+    """Resend API key invalid / Resend down → Domains.list raises. The
+    diagnose surface must catch + render ❌, NOT crash the command.
+    Pins that a bad API key still produces a useful response."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from tg_bot.handlers import commands
+
+    os.environ["RESEND_API_KEY"] = "re_bogus"
+    os.environ["RESEND_FROM"] = "bot@yifwang.com"
+
+    reply_mock = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        message=SimpleNamespace(reply_text=reply_mock),
+    )
+    context = SimpleNamespace(args=["diagnose"])
+
+    class _StubUserConfig:
+        def get_digest(self, _uid):
+            return {"email": "user@example.com"}
+
+    orig_uc = commands.user_config_storage
+    commands.user_config_storage = _StubUserConfig()
+
+    fake_resend_module = SimpleNamespace()
+
+    class _FakeDomains:
+        @staticmethod
+        def list():
+            raise RuntimeError("Unauthorized — bad API key")
+
+    fake_resend_module.Domains = _FakeDomains
+    fake_resend_module.api_key = ""
+
+    async def fake_send(**kwargs):
+        return EmailSendResult(
+            ok=False, recipient=kwargs["to_addr"], error="AuthenticationError"
+        )
+
+    try:
+        with patch.dict("sys.modules", {"resend": fake_resend_module}):
+            with patch.object(commands, "send_digest_email", side_effect=fake_send):
+                # Must NOT raise.
+                await commands.email_cmd(update, context)
+
+        sent = reply_mock.call_args[0][0]
+        assert "❌" in sent
+        assert "RuntimeError" in sent, (
+            f"expected RuntimeError class name in API-error message; got: {sent!r}"
+        )
+    finally:
+        os.environ.pop("RESEND_API_KEY", None)
+        os.environ.pop("RESEND_FROM", None)
+        commands.user_config_storage = orig_uc

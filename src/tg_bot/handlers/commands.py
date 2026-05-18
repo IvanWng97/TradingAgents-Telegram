@@ -17,9 +17,11 @@ from tg_bot.pipeline.analysis import (
     EFFORT_KEY_BY_PROVIDER,
     build_config,
     check_llm_configured,
+    estimate_token_cost_usd,
     llm_setup_error_message,
     pool_stats,
 )
+from tg_bot.pipeline.progress import get_token_totals
 from tg_bot.handlers.analysis_runner import _run_analysis_for_ticker
 from tg_bot.rendering.email_client import is_email_configured, send_digest_email
 from tg_bot.handlers.pickers import (
@@ -557,6 +559,17 @@ def _format_uptime(seconds: int) -> str:
     return " ".join(parts)
 
 
+def _format_token_count(n: int) -> str:
+    """Render integer token counts compactly: `1234567` → `1.2M`, `5678` → `5.7K`.
+    Used in `/status` so a multi-million-token cumulative total doesn't
+    blow out the message width."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
 async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Open the daily-digest picker.
 
@@ -574,17 +587,136 @@ async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(text, reply_markup=kb, parse_mode="MarkdownV2")
 
 
+async def _email_diagnose(update: Update, current: str | None) -> None:
+    """End-to-end operator diagnosis for the email-mirror pipeline.
+
+    Reports four checks in one MarkdownV2 message:
+      1. `RESEND_API_KEY` present
+      2. `RESEND_FROM` present
+      3. Resend domain status — pings `resend.Domains.list()` and reports
+         the verification state of the domain in `RESEND_FROM`
+      4. Test send — invokes `send_digest_email` against the user's
+         configured address and shows the result + Resend message id
+
+    Designed for the "I just set up Resend, does it actually work?"
+    moment when domain verification + API key + env wiring all need
+    to be confirmed together. Faster than chasing the four surfaces
+    separately (dashboard / .env / `/email test` / inbox)."""
+    import os
+    from datetime import date as _date
+    from html import escape as _html_escape
+
+    lines = ["🔍 *Email diagnose*\n"]
+
+    api_key_set = bool(os.environ.get("RESEND_API_KEY"))
+    from_addr = os.environ.get("RESEND_FROM", "")
+    lines.append(f"• `RESEND_API_KEY`: {'✅ set' if api_key_set else '❌ not set'}")
+    lines.append(
+        "• `RESEND_FROM`: "
+        + (
+            f"✅ `{escape_markdown(from_addr, version=2)}`"
+            if from_addr
+            else "❌ not set"
+        )
+    )
+
+    # Domain status — derive expected domain from RESEND_FROM and ping
+    # Resend's Domains.list() to find a matching entry. Best-effort:
+    # API errors are reported, not swallowed.
+    if api_key_set and from_addr and "@" in from_addr:
+        expected_domain = from_addr.rsplit("@", 1)[1]
+        try:
+            import resend
+
+            def _list_domains():
+                resend.api_key = os.environ["RESEND_API_KEY"]
+                return resend.Domains.list()
+
+            result = await asyncio.to_thread(_list_domains)
+            domains = result.get("data", []) if isinstance(result, dict) else []
+            match = next(
+                (d for d in domains if d.get("name") == expected_domain),
+                None,
+            )
+            if match is None:
+                lines.append(
+                    f"• Domain status: ❌ `{escape_markdown(expected_domain, version=2)}` "
+                    "not in your Resend account — add it in the dashboard\\."
+                )
+            else:
+                status = match.get("status", "unknown")
+                if status == "verified":
+                    lines.append(
+                        f"• Domain status: ✅ `{escape_markdown(expected_domain, version=2)}` "
+                        "verified"
+                    )
+                else:
+                    lines.append(
+                        f"• Domain status: ⏳ `{escape_markdown(expected_domain, version=2)}` "
+                        f"is `{escape_markdown(status, version=2)}` "
+                        "\\(DNS not propagated yet, or pending in Resend\\)"
+                    )
+        except Exception as e:
+            lines.append(
+                f"• Domain status: ❌ Resend API error "
+                f"\\(`{escape_markdown(type(e).__name__, version=2)}`\\) "
+                "— check `RESEND_API_KEY` value"
+            )
+    else:
+        lines.append(
+            "• Domain status: ⏭ skipped \\(needs both env vars + valid FROM\\)"
+        )
+
+    # Test send — only if all prereqs above are met AND user has an
+    # address. Reuses `send_digest_email` with the same synthetic payload
+    # `/email test` uses so the two surfaces stay in lockstep.
+    if not current:
+        lines.append(
+            "• Test send: ⏭ skipped \\(no recipient — run `/email <addr>` first\\)"
+        )
+    elif not is_email_configured():
+        lines.append("• Test send: ⏭ skipped \\(env not configured\\)")
+    else:
+        today = _date.today().isoformat()
+        result = await send_digest_email(
+            to_addr=current,
+            watchlist=["TEST"],
+            status={
+                "TEST": {
+                    "ticker": "TEST",
+                    "signal": "HOLD",
+                    "telegraph_url": None,
+                }
+            },
+            safe_date=_html_escape(today),
+            date_iso=today,
+            skipped_closed=["FAKE.HK"],
+        )
+        if result.ok:
+            lines.append(
+                f"• Test send: ✅ sent to `{escape_markdown(current, version=2)}` "
+                f"\\(id: `{escape_markdown(result.message_id or '?', version=2)}`\\)"
+            )
+        else:
+            lines.append(
+                f"• Test send: ❌ failed "
+                f"\\(`{escape_markdown(result.error or 'unknown', version=2)}`\\) "
+                "— check bot logs"
+            )
+
+    await update.message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
+
+
 async def email_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Configure the daily-digest email mirror.
 
-    Sub-commands (single-word args, kept simple — no ForceReply flow):
-      `/email`                 — show current setting + help
+    Sub-commands:
+      `/email`                 — open a ForceReply prompt (UX parity with /add)
       `/email foo@bar.com`     — set the address (validates locally)
       `/email off`             — clear the address (digest stays Telegram-only)
-      `/email test`            — send a one-off test email to confirm Resend
-                                 is wired up. Uses a synthetic empty status
-                                 dict so the operator sees the template
-                                 without waiting for a real digest fire.
+      `/email test`            — send a one-off test email
+      `/email diagnose`        — full end-to-end pipeline check (env vars,
+                                 Resend domain status, test send)
 
     All responses are MarkdownV2 (Invariant #4 — pickers and status lines
     use MarkdownV2; only the analysis-output captions use HTML)."""
@@ -614,6 +746,10 @@ async def email_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             msg = "📧 No email was set — nothing to clear\\."
         await update.message.reply_text(msg, parse_mode="MarkdownV2")
+        return
+
+    if sub == "diagnose":
+        await _email_diagnose(update, current)
         return
 
     if sub == "test":
@@ -770,6 +906,28 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         email_status = "`not set`"
     email_line = f"• Email mirror: {email_status}\n"
 
+    # Token usage + estimated cost line. Tokens accumulate on every
+    # `on_llm_end` callback; estimated cost is derived from the active
+    # provider/model via `LLM_PRICE_USD_PER_M`. Best-effort — the dollar
+    # figure is ±30% (assumes 50/50 deep/quick split per call) and falls
+    # back to tokens-only when neither model is in the price table.
+    in_tokens, out_tokens = get_token_totals()
+    if in_tokens == 0 and out_tokens == 0:
+        # No analyses since boot — render zero rather than skipping the
+        # line so the operator knows the counter exists.
+        tokens_line = "• Tokens since boot: `0 in / 0 out`\n"
+    else:
+        in_str = _format_token_count(in_tokens)
+        out_str = _format_token_count(out_tokens)
+        cost = estimate_token_cost_usd(provider, deep, quick, in_tokens, out_tokens)
+        if cost is not None:
+            tokens_line = (
+                f"• Tokens since boot: `{in_str} in / {out_str} out` "
+                f"\\(\\~${cost:.2f}\\)\n"
+            )
+        else:
+            tokens_line = f"• Tokens since boot: `{in_str} in / {out_str} out`\n"
+
     # MarkdownV2 code spans (backtick-wrapped) suppress most escaping, but
     # a backtick *in the value itself* would break out of the span and
     # cause `Bad Request: can't parse entities`. Provider/model strings
@@ -791,6 +949,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"• Uptime: `{escape_markdown(uptime_str, version=2)}`\n"
         f"• Analyses since boot: `{analyses_run}`\n"
         f"{pool_line}"
+        f"{tokens_line}"
         f"{digest_line}"
         f"{email_line}\n"
         "*LLM config* \\(`\\.env`\\)\n"

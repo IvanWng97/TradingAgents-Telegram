@@ -364,3 +364,142 @@ async def test_report_coalesces_duplicate_node_names() -> None:
     await reporter.report("market_analyst")
     await reporter.report("market_analyst")
     assert bot.edit_message_caption.call_count == 1
+
+
+# ─── Token usage accumulation ─────────────────────────────────────────────
+
+
+async def test_token_extraction_handles_openai_shape() -> None:
+    """OpenAI's LLMResult.llm_output['token_usage'] uses prompt_tokens /
+    completion_tokens. Pin the extraction across provider naming."""
+    from types import SimpleNamespace
+
+    from tg_bot.pipeline.progress import _extract_token_usage
+
+    response = SimpleNamespace(
+        llm_output={"token_usage": {"prompt_tokens": 1234, "completion_tokens": 567}},
+        generations=[],
+    )
+    usage = _extract_token_usage(response)
+    assert usage == (1234, 567), usage
+
+
+async def test_token_extraction_handles_anthropic_shape() -> None:
+    """Anthropic uses input_tokens / output_tokens — the other naming.
+    Both must round-trip through `_extract_token_usage` so the bot-wide
+    counter accumulates correctly regardless of which provider runs."""
+    from types import SimpleNamespace
+
+    from tg_bot.pipeline.progress import _extract_token_usage
+
+    response = SimpleNamespace(
+        llm_output={"token_usage": {"input_tokens": 999, "output_tokens": 333}},
+        generations=[],
+    )
+    assert _extract_token_usage(response) == (999, 333)
+
+
+async def test_token_extraction_walks_generation_info_fallback() -> None:
+    """Some providers/integrations stash usage under generation_info per
+    Generation, not at the top-level llm_output. Pin the fallback path."""
+    from types import SimpleNamespace
+
+    from tg_bot.pipeline.progress import _extract_token_usage
+
+    gen = SimpleNamespace(
+        generation_info={"token_usage": {"prompt_tokens": 50, "completion_tokens": 25}},
+    )
+    response = SimpleNamespace(
+        llm_output=None,
+        generations=[[gen]],
+    )
+    assert _extract_token_usage(response) == (50, 25)
+
+
+async def test_token_extraction_returns_none_on_missing_usage() -> None:
+    """No usage data → None, not (0, 0). Lets the accumulator skip the
+    update rather than artificially log a zero call (which would look
+    like a leak in /status)."""
+    from types import SimpleNamespace
+
+    from tg_bot.pipeline.progress import _extract_token_usage
+
+    response = SimpleNamespace(llm_output={}, generations=[])
+    assert _extract_token_usage(response) is None
+    response = SimpleNamespace(llm_output=None, generations=None)
+    assert _extract_token_usage(response) is None
+
+
+async def test_token_accumulator_is_thread_safe() -> None:
+    """`_add_token_usage` runs on analysis worker threads; `get_token_totals`
+    reads on the asyncio loop. Pin that concurrent writes don't drop
+    updates — a torn read would surface as silently-wrong /status output."""
+    import threading
+
+    from tg_bot.pipeline import progress as p
+
+    # Snapshot starting state so other tests' writes don't pollute.
+    with p._token_counter_lock:
+        p._total_input_tokens = 0
+        p._total_output_tokens = 0
+
+    def worker():
+        for _ in range(1000):
+            p._add_token_usage(1, 2)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    in_total, out_total = p.get_token_totals()
+    # 4 threads × 1000 iters × (1, 2) = (4000, 8000).
+    assert in_total == 4000, in_total
+    assert out_total == 8000, out_total
+
+
+async def test_on_llm_end_accumulates_into_bot_wide_totals() -> None:
+    """End-to-end pin: `_DelegatingProgressCallback.on_llm_end` extracts
+    usage from a response and adds it to the bot-wide counter."""
+    from types import SimpleNamespace
+
+    from tg_bot.pipeline import progress as p
+
+    with p._token_counter_lock:
+        p._total_input_tokens = 0
+        p._total_output_tokens = 0
+
+    cb = p._DelegatingProgressCallback()
+    response = SimpleNamespace(
+        llm_output={"token_usage": {"prompt_tokens": 700, "completion_tokens": 300}},
+        generations=[],
+    )
+    cb.on_llm_end(response)
+
+    in_total, out_total = p.get_token_totals()
+    assert in_total == 700
+    assert out_total == 300
+
+
+# ─── estimate_token_cost_usd ──────────────────────────────────────────────
+
+
+async def test_estimate_cost_returns_dollar_amount_for_known_model() -> None:
+    """For a (provider, model) in the price table, the function must
+    return a float dollar amount. 1M input tokens of gpt-4o = $2.50."""
+    from tg_bot.pipeline.analysis import estimate_token_cost_usd
+
+    cost = estimate_token_cost_usd("openai", "gpt-4o", "gpt-4o-mini", 1_000_000, 0)
+    # 50/50 split between gpt-4o (input $2.50/M) and gpt-4o-mini (input
+    # $0.15/M) → average $1.325/M. 1M tokens × $1.325/M = $1.325.
+    assert 1.30 < cost < 1.35, cost
+
+
+async def test_estimate_cost_returns_none_for_unknown_provider() -> None:
+    """No price entry for either model → None. The /status renderer
+    falls back to tokens-only rendering instead of inventing a number."""
+    from tg_bot.pipeline.analysis import estimate_token_cost_usd
+
+    cost = estimate_token_cost_usd("unknown-llm", "ghost-1", "ghost-2", 1000, 500)
+    assert cost is None
