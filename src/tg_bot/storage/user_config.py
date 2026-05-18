@@ -10,6 +10,7 @@ the whole file so they survive indefinitely — operators can delete the
 JSON if they want a clean file."""
 
 import logging
+import re
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -17,6 +18,12 @@ from ._base import JsonStorage
 
 
 logger = logging.getLogger(__name__)
+
+
+# RFC-5322 is a tarpit; this pragmatic regex catches common typos
+# (missing @, double-dot, no TLD) without rejecting valid edge cases.
+# `/email set foo@bar` (no TLD) is rejected; `foo+tag@bar.co.uk` works.
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
 
 class UserConfigStorage(JsonStorage):
@@ -38,6 +45,13 @@ class UserConfigStorage(JsonStorage):
             "tz": None,
             "chat_id": None,
             "tickers": [],
+            # Opt-in email mirror of the digest summary. None = Telegram-only
+            # (default; existing behavior). Set via `/email set <addr>` or
+            # cleared via `/email off`. The fan-out in `run_user_digest`
+            # sends to this address (if set + RESEND_API_KEY present in env)
+            # after the Telegram summary edit. Failures log + swallow —
+            # email is a mirror, never a replacement.
+            "email": None,
         }
 
     def get_digest(self, user_id: str) -> dict[str, Any] | None:
@@ -148,6 +162,39 @@ class UserConfigStorage(JsonStorage):
         bucket = self._data.setdefault(user_id, {})
         digest = bucket.setdefault(self.DIGEST_KEY, self._empty_digest())
         digest["tickers"] = canonical
+        await self._save_async()
+        return True
+
+    async def set_digest_email(self, user_id: str, email: str) -> bool:
+        """Set the digest email mirror address. Validates with `_EMAIL_RE`
+        (pragmatic — catches typos, rejects no-TLD addresses; doesn't try
+        to be RFC-5322 compliant). Returns False on invalid input so the
+        caller can render a "Bad address" message; True on success.
+
+        Doesn't touch `enabled`/`hour`/`tz` — email opt-in is independent
+        of digest scheduling. A user can set an email before configuring
+        any of the schedule fields; the mirror simply won't fire until
+        the digest actually runs.
+        """
+        email = email.strip()
+        if not _EMAIL_RE.match(email):
+            logger.warning("set_digest_email: invalid address %r", email)
+            return False
+        user_id = str(user_id)
+        bucket = self._data.setdefault(user_id, {})
+        digest = bucket.setdefault(self.DIGEST_KEY, self._empty_digest())
+        digest["email"] = email
+        await self._save_async()
+        return True
+
+    async def clear_digest_email(self, user_id: str) -> bool:
+        """Drop the digest email mirror address. Returns True if there
+        was an address to clear, False if the digest block doesn't exist
+        or the address was already unset."""
+        digest = self._data.get(str(user_id), {}).get(self.DIGEST_KEY)
+        if digest is None or digest.get("email") is None:
+            return False
+        digest["email"] = None
         await self._save_async()
         return True
 

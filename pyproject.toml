@@ -37,6 +37,12 @@ dependencies = [
     # The `test_suffix_map_codes_resolve_to_real_calendars` test catches
     # such drift in CI, but pinning <5 lets Dependabot stage the bump.
     "exchange_calendars>=4.5,<5",
+    # Resend transactional-email API client. Used by
+    # `rendering/email_client.py` to mirror the daily digest summary
+    # to the operator's email when they opt in via `/email set <addr>`.
+    # Free tier: 3000 emails/mo, 100/day — comfortably covers a
+    # single-operator deployment. REST + small dep footprint.
+    "resend>=2.0",
     "tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git",
 ]
 

@@ -110,21 +110,33 @@ def _status_line(
         suffix = f" · 📋 {in_wl}/{len(watchlist)} tickers"
     suffix_v2 = escape_markdown(suffix, version=2)
 
+    # Email mirror indicator: shown when configured, hidden otherwise (to
+    # avoid noise for the common Telegram-only case). Display-only — actual
+    # email config lives in `/email` (avoids cluttering the picker with a
+    # ForceReply flow for an address input). Each picker re-render goes
+    # through here so the indicator stays current after `/email set`.
+    email_addr = (digest.get("email") or "").strip()
+    if email_addr:
+        email_suffix = f" · 📧 {email_addr}"
+    else:
+        email_suffix = ""
+    email_v2 = escape_markdown(email_suffix, version=2)
+
     if hour is None:
         # tz set, no hour yet — first-time setup mid-flow.
         tz_v2 = escape_markdown(tz_short(tz), version=2)
-        return f"*Daily Digest* — OFF, time zone {tz_v2}{suffix_v2}"
+        return f"*Daily Digest* — OFF, time zone {tz_v2}{suffix_v2}{email_v2}"
 
     time_label = f"{hour:02d}:00 {tz_short(tz)}"
     time_v2 = escape_markdown(time_label, version=2)
     if not enabled:
-        return f"*Daily Digest* — OFF \\(last set: {time_v2}\\){suffix_v2}"
+        return f"*Daily Digest* — OFF \\(last set: {time_v2}\\){suffix_v2}{email_v2}"
     try:
         delta = humanize_delta(next_fire(hour, tz))
     except ZoneInfoNotFoundError:
         delta = "?"
     delta_v2 = escape_markdown(delta, version=2)
-    return f"*Daily Digest* — ON, {time_v2} \\({delta_v2}\\){suffix_v2}"
+    return f"*Daily Digest* — ON, {time_v2} \\({delta_v2}\\){suffix_v2}{email_v2}"
 
 
 def _hour_keyboard(

@@ -21,10 +21,10 @@ src/tg_bot/
 ├── storage/                     # JSON persistence — terminal in the dep DAG
 │   ├── _base.py                 # JsonStorage (atomic + fsync)
 │   ├── watchlist.py             # WatchlistStorage singleton
-│   └── user_config.py           # UserConfigStorage singleton (digest schedule only)
+│   └── user_config.py           # UserConfigStorage singleton (digest schedule + email mirror opt-in)
 │
 ├── handlers/                    # PTB handlers — register dispatch surfaces
-│   ├── commands.py              # slash commands (/add, /watch, /list, etc.)
+│   ├── commands.py              # slash commands (/add, /watch, /list, /email, etc.)
 │   ├── callbacks.py             # prefix-dispatched callback handlers
 │   ├── analysis_runner.py       # manual /watch + digest fan-out orchestration
 │   └── pickers.py               # shared keyboard/response builders for commands+callbacks
@@ -38,6 +38,7 @@ src/tg_bot/
 └── rendering/                   # data → user-visible output
     ├── formatters.py            # HTML + MarkdownV2 captions (Invariant #4)
     ├── telegraph_client.py      # Telegraph publish (offloaded + resilient)
+    ├── email_client.py          # digest email mirror via Resend (opt-in)
     └── chart.py                 # finviz URL builder
 ```
 
@@ -89,14 +90,14 @@ This section gives reviewers — human or LLM — the structural context needed 
 13. **Cache store** (`cache.store(key, ticker, date, ...)`) — full `final_state` (LangChain messages coerced via `_json_default`); atomic write (tempfile + fsync + rename); stale-date siblings swept *after* the rename succeeds. The store no-ops when `telegraph_url` is falsy (cache-hygiene gate at the write site).
 14. **Final caption edit** + pool release + cancel registry pop.
 
-Digest fan-out (`/digest` JobQueue fire) diverges at steps 1+4: `run_user_digest` intersects `digest.tickers` with the live watchlist (auto-prunes), applies the per-ticker market-calendar gate (`market_calendar.is_market_open_for`) to drop tickers whose exchange is closed today (weekend or holiday via `exchange_calendars`), sends a header carrying `❌ Cancel digest` (one shared cancel_event for in-flight + `Task.cancel()` for pending), fans out via `_analyze_one_for_digest`. If every enrolled ticker's market is closed, the whole fan-out short-circuits with a one-line "Markets closed today" heads-up — no header, no Cancel button, no LLM calls. Partial closures render a "Skipped (markets closed): X, Y" footnote in both the progress and summary views. On `Forbidden` (user blocked the bot): auto-disable + cancel JobQueue job.
+Digest fan-out (`/digest` JobQueue fire) diverges at steps 1+4: `run_user_digest` intersects `digest.tickers` with the live watchlist (auto-prunes), applies the per-ticker market-calendar gate (`market_calendar.is_market_open_for`) to drop tickers whose exchange is closed today (weekend or holiday via `exchange_calendars`), sends a header carrying `❌ Cancel digest` (one shared cancel_event for in-flight + `Task.cancel()` for pending), fans out via `_analyze_one_for_digest`. If every enrolled ticker's market is closed, the whole fan-out short-circuits with a one-line "Markets closed today" heads-up — no header, no Cancel button, no LLM calls. Partial closures render a "Skipped (markets closed): X, Y" footnote in both the progress and summary views. After the Telegram summary edit, if the user opted in via `/email set <addr>` AND the operator wired `RESEND_API_KEY` + `RESEND_FROM` in `.env`, `rendering/email_client.send_digest_email` mirrors the summary as an HTML email with per-ticker sections + `.md` attachments — email is a MIRROR, never a REPLACEMENT, so any send failure logs at WARNING and never affects the Telegram path (wrapped in try/except at BOTH the email_client and call-site layers for defense in depth). On `Forbidden` (user blocked the bot): auto-disable + cancel JobQueue job.
 
 ### State ownership
 
 | State | Location | Lifetime | Persistence | Writer |
 |---|---|---|---|---|
 | Watchlist | `data/watchlist.json` | Forever | Atomic + fsync | `WatchlistStorage` |
-| User config (digest only) | `data/user_config.json` | Forever | Atomic + fsync | `UserConfigStorage` |
+| User config (digest schedule + email opt-in) | `data/user_config.json` | Forever | Atomic + fsync | `UserConfigStorage` |
 | Active LLM config | `.env` (`TRADINGAGENTS_*` + per-provider effort overlay) → `build_config()` | Process (re-read on every call; effectively constant) | Memory | tradingagents `_apply_env_overrides` at import + local `_apply_local_effort_overlay` |
 | Same-day cache entries | `data/result_cache/<slug>/<TICKER>/<date>.json` | Until next-date sweep | Atomic per-file + fsync | `cache.store` |
 | Graph instance pool | `analysis._graph_pool` (single lazy `GraphPool`) | Process (built once, never evicted) | Memory | `analysis._get_or_create_pool` (double-checked locking) |
@@ -122,7 +123,7 @@ Quick reference for tracing how data moves between modules. Detailed contracts l
 | **Cache** | `cache.lookup(key, ticker, today_iso())` → on hit: render directly + skip LLM. On miss: run LLM → publish Telegraph → `cache.store(key, ticker, date, final_state, signal, telegraph_url)`. `store` enforces the hygiene gate (falsy URL → no-op). |
 | **Ticker** | User text → `validate_ticker` (yfinance + `TICKER_RE` from validation.py — same regex `history.py` uses for path-traversal protection) → `watchlist_storage.add_ticker` (uppercase, sorted, atomic write). Picker reads watchlist → `chat_data["watch_selection"]` → `_run_analysis_for_ticker` per ticker. |
 | **Cancel** | `cancel_analysis:<run_id>` callback → `chat_data["analysis_cancels"][run_id]["cancel_event"].set()` (threading) + `["async_event"].set()` (asyncio). Threading event is checked in `ProgressReporter._dispatch` before every LLM call (with `raise_error=True` on the handler to bubble up `CancelledByUserError`); asyncio event races `sem.acquire()` for queued runs. Three race-close checks in the analysis path discard late-arriving Cancel taps. Digest uses the same `cancel_event` field name in its own `digest_cancels` registry. |
-| **Digest** | `user_config.json` (`digest: {enabled, hour_local, tz, chat_id, tickers}`) is the source of truth → `_post_init` rebuilds `JobQueue.run_daily` from storage on every startup → fires `run_user_digest` → intersects `digest.tickers` ∩ live watchlist → `market_calendar.is_market_open_for` drops closed-market tickers → fans out via `_analyze_one_for_digest` (shares the global semaphore with manual `/watch`). All-closed → "Markets closed today" one-liner + return; partial → footnote in progress/summary listing the skipped tickers. |
+| **Digest** | `user_config.json` (`digest: {enabled, hour_local, tz, chat_id, tickers, email}`) is the source of truth → `_post_init` rebuilds `JobQueue.run_daily` from storage on every startup → fires `run_user_digest` → intersects `digest.tickers` ∩ live watchlist → `market_calendar.is_market_open_for` drops closed-market tickers → fans out via `_analyze_one_for_digest` (shares the global semaphore with manual `/watch`). All-closed → "Markets closed today" one-liner + return; partial → footnote in progress/summary listing the skipped tickers. After Telegram summary edit, `rendering/email_client.send_digest_email` mirrors to `digest.email` via Resend if both opt-in (`digest.email` set) and env-config (`RESEND_API_KEY` + `RESEND_FROM`) gates pass; failures logged + swallowed. |
 | **Telegraph publish** | `final_state` → `format_analysis_result_markdown` (7-section packer, drops trailing sections until rendered HTML ≤ 40K) → `markdown.markdown(extensions=["tables"])` → `<img src=chart_url/>` prepended → `publish_to_telegraph(key.telegraph_title(ticker), html, edit_path=path_of_prior_url_or_None)`. The publish layer tries `edit_page` first if `edit_path` set (transient retry then None; non-transient → fall through to `create_page`); else `create_page` directly. |
 
 ### Cross-cutting invariants
@@ -188,6 +189,11 @@ TRADINGAGENTS_GOOGLE_THINKING_LEVEL=      # low/medium/high; google only
 TRADINGAGENTS_RESULTS_DIR=...         # /history reads from here; defaults to ~/.tradingagents/logs
 TRADINGAGENTS_CACHE_DIR=...           # tradingagents data cache; defaults to ~/.tradingagents/cache
 # Plus provider keys for the chosen TRADINGAGENTS_LLM_PROVIDER: OPENAI_API_KEY / DEEPSEEK_API_KEY / ANTHROPIC_API_KEY / etc.
+# Optional: digest email mirror via Resend. Both must be set for `/email`
+# to actually send; otherwise the command short-circuits with a "not configured"
+# notice. Sender domain must be verified in your Resend dashboard.
+RESEND_API_KEY=re_...
+RESEND_FROM=bot@yourdomain.com
 ```
 
 **Docker persistence caveat.** `TRADINGAGENTS_RESULTS_DIR` and `TRADINGAGENTS_CACHE_DIR` default to paths under `~/.tradingagents`, which is ephemeral inside the container. To persist `/history` data and avoid re-fetching yfinance on every restart, set them to paths under `/app/data/` (which is bind-mounted) — for example `TRADINGAGENTS_RESULTS_DIR=/app/data/ta-logs`.
@@ -248,6 +254,8 @@ A change in this repo usually touches more than just code — these surfaces dri
 ## Recently fixed
 
 Curated narrative for the latest non-trivial PR. Older entries graduate into the body sections above (Architecture / Key contracts (parent-level leaves) / nested `src/tg_bot/*/CLAUDE.md` / Known limitations) on the next PR cycle — git log carries the full history.
+
+- **Daily digest mirrors to email via Resend (opt-in per user).** Previously the digest was Telegram-only. Now users can run `/email set foo@bar.com` to enable a mirror; the bot sends an HTML email at digest completion with one section per ticker (signal emoji + inlined finviz chart `<img>` + Telegraph link) and the full `.md` reports attached. New parent-level leaf `src/tg_bot/rendering/email_client.py` owns both the HTML template build AND the Resend SDK send (mirrors `telegraph_client.py`'s shape — destination-coupled). Storage: `digest` schema gains `email: str | None`; new methods `set_digest_email` (regex-validated) + `clear_digest_email`. Commands: `/email` (bare = show), `/email <addr>` (set), `/email off` (clear), `/email test` (synthetic send). UX: `/digest` picker renders a `📧 <addr>` suffix in the status line when configured (display-only — no in-picker config flow); operator commands handle the writes. Email is a **MIRROR, never a REPLACEMENT** — `send_digest_email` swallows its own exceptions and returns False on failure, AND the `run_user_digest` call site wraps it in another try/except (defense in depth) so a future bug in the email module cannot break the Telegram digest. Env gates: `RESEND_API_KEY` + `RESEND_FROM` must both be set; `_post_init` logs a startup WARNING if any user has opted in but env is missing. New dep: `resend>=2.0` (Resend's official Python SDK, sync API wrapped in `asyncio.to_thread`). 24 new tests in `tests/test_email_client.py` (HTML template + signal tally + opt-in gate + send-failure swallow + malformed-response handling) + `tests/test_user_config.py` (email validation + clear semantics) + `tests/test_digest.py` (mirror call + opt-in skip + Telegram-survives-email-failure pin). 280 tests total.
 
 - **Digest skips closed markets via `exchange_calendars` per-ticker gate.** Previously the digest fired every day regardless of whether any ticker's exchange was open — a JST user with all-Tokyo tickers got a stale digest on Tokyo holidays, and US users got Christmas / Thanksgiving / Independence Day digests with day-old data. Now a new parent-level leaf `src/tg_bot/market_calendar.py` resolves each ticker's exchange via yfinance suffix (`.SS`/`.SZ` → XSHG Shanghai, `.HK` → XHKG, `.NS`/`.BO` → XBOM India, `.T` → XTKS Tokyo, `.KS` → XKRX Korea, `.DE` → XETR XETRA, `.L` → XLON, `.PA` → XPAR, `.AX` → XASX, `.TO` → XTSE, `.SI` → XSES, `.TW` → XTAI, `.SA` → BVMF Brazil; no-suffix → XNYS) and calls `is_session(date)`. `run_user_digest` drops closed tickers from the fan-out; if all are closed, it sends a one-line "Markets closed today" heads-up and returns. Partial closures (mixed US+Asia watchlist on a US holiday) render a `⚫️ Skipped (markets closed): X, Y` footnote in both the progress view and the final summary so users see exactly what was dropped and why. Fail-open on calendar errors (data-range exhaustion at far-future dates) — better to run a redundant analysis than swallow the digest. Picked `exchange_calendars` over `pandas_market_calendars` (DataFrame-heavy API for a boolean gate), `holidays` (country-level only, misses Good Friday and exchange-specific observances), and Alpaca's Calendar API (US-only, requires auth, adds an external dependency). 18 new scenarios in `tests/test_market_calendar.py` pin the suffix map, the resolver fail-open, and known closed days (US weekends/Christmas, Shanghai Chinese New Year, Tokyo New Year, India Independence Day); 2 new scenarios in `tests/test_digest.py` pin the all-closed heads-up and partial-closure footnote. `tests/conftest.py` autouse-bypasses the gate (always returns True) so existing fan-out tests don't silently shortcut on weekend runs; targeted tests re-patch for the closed-market scenarios.
 
