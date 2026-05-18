@@ -1,4 +1,4 @@
-"""Command handlers (/start, /help, /add, /del, /watch, /list, /config, /history, /status)."""
+"""Command handlers (/start, /help, /add, /del, /watch, /list, /history, /status)."""
 
 import asyncio
 import logging
@@ -14,6 +14,8 @@ from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
 from tg_bot.pipeline.analysis import (
+    EFFORT_KEY_BY_PROVIDER,
+    build_config,
     check_llm_configured,
     llm_setup_error_message,
     pool_stats,
@@ -29,7 +31,6 @@ from tg_bot.handlers.pickers import (
 from tg_bot.digest import build_digest_response, humanize_delta, next_fire, tz_short
 from tg_bot.history import normalize_ticker
 from tg_bot.storage import (
-    UserConfigStorage,
     user_config_storage,
     watchlist_storage,
 )
@@ -51,12 +52,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lives in /help so this stays short."""
     await update.message.reply_text(
         "👋 Welcome to TradingAgents Bot!\n\n"
-        "First-time setup:\n"
-        "1. /config — pick your LLM provider + deep/quick models\n"
-        "2. /add NVDA AAPL — add tickers to your watchlist\n"
-        "3. /watch — tap Done to run your first analysis\n\n"
+        "LLM provider + models are configured in your `.env` file (single source "
+        "of truth, applies to every user). Check /status to see what's active.\n\n"
+        "First-time setup in Telegram:\n"
+        "1. /add NVDA AAPL — add tickers to your watchlist\n"
+        "2. /watch — tap Done to run your first analysis\n\n"
         "Optional:\n"
-        "• /digest — schedule a daily auto-run (pick which tickers to include)\n"
+        "• /digest — schedule a Mon-Fri auto-run (pick which tickers to include)\n"
         "• /history — browse past analyses\n\n"
         "Full command list: /help\n\n"
         "⭐ Enjoying the bot? Star it on GitHub:\n"
@@ -77,16 +79,17 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "(read-only).\n"
         "/watch - Paginated watchlist picker; tap to select, "
         "Done to run (parallel for multiple).\n"
-        "/config - Pick LLM provider + deep/quick think models.\n"
-        "/digest - Schedule a daily auto-run; pick time zone, hour, "
+        "/digest - Schedule a Mon-Fri auto-run; pick time zone, hour, "
         "and a ticker filter (multi-select).\n"
         "/history [<ticker>] [YYYY-MM-DD] - Browse past analyses. "
         "No args → ticker picker.\n"
         "/refresh <ticker> - Force a fresh re-analysis on a watchlist "
         "ticker, bypassing today's cached result.\n"
-        "/status - Bot uptime, graph pool stats, your current LLM config, "
-        "next digest fire time.\n"
+        "/status - Bot uptime, graph pool stats, active LLM config (from "
+        "`.env`), next digest fire time.\n"
         "/start - Onboarding message.\n\n"
+        "LLM provider + models live in `.env` (TRADINGAGENTS_LLM_PROVIDER, "
+        "TRADINGAGENTS_DEEP_THINK_LLM, etc.). See docs/CONFIGURATION.md.\n\n"
         "⭐ Like the bot? Star it: "
         "https://github.com/IvanWng97/TradingAgents-Telegram",
         disable_web_page_preview=True,
@@ -421,7 +424,7 @@ async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # LLM precheck — same gate as /watch's Done button. A /refresh on an
     # unconfigured user would otherwise produce the same generic auth
     # error the precheck was added to short-circuit.
-    setup_reason = check_llm_configured(user_id, user_config_storage)
+    setup_reason = check_llm_configured()
     if setup_reason is not None:
         await update.message.reply_text(
             llm_setup_error_message(setup_reason), parse_mode="MarkdownV2"
@@ -492,49 +495,6 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
 
 
-async def config_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    current_provider = (
-        user_config_storage.get_llm_provider(user_id) or "default (openai)"
-    )
-    current_deep = user_config_storage.get_llm_model(user_id, "deep") or "default"
-    current_quick = user_config_storage.get_llm_model(user_id, "quick") or "default"
-
-    # Snapshot the current LLM state so a Cancel during the flow can restore it.
-    # `rounds` and `effort` are graph/vocabulary knobs that survive provider
-    # switches but still need to roll back if the user cancels mid-flow.
-    context.user_data["llm_snapshot"] = {
-        "provider": user_config_storage.get_llm_provider(user_id),
-        "deep": user_config_storage.get_llm_model(user_id, "deep"),
-        "quick": user_config_storage.get_llm_model(user_id, "quick"),
-        "rounds": user_config_storage.get_max_debate_rounds(user_id),
-        "effort": user_config_storage.get_effort_level(user_id),
-    }
-
-    providers = UserConfigStorage.VALID_PROVIDERS
-    keyboard = [
-        [
-            InlineKeyboardButton(p.title(), callback_data=f"provider:{p}")
-            for p in providers[i : i + 2]
-        ]
-        for i in range(0, len(providers), 2)
-    ]
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel:config")])
-    # MarkdownV2 code spans suppress most escaping but NOT backticks
-    # inside the value — a backtick would close the span and break parsing.
-    # Defensive escape so an exotic provider/model ID can't break /config.
-    message = (
-        "*LLM Configuration*\n\n"
-        f"Provider: `{escape_markdown(current_provider, version=2)}`\n"
-        f"Deep: `{escape_markdown(current_deep, version=2)}`\n"
-        f"Quick: `{escape_markdown(current_quick, version=2)}`\n\n"
-        "Pick a provider — you'll then choose deep and quick models\\."
-    )
-    await update.message.reply_text(
-        message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2"
-    )
-
-
 def _format_uptime(seconds: int) -> str:
     """Render '2d 3h 14m' style — coarsest non-zero unit downward."""
     days, rem = divmod(seconds, 86400)
@@ -571,8 +531,9 @@ async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Operational snapshot: uptime, # analyses since boot, graph pool size,
-    requesting user's LLM config. Useful for spotting a silently-broken bot
-    (expired LLM key, blown pool cap) without running a full analysis."""
+    active LLM config (from `.env`), and the requesting user's digest schedule.
+    Useful for spotting a silently-broken bot (expired LLM key, blown pool
+    cap, wrong provider in `.env`) without running a full analysis."""
     user_id = update.effective_user.id
 
     start_ts = context.bot_data.get("start_time")
@@ -580,12 +541,22 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     analyses_run = context.bot_data.get("analysis_count", 0)
     pool_keys, pool_instances = pool_stats()
 
-    # Surface a precheck warning so users can spot a missing /config or a
-    # provider-key mismatch without having to fail an actual analysis first.
-    setup_reason = check_llm_configured(user_id, user_config_storage)
-    provider = user_config_storage.get_llm_provider(user_id) or "(not set)"
-    deep = user_config_storage.get_llm_model(user_id, "deep") or "default"
-    quick = user_config_storage.get_llm_model(user_id, "quick") or "default"
+    # Surface a precheck warning so users can spot a missing TRADINGAGENTS_*
+    # config or a provider-key mismatch without having to fail an actual
+    # analysis first. LLM config is bot-wide (one .env, all users) — same
+    # values everyone sees, so `/status` shows the active config from
+    # `build_config()` rather than per-user fields.
+    setup_reason = check_llm_configured()
+    config = build_config()
+    provider = config.get("llm_provider") or "(not set)"
+    deep = config.get("deep_think_llm") or "default"
+    quick = config.get("quick_think_llm") or "default"
+    rounds = config.get("max_debate_rounds") or 1
+    # Effort lives under a per-provider key — read the one matching the
+    # active provider so the display matches what AnalysisConfigKey
+    # actually threads through.
+    effort_key = EFFORT_KEY_BY_PROVIDER.get(provider)
+    effort = (config.get(effort_key) if effort_key else None) or "default"
 
     # Digest line: only shown when fully configured + enabled. Surfaces the
     # next-firing instant + human-readable delta so users can sanity-check
@@ -611,20 +582,31 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # MarkdownV2 code spans (backtick-wrapped) suppress most escaping, but
     # a backtick *in the value itself* would break out of the span and
     # cause `Bad Request: can't parse entities`. Provider/model strings
-    # come from user config (set via picker) so today never contain
-    # backticks — but a future provider name or custom model ID could.
-    # Defensive escape for any string that could carry user-influenced
-    # content. Numeric values stay un-escaped.
+    # come from .env so today never contain backticks — but a future
+    # provider name or custom model ID could. Defensive escape for any
+    # string that could carry external content. Numeric values stay
+    # un-escaped.
+    # Graph pool render: the pool is built lazily on first /watch tap, so
+    # before any analysis runs `pool_stats()` returns (0, 0). Surface that
+    # as "not yet built" rather than "0 instances" — the latter looks like
+    # a broken state. After init: "1 pool, N instance(s) built".
+    if pool_keys == 0:
+        pool_line = "• Graph pool: `not yet built`\n"
+    else:
+        pool_line = f"• Graph pool: `{pool_instances}` instance\\(s\\) built\n"
+
     message = (
         "*Bot status*\n"
         f"• Uptime: `{escape_markdown(uptime_str, version=2)}`\n"
         f"• Analyses since boot: `{analyses_run}`\n"
-        f"• Graph pool: `{pool_keys}` keys, `{pool_instances}` instances\n"
+        f"{pool_line}"
         f"{digest_line}\n"
-        "*Your LLM config*\n"
+        "*LLM config* \\(`\\.env`\\)\n"
         f"• Provider: `{escape_markdown(provider, version=2)}`\n"
         f"• Deep: `{escape_markdown(deep, version=2)}`\n"
-        f"• Quick: `{escape_markdown(quick, version=2)}`"
+        f"• Quick: `{escape_markdown(quick, version=2)}`\n"
+        f"• Rounds: `{rounds}`\n"
+        f"• Effort: `{escape_markdown(effort, version=2)}`"
     )
     if setup_reason is not None:
         message += f"\n\n⚠️ `{escape_markdown(setup_reason, version=2)}`"

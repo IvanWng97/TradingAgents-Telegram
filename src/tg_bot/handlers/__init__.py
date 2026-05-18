@@ -4,7 +4,6 @@ from .callbacks import button_callback
 from .commands import (
     add_ticker,
     add_via_reply,
-    config_cmd,
     del_ticker,
     digest_cmd,
     help_cmd,
@@ -23,7 +22,6 @@ __all__ = [
     "add_via_reply",
     "del_ticker",
     "list_watchlist",
-    "config_cmd",
     "digest_cmd",
     "history_cmd",
     "list_cmd",

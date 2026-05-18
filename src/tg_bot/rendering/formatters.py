@@ -581,7 +581,7 @@ def format_short_message(
 
     `config_summary` (optional) renders a one-line trace of the LLM
     config — provider/deep-model plus rounds/effort suffix when
-    customized via /config.
+    customized via `.env`.
 
     All user-supplied strings are escaped via `html.escape`; LLM
     markdown is run through `markdown_to_telegram_html` which whitelists

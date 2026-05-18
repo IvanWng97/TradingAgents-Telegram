@@ -36,7 +36,7 @@ from telegram.helpers import escape_markdown
 from tg_bot.pipeline import cache as result_cache
 from tg_bot.pipeline.analysis import (
     TRADINGAGENTS_AVAILABLE,
-    build_user_config,
+    build_config,
     check_llm_configured,
     llm_setup_error_message,
     run_trading_analysis,
@@ -255,9 +255,9 @@ async def _run_analysis_for_ticker(
     # analysis paths share three structural surfaces that must drift
     # together: (1) the race-close cancel-event checks after `to_thread`
     # and after Telegraph publish, (2) the `AnalysisConfigKey` cache-key
-    # construction via `build_user_config → from_config`, (3) the
-    # Telegraph title via `key.telegraph_title(ticker)`. If you change
-    # one path's handling of any of these, change the other to match.
+    # construction via `build_config → from_config`, (3) the Telegraph
+    # title via `key.telegraph_title(ticker)`. If you change one path's
+    # handling of any of these, change the other to match.
     #
     # /status counter — bumped only AFTER the user actually received
     # something (cache-hit photo OR fresh-run progress photo). A previous
@@ -269,7 +269,7 @@ async def _run_analysis_for_ticker(
     # (same provider + deep + quick + rounds + effort + ticker, any user),
     # render directly from the cached final state and skip the LLM run,
     # the progress flow, the Telegraph round-trip, and the cancel plumbing.
-    config = build_user_config(user_id, user_config_storage)
+    config = build_config()
     # Construct AnalysisConfigKey once per request — drives the cache
     # lookup/store, the caption "via" line, the Telegraph title, and
     # (transitively) the graph pool. Threading the instance avoids the
@@ -526,8 +526,6 @@ async def _run_analysis_for_ticker(
         final_state, signal = await asyncio.to_thread(
             run_trading_analysis,
             ticker,
-            user_id,
-            user_config_storage,
             reporter,
         )
         logger.debug(
@@ -761,14 +759,14 @@ async def _analyze_one_for_digest(
     # analysis paths share three structural surfaces that must drift
     # together: (1) the race-close cancel-event checks after `to_thread`
     # and after Telegraph publish, (2) the `AnalysisConfigKey` cache-key
-    # construction via `build_user_config → from_config`, (3) the
-    # Telegraph title via `key.telegraph_title(ticker)`. If you change
-    # one path's handling of any of these, change the other to match.
+    # construction via `build_config → from_config`, (3) the Telegraph
+    # title via `key.telegraph_title(ticker)`. If you change one path's
+    # handling of any of these, change the other to match.
     #
     # Cache short-circuit before acquiring a semaphore slot — a cached
     # result needs no LLM call, so we shouldn't burn a slot or trigger
     # the "Starting…" reporter event.
-    config = build_user_config(user_id, user_config_storage)
+    config = build_config()
     key = AnalysisConfigKey.from_config(config)
     today_iso = result_cache.today_iso()
     cached = result_cache.lookup(key, ticker, today_iso)
@@ -801,8 +799,6 @@ async def _analyze_one_for_digest(
             final_state, signal = await asyncio.to_thread(
                 run_trading_analysis,
                 ticker,
-                user_id,
-                user_config_storage,
                 reporter,
             )
         except Exception:
@@ -1003,9 +999,10 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
 
     # Belt-and-suspenders LLM precheck: the manual ▶ Run now path also
     # gates upstream, but the daily JobQueue callback comes through here
-    # too — and a user who enabled digest before running /config (or with
-    # a stale .env) would otherwise see a wall of identical 401 errors.
-    reason = check_llm_configured(user_id, user_config_storage)
+    # too — and a user who enabled digest before TRADINGAGENTS_LLM_PROVIDER
+    # was set (or with a stale .env) would otherwise see a wall of
+    # identical 401 errors.
+    reason = check_llm_configured()
     if reason is not None:
         logger.info(
             "digest: skipping user %s — LLM not configured (%s)", user_id, reason

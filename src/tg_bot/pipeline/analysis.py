@@ -5,7 +5,6 @@ import logging
 import os
 import queue
 import threading
-from collections import OrderedDict
 from datetime import date
 
 from telegram.helpers import escape_markdown
@@ -20,10 +19,100 @@ from tg_bot.pipeline.progress import (
 logger = logging.getLogger(__name__)
 
 
-# Maps the provider name (as picked via /config) → the env var that holds
-# its API key. Used by `check_llm_configured` to give users a targeted
-# error before the LLM call 401s with a generic message. Keep in sync
-# with `.env.example` and the catalog in `MODEL_OPTIONS` below.
+# Per-provider key for the "thinking effort" knob. Vocabulary
+# (low/medium/high) is shared across providers but the config-dict key
+# differs. Providers absent from this map have no effort knob — we
+# silently skip applying it.
+#
+# Single source of truth for which provider stores effort where.
+# `AnalysisConfigKey.from_config` iterates `.values()` so a new provider
+# adding a thinking knob only needs to register its key here.
+# Defined before `_LOCAL_EFFORT_OVERRIDES` (which derives env-var names
+# from these keys) — keeps the dict the single source for both surfaces.
+EFFORT_KEY_BY_PROVIDER = {
+    "openai": "openai_reasoning_effort",
+    "anthropic": "anthropic_effort",
+    "google": "google_thinking_level",
+}
+
+
+# Mapping from env var name → DEFAULT_CONFIG key for the per-provider
+# reasoning-effort knob. Upstream tradingagents' `_ENV_OVERRIDES` covers
+# provider/models/debate-rounds but NOT these provider-specific keys, so
+# we overlay them locally to keep `.env` as the single source of truth.
+# Derived from `EFFORT_KEY_BY_PROVIDER` so a new provider added there
+# automatically gets env-var overlay support — no second edit needed.
+_LOCAL_EFFORT_OVERRIDES = {
+    f"TRADINGAGENTS_{config_key.upper()}": config_key
+    for config_key in EFFORT_KEY_BY_PROVIDER.values()
+}
+
+
+def _apply_local_effort_overlay(config: dict, env: "dict | None" = None) -> None:
+    """Overlay our local `TRADINGAGENTS_*_EFFORT` env vars onto `config`
+    in place. Mirrors upstream's `_apply_env_overrides` pattern. Only
+    writes when the env var is non-empty — leaves the upstream default
+    in place otherwise (which is None for all three effort keys today).
+
+    `env` arg is for testability (default: `os.environ`). Callers in
+    production pass nothing; tests pass a controlled mapping."""
+    src = env if env is not None else os.environ
+    for env_var, config_key in _LOCAL_EFFORT_OVERRIDES.items():
+        raw = src.get(env_var)
+        if raw:
+            config[config_key] = raw
+
+
+def build_config() -> dict:
+    """Return a fresh copy of the active tradingagents config dict.
+
+    Source of truth: tradingagents' `DEFAULT_CONFIG` (already overlaid
+    by upstream's `_ENV_OVERRIDES` at lib import time for provider /
+    models / debate-rounds / etc.) + our local effort overlay applied
+    immediately after the import below for the per-provider effort keys
+    upstream doesn't expose. `.env` is the single source of truth — there
+    is no per-user override path.
+
+    Both overlays run ONCE at module-import time, not on every call.
+    Changing env vars at run time (e.g. a test patching `os.environ`)
+    will NOT be reflected — production env vars don't change post-start,
+    and tests that need to round-trip env values should call
+    `_apply_local_effort_overlay(config, env=...)` directly with an
+    explicit env dict.
+
+    Returns a **shallow** copy: top-level scalars are safe to mutate,
+    but if `DEFAULT_CONFIG` ever gains a nested mutable (list / dict),
+    mutating it through the returned dict would leak back into the
+    global. Today every consumed key is a scalar — keep it that way.
+
+    Returns an empty dict when tradingagents isn't available (caller
+    paths short-circuit via `TRADINGAGENTS_AVAILABLE` before reaching here)."""
+    return dict(DEFAULT_CONFIG) if DEFAULT_CONFIG else {}
+
+
+def get_current_config_key():
+    """Return the `AnalysisConfigKey` for the active env-derived config.
+
+    Computed each call rather than cached — `build_config()` + dataclass
+    init is microseconds, and avoiding the cache means tests that
+    monkeypatch env vars don't need a reset hook. Production env vars
+    don't change at runtime (restart required), so the result is
+    effectively constant.
+
+    Returns None when tradingagents isn't available."""
+    if DEFAULT_CONFIG is None:
+        return None
+    from tg_bot.pipeline.config_key import AnalysisConfigKey
+
+    return AnalysisConfigKey.from_config(build_config())
+
+
+# Maps the provider name (set via `TRADINGAGENTS_LLM_PROVIDER` in `.env`)
+# → the env var that holds its API key. Used by `check_llm_configured`
+# to give users a targeted error before the LLM call 401s with a generic
+# message. Keep in sync with `.env.example` and verified against upstream
+# `tradingagents.llm_clients.api_key_env.PROVIDER_API_KEY_ENV` by
+# `test_provider_env_keys_match_upstream`.
 PROVIDER_ENV_KEYS: dict[str, str | None] = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
@@ -31,29 +120,36 @@ PROVIDER_ENV_KEYS: dict[str, str | None] = {
     "xai": "XAI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "qwen": "DASHSCOPE_API_KEY",
+    # qwen-cn / glm-cn / minimax-cn use distinct CN-suffixed env vars upstream
+    # — not shared with the non-CN siblings. Verified via tradingagents'
+    # `PROVIDER_API_KEY_ENV`; pinned by `test_provider_env_keys_match_upstream`.
+    "qwen-cn": "DASHSCOPE_CN_API_KEY",
     "glm": "ZHIPU_API_KEY",
+    "glm-cn": "ZHIPU_CN_API_KEY",
     "minimax": "MINIMAX_API_KEY",
-    "ollama": None,  # local; no key needed
-    # openrouter has no MODEL_OPTIONS catalog yet so the /config picker
-    # still short-circuits (run falls back to DEFAULT_CONFIG models, which
-    # openrouter happens to accept), but tradingagents' OpenAIClient
-    # natively supports the provider — reads OPENROUTER_API_KEY + routes
-    # to https://openrouter.ai/api/v1. Listing the env key here makes the
-    # precheck surface "openrouter picked but OPENROUTER_API_KEY not set"
-    # instead of the cryptic downstream "OPENAI_API_KEY missing" error
-    # from the openai SDK when the env isn't loaded.
+    "minimax-cn": "MINIMAX_CN_API_KEY",
+    "ollama": None,  # local; no key needed (point at remote via OLLAMA_BASE_URL)
+    # openrouter routes via tradingagents' OpenAIClient to
+    # https://openrouter.ai/api/v1; listing it here makes `check_llm_configured`
+    # surface "OPENROUTER_API_KEY not set" instead of the cryptic downstream
+    # "OPENAI_API_KEY missing" from the openai SDK when the env isn't loaded.
     "openrouter": "OPENROUTER_API_KEY",
     # azure: intentionally absent — no native tradingagents support yet.
 }
 
 
-def check_llm_configured(user_id, user_config_storage) -> str | None:
-    """Return None if the user is ready to run analyses, or a short reason
+def check_llm_configured(config: dict | None = None) -> str | None:
+    """Return None if the bot is ready to run analyses, or a short reason
     string explaining what to fix. Callers wrap the reason in their own
-    user-facing rendering (full message vs `/status` line)."""
-    provider = user_config_storage.get_llm_provider(user_id)
+    user-facing rendering (full message vs `/status` line).
+
+    `config` defaults to `build_config()` — pass an explicit dict only in
+    tests that need to check a specific provider/env combination."""
+    if config is None:
+        config = build_config()
+    provider = config.get("llm_provider")
     if not provider:
-        return "no provider — tap /config"
+        return "no provider — set TRADINGAGENTS_LLM_PROVIDER in .env"
     env_var = PROVIDER_ENV_KEYS.get(provider)
     if env_var and not os.environ.get(env_var):
         return f"{provider} picked but {env_var} not set in .env"
@@ -74,7 +170,8 @@ def llm_setup_error_message(reason: str) -> str:
     if reason.startswith("no provider"):
         return (
             "⚠️ *No LLM provider configured*\\.\n\n"
-            "Tap /config to pick a provider \\+ deep/quick models, then try again\\."
+            "Set `TRADINGAGENTS_LLM_PROVIDER` in your `\\.env` "
+            "\\(see `docs/CONFIGURATION\\.md`\\) and restart the bot\\."
         )
     # Mode B: provider picked, but matching env var missing. Format is
     # "deepseek picked but DEEPSEEK_API_KEY not set in .env".
@@ -85,30 +182,25 @@ def llm_setup_error_message(reason: str) -> str:
     )
 
 
-# Pool of TradingAgentsGraph instances keyed by (provider, deep, quick).
+# Pool of TradingAgentsGraph instances bound to the active env config.
 # TradingAgentsGraph init is expensive (langgraph compile, LLM clients, memory
 # log), and the graph mutates self.ticker/self.curr_state during propagate()
 # — two concurrent calls on the same instance would race.
 #
 # A pool gives us both: parallel runs (each gets its own instance) AND
 # caching across runs (instances are returned to the pool on completion).
-# Per-key pool size is `Config.MAX_CONCURRENT_ANALYSES` — the asyncio
-# semaphore prevents over-subscription, so the pool's blocking branch is
-# unreachable. Key-level LRU at GRAPH_CACHE_MAX evicts the oldest pool
-# (and all its instances) when too many distinct LLM-config keys exist.
-# Floor at MAX_CONCURRENT_ANALYSES so an evicted pool can't be holding an
-# in-use instance: with N concurrent runs across N distinct configs and
-# the cache capped below N, the first-evicted pool's `finally:` would
-# return its instance to a queue belonging to a dropped pool — silent leak.
-# Sized at `max(8, 2 * MAX_CONCURRENT_ANALYSES)`: the 2x multiplier gives
-# headroom for `/config` churn (provider/depth switches) so a user toggling
-# between 2–3 configs in a session doesn't thrash builds (each rebuild is
-# ~500ms — LangChain client + ChromaDB init). Floor of 8 covers the default
-# `MAX_CONCURRENT_ANALYSES=3` case where 2x=6 still felt tight under multi-
-# provider experimentation. Cost: each cached pool pins an LLM client +
-# ChromaDB embedder; ~30–60 MB resident per entry, so the cap holds memory
-# bounded.
-GRAPH_CACHE_MAX = max(8, 2 * Config.MAX_CONCURRENT_ANALYSES)
+# Pool size is `Config.MAX_CONCURRENT_ANALYSES` — the asyncio semaphore
+# upstream prevents over-subscription, so the pool's blocking branch is
+# unreachable.
+#
+# Before the env-config refactor this was a dict-of-pools keyed by
+# `AnalysisConfigKey` with an LRU + `GRAPH_CACHE_MAX` floor (so per-user
+# `/config` switches didn't thrash ~500ms rebuilds). With `.env` as the
+# single source of truth, only one config exists per process lifetime, so
+# the dict-of-pools degenerated to a single-key dict — collapsed here to
+# a single lazy `GraphPool` variable. Re-introducing multi-config support
+# would just re-add the dict wrapper; the `GraphPool` class itself stays
+# unchanged.
 
 
 class GraphPool:
@@ -189,16 +281,20 @@ class GraphPool:
             )
 
 
-_graph_pool: "OrderedDict[tuple[str, str, str, int, str | None], GraphPool]" = (
-    OrderedDict()
-)
+_graph_pool: "GraphPool | None" = None
 _pool_mutex = threading.Lock()
 
 
 def pool_stats() -> tuple[int, int]:
-    """Snapshot of (num_keys, total_instances) for the /status command."""
+    """Snapshot of (num_pools, total_instances) for the /status command.
+
+    Returns `(0, 0)` before the lazy init, then `(1, N)` where N is the
+    number of `TradingAgentsGraph` instances the single pool has built so
+    far (bounded by `Config.MAX_CONCURRENT_ANALYSES`)."""
     with _pool_mutex:
-        return (len(_graph_pool), sum(p.size for p in _graph_pool.values()))
+        if _graph_pool is None:
+            return (0, 0)
+        return (1, _graph_pool.size)
 
 
 # Tradingagents is treated as an external dependency.  When it isn't
@@ -206,40 +302,6 @@ def pool_stats() -> tuple[int, int]:
 TRADINGAGENTS_AVAILABLE = False
 TradingAgentsGraph = None
 DEFAULT_CONFIG = None
-MODEL_OPTIONS: dict = {}
-
-
-# Curated starter catalog for openrouter. tradingagents' upstream
-# `MODEL_OPTIONS` doesn't yet ship openrouter; we patch it in at import
-# time below so /config can let users actually pick a model instead of
-# silently falling back to DEFAULT_CONFIG (the openai catalog — works
-# today against openrouter's permissive routing, but accidental and
-# fragile). Mix of free + paid + reasoning so the first entry (default
-# fallback) is a free model good for testing.
-_OPENROUTER_MODELS: dict[str, list[tuple[str, str]]] = {
-    "quick": [
-        (
-            "Llama 3.3 70B (free, rate-limited)",
-            "meta-llama/llama-3.3-70b-instruct:free",
-        ),
-        ("GPT-4o Mini — Fast, cheap", "openai/gpt-4o-mini"),
-        ("Claude 3.5 Haiku — Fast", "anthropic/claude-3.5-haiku"),
-        ("DeepSeek v3 — Cheap, capable", "deepseek/deepseek-chat"),
-    ],
-    "deep": [
-        (
-            "Llama 3.3 70B (free, rate-limited)",
-            "meta-llama/llama-3.3-70b-instruct:free",
-        ),
-        ("Claude Sonnet 4.5 — Strong reasoning", "anthropic/claude-sonnet-4.5"),
-        ("GPT-4o — Reliable, multimodal", "openai/gpt-4o"),
-        ("DeepSeek R1 — Cheap reasoning", "deepseek/deepseek-r1"),
-    ],
-}
-
-_OPENROUTER_MODEL_MIGRATIONS = {
-    "anthropic/claude-3.5-sonnet": "anthropic/claude-sonnet-4.5",
-}
 
 
 try:
@@ -247,129 +309,36 @@ try:
         TradingAgentsGraph as _TradingAgentsGraph,
     )
     from tradingagents.default_config import DEFAULT_CONFIG as _DEFAULT_CONFIG
-    from tradingagents.llm_clients.model_catalog import MODEL_OPTIONS as _MODEL_OPTIONS
 
     TradingAgentsGraph = _TradingAgentsGraph
     DEFAULT_CONFIG = _DEFAULT_CONFIG
-    # Defensive copy + augment with openrouter so a future upstream that
-    # ships its own openrouter entry takes precedence (we only fill the
-    # gap when the key is absent).
-    MODEL_OPTIONS = dict(_MODEL_OPTIONS)
-    if "openrouter" not in MODEL_OPTIONS:
-        MODEL_OPTIONS["openrouter"] = _OPENROUTER_MODELS
+    # Apply our local effort env-var overlay onto DEFAULT_CONFIG. Upstream's
+    # own `_apply_env_overrides` has already run inside tradingagents at its
+    # module load; this closes the gap for the per-provider effort keys
+    # upstream's `_ENV_OVERRIDES` list doesn't cover. Once applied, every
+    # consumer of `DEFAULT_CONFIG` (build_config, AnalysisConfigKey.from_config)
+    # sees the env-derived effort.
+    #
+    # **Run-order matters**: we run AFTER upstream, so if upstream ever adds
+    # `TRADINGAGENTS_OPENAI_REASONING_EFFORT` / `TRADINGAGENTS_ANTHROPIC_EFFORT` /
+    # `TRADINGAGENTS_GOOGLE_THINKING_LEVEL` to its own `_ENV_OVERRIDES`, OUR
+    # write wins (last writer). The effective behavior is "this overlay is
+    # the source of truth for the three keys in `EFFORT_KEY_BY_PROVIDER`."
+    # If upstream coverage lands and we want to defer to it, drop the
+    # provider's entry from `EFFORT_KEY_BY_PROVIDER` instead of hoisting
+    # this call before the import — the test in `test_pipeline_analysis.py`
+    # pins the derivation contract.
+    _apply_local_effort_overlay(DEFAULT_CONFIG)
     TRADINGAGENTS_AVAILABLE = True
 except ImportError as e:
     logger.warning("TradingAgents not available: %s", e)
 
 
-def get_model_options(provider: str, mode: str) -> list[tuple[str, str]]:
-    """Return [(label, model_id), ...] for provider+mode, excluding 'custom' sentinels.
-
-    Returns an empty list for providers not in the catalog (azure only —
-    openrouter is patched in above with a curated starter list).
-    """
-    options = MODEL_OPTIONS.get(provider, {}).get(mode, [])
-    return [(label, value) for label, value in options if value != "custom"]
-
-
-def has_model_catalog(provider: str) -> bool:
-    return bool(MODEL_OPTIONS.get(provider))
-
-
-def _resolve_models(
-    user_id, user_config_storage, provider
-) -> tuple[str | None, str | None]:
-    """Pick (deep, quick) for this user+provider; falls back to the catalog's
-    first entry when unset. (None, None) for providers without a catalog.
-
-    Also rewrites known-stale OpenRouter model IDs so existing saved user
-    configs survive provider-side slug retirements.
-    """
-    deep = user_config_storage.get_llm_model(user_id, "deep")
-    quick = user_config_storage.get_llm_model(user_id, "quick")
-    if provider == "openrouter":
-        deep = _OPENROUTER_MODEL_MIGRATIONS.get(deep, deep)
-        quick = _OPENROUTER_MODEL_MIGRATIONS.get(quick, quick)
-    if not deep:
-        deep_options = get_model_options(provider, "deep")
-        deep = deep_options[0][1] if deep_options else None
-    if not quick:
-        quick_options = get_model_options(provider, "quick")
-        quick = quick_options[0][1] if quick_options else None
-    return deep, quick
-
-
-# Per-provider key for the "thinking effort" knob. Vocabulary
-# (low/medium/high) is shared across providers but the config-dict key
-# differs. Providers absent from this map have no effort knob — we
-# silently skip applying it.
-#
-# Single source of truth for which provider stores effort where.
-# `AnalysisConfigKey.from_config` iterates `.values()` so a new provider
-# adding a thinking knob only needs to register its key here.
-EFFORT_KEY_BY_PROVIDER = {
-    "openai": "openai_reasoning_effort",
-    "anthropic": "anthropic_effort",
-    "google": "google_thinking_level",
-}
-
-
-def build_user_config(user_id, user_config_storage) -> dict:
-    """Resolve the tradingagents config dict for this user — same logic
-    `run_trading_analysis` uses, exposed so cache-key construction agrees
-    with the actual run. Returns DEFAULT_CONFIG if the user hasn't picked
-    a provider via /config (matches the run's silent fallback)."""
-    user_provider = user_config_storage.get_llm_provider(user_id)
-    config = DEFAULT_CONFIG.copy()
-    if user_provider:
-        config["llm_provider"] = user_provider
-        deep_model, quick_model = _resolve_models(
-            user_id, user_config_storage, user_provider
-        )
-        if deep_model:
-            config["deep_think_llm"] = deep_model
-        if quick_model:
-            config["quick_think_llm"] = quick_model
-        if not (deep_model and quick_model):
-            logger.warning(
-                "No catalog models for provider %r; using DEFAULT_CONFIG models "
-                "(%s / %s) — the provider's API may reject these.",
-                user_provider,
-                config["deep_think_llm"],
-                config["quick_think_llm"],
-            )
-    # Quality knobs — applied independently of provider since the user's
-    # last picked rounds/effort survive provider switches. Rounds always
-    # gets written (graph-level param). Effort only applied when the
-    # current provider has a corresponding key.
-    config["max_debate_rounds"] = user_config_storage.get_max_debate_rounds(user_id)
-    effort = user_config_storage.get_effort_level(user_id)
-    if effort and user_provider:
-        provider_key = EFFORT_KEY_BY_PROVIDER.get(user_provider)
-        if provider_key:
-            # Defensive: clear OTHER providers' effort keys before writing
-            # this run's. `DEFAULT_CONFIG.copy()` above carries whatever
-            # tradingagents ships — if a future upstream version sets a
-            # different provider's key by default, `AnalysisConfigKey.
-            # from_config` iterates EFFORT_KEY_BY_PROVIDER.values() and
-            # returns the first truthy value (Invariant #1 footgun;
-            # pinned by `test_from_config_stale_provider_effort_key_wins_first`
-            # in tests/test_config_key.py). Popping siblings here closes
-            # the upstream side of that footgun.
-            for stale_key in EFFORT_KEY_BY_PROVIDER.values():
-                if stale_key != provider_key:
-                    config.pop(stale_key, None)
-            config[provider_key] = effort
-    return config
-
-
 def run_trading_analysis(
     ticker: str,
-    user_id,
-    user_config_storage,
     reporter: ProgressReporter | None = None,
 ):
-    """Run TradingAgentsGraph for `ticker` using the user's stored LLM config.
+    """Run TradingAgentsGraph for `ticker` using the `.env`-derived config.
 
     `reporter`, when supplied, receives per-step caption updates via the
     delegating LangChain callback baked into every graph. The reporter is
@@ -387,9 +356,7 @@ def run_trading_analysis(
     if not TRADINGAGENTS_AVAILABLE:
         return None, None
 
-    config = build_user_config(user_id, user_config_storage)
-
-    pool = _get_or_create_pool(config)
+    pool = _get_or_create_pool(build_config())
     set_reporter(reporter)
     logger.debug("[%s] propagate START", ticker)
     try:
@@ -406,46 +373,36 @@ def run_trading_analysis(
 
 
 def _get_or_create_pool(config: dict) -> GraphPool:
-    """Return the pool of TradingAgentsGraph instances for this LLM-config
-    combo, creating it if not seen yet. Pool builder closes over `config`
-    so each newly-built instance binds the right provider+models.
+    """Return the single process-wide GraphPool, lazily building on first
+    call. Pool builder closes over `config` so newly-built instances bind
+    the right `.env`-derived provider/models/rounds/effort.
 
-    Pool key includes `max_debate_rounds` and the active effort value
-    because tradingagents bakes both into the graph at construction time
-    (`max_debate_rounds` → `ConditionalLogic.__init__`; effort → LLM
-    client kwargs). Without this, a User-A run with rounds=1 would be
-    reused by a User-B request with rounds=3 silently — User B's "Thorough"
-    selection produces a Fast-mode graph with no error surfaced.
-
-    LRU-evicts the oldest key when GRAPH_CACHE_MAX is exceeded — that drops
-    all instances for that key (each pinned an LLM client + ChromaDB).
-    """
-    # `AnalysisConfigKey` is the single source of truth for the
-    # (provider, deep, quick, rounds, effort) tuple — same dataclass the
-    # cache uses for its slug and the formatters use for the caption.
-    # Using it here keeps invariant #1 enforced structurally: any future
-    # knob added to the dataclass flows into the pool key automatically,
-    # so there's no manual sync risk.
-    from tg_bot.pipeline.config_key import AnalysisConfigKey
-
-    key = AnalysisConfigKey.from_config(config)
+    Renamed from the legacy dict-of-pools function but kept the
+    `(config)` signature so the few callers + test fixtures don't need
+    parameter changes. Subsequent calls IGNORE the `config` arg — the
+    pool is bound to the config that built it (and after a restart the
+    new pool picks up the new `.env`)."""
+    global _graph_pool
+    if _graph_pool is not None:
+        return _graph_pool
 
     def _builder():
-        logger.info("Building TradingAgentsGraph for %s", key.slug())
+        from tg_bot.pipeline.config_key import AnalysisConfigKey
+
+        slug = AnalysisConfigKey.from_config(config).slug()
+        logger.info("Building TradingAgentsGraph for %s", slug)
         return TradingAgentsGraph(
             debug=Config.TA_DEBUG,
             config=config,
             callbacks=[delegating_progress_callback],
         )
 
+    # Double-checked locking — cheap fast-path above, mutex for the
+    # single init below. Workers don't race-build.
     with _pool_mutex:
-        pool = _graph_pool.get(key)
-        if pool is None:
-            pool = GraphPool(max_size=Config.MAX_CONCURRENT_ANALYSES, builder=_builder)
-            _graph_pool[key] = pool
-            while len(_graph_pool) > GRAPH_CACHE_MAX:
-                evicted_key, _ = _graph_pool.popitem(last=False)
-                logger.info("Evicting graph pool for %s (LRU)", evicted_key.slug())
-        else:
-            _graph_pool.move_to_end(key)
-        return pool
+        if _graph_pool is None:
+            _graph_pool = GraphPool(
+                max_size=Config.MAX_CONCURRENT_ANALYSES,
+                builder=_builder,
+            )
+        return _graph_pool

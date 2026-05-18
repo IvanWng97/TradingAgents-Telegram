@@ -128,6 +128,35 @@ def test_from_config_missing_provider_falls_back() -> None:
     assert k.quick == "default"
 
 
+def test_from_config_effort_resolution_first_truthy_wins_across_providers() -> None:
+    """Effort lookup iterates `EFFORT_KEY_BY_PROVIDER.values()` in insertion
+    order (`openai_reasoning_effort` → `anthropic_effort` → `google_thinking_level`)
+    and returns the first truthy value, regardless of the active `llm_provider`.
+
+    Pinning this matters because two simultaneously-armed effort keys (an
+    operator who set both `TRADINGAGENTS_OPENAI_REASONING_EFFORT` and
+    `TRADINGAGENTS_ANTHROPIC_EFFORT` while `provider=anthropic`) silently
+    pick openai's value for the cache slug + pool key + caption — misattribution
+    that is documented in `pipeline/CLAUDE.md` as a documented gotcha. If a
+    future refactor changes `EFFORT_KEY_BY_PROVIDER` insertion order, the
+    winning key changes too; this test fails loudly so the consequence is
+    visible at review time."""
+    # provider=anthropic but openai's effort key is also armed → openai wins
+    # because it appears first in EFFORT_KEY_BY_PROVIDER iteration order.
+    k = AnalysisConfigKey.from_config(
+        {
+            "llm_provider": "anthropic",
+            "deep_think_llm": "claude-opus-4-7",
+            "quick_think_llm": "claude-sonnet-4-6",
+            "openai_reasoning_effort": "high",
+            "anthropic_effort": "low",
+        }
+    )
+    assert k.effort == "high", (
+        f"expected openai's 'high' to win first-truthy iteration, got {k.effort!r}"
+    )
+
+
 # ---------- slug() ----------
 
 
@@ -251,3 +280,46 @@ def test_telegraph_title_differs_across_configs_preventing_collision() -> None:
 
 
 # ---------- ordering ----------
+
+# ─── caption rendering — moved from test_user_config.py ─────────────────
+
+
+async def test_config_summary_default() -> None:
+    out = AnalysisConfigKey.from_config(
+        {
+            "llm_provider": "openai",
+            "deep_think_llm": "gpt-4o",
+            "quick_think_llm": "o4-mini",
+            "max_debate_rounds": 1,
+        }
+    ).caption()
+    assert out == "openai · gpt-4o/o4-mini", out
+
+
+async def test_config_summary_custom_rounds() -> None:
+    out = AnalysisConfigKey.from_config(
+        {
+            "llm_provider": "deepseek",
+            "deep_think_llm": "deepseek-v4-pro",
+            "quick_think_llm": "deepseek-v4-flash",
+            "max_debate_rounds": 2,
+        }
+    ).caption()
+    # Both models present, rounds suffix appended, no effort marker.
+    assert "deepseek-v4-pro/deepseek-v4-flash" in out, out
+    assert "· r2" in out, out
+    assert "e=" not in out, out
+
+
+async def test_config_summary_with_effort() -> None:
+    out = AnalysisConfigKey.from_config(
+        {
+            "llm_provider": "anthropic",
+            "deep_think_llm": "claude-sonnet-4",
+            "quick_think_llm": "claude-haiku-4",
+            "max_debate_rounds": 2,
+            "anthropic_effort": "high",
+        }
+    ).caption()
+    assert "claude-sonnet-4/claude-haiku-4" in out, out
+    assert "· r2 · e=high" in out, out

@@ -1,4 +1,13 @@
-"""Per-user LLM configuration: provider + deep/quick model + digest schedule."""
+"""Per-user digest schedule storage.
+
+Previously this module also held per-user LLM provider / model / rounds /
+effort selections (driven by the `/config` Telegram command). That was
+removed in the env-config refactor — LLM settings now flow from `.env`
+via `TRADINGAGENTS_*` env vars (process-wide, single source of truth).
+Existing `user_config.json` files may still carry the legacy LLM fields;
+they're inert (no method reads them) and harmless. Each save rewrites
+the whole file so they survive indefinitely — operators can delete the
+JSON if they want a clean file."""
 
 import logging
 from typing import Any
@@ -11,133 +20,9 @@ logger = logging.getLogger(__name__)
 
 
 class UserConfigStorage(JsonStorage):
-    """Per-user LLM provider, model selections, and daily-digest schedule, keyed by user_id."""
+    """Per-user daily-digest schedule, keyed by user_id."""
 
-    VALID_PROVIDERS = [
-        "openai",
-        "google",
-        "anthropic",
-        "xai",
-        "deepseek",
-        "qwen",
-        "glm",
-        "minimax",
-        "openrouter",
-        "ollama",
-        "azure",
-    ]
-    MODEL_KEYS = {"deep": "deep_think_llm", "quick": "quick_think_llm"}
-    ROUNDS_KEY = "max_debate_rounds"
-    EFFORT_KEY = "effort_level"
-    # All LLM-config keys cleared together by `clear()` (e.g. on /config Cancel
-    # rollback). `set_llm_provider` only clears the provider-specific keys
-    # (deep/quick) since rounds + effort are vocabulary that carries cleanly
-    # across providers.
-    LLM_KEYS = frozenset({"llm_provider", *MODEL_KEYS.values(), ROUNDS_KEY, EFFORT_KEY})
-    VALID_ROUNDS = (1, 2, 3)
-    VALID_EFFORT_LEVELS = ("low", "medium", "high")
-    # Providers that have a "thinking effort" knob in tradingagents'
-    # DEFAULT_CONFIG. Used to gate the /config picker step — for providers
-    # without one (deepseek, qwen, glm, minimax, ollama, xai) the step is
-    # skipped.
-    PROVIDERS_WITH_EFFORT = frozenset({"openai", "anthropic", "google"})
     DIGEST_KEY = "digest"
-
-    async def set_llm_provider(self, user_id: str, provider: str) -> bool:
-        """Set provider for a user; clears any stored deep/quick models since
-        they are provider-specific and don't carry across providers."""
-        provider = provider.strip().lower()
-        if provider not in self.VALID_PROVIDERS:
-            return False
-        user_id = str(user_id)
-        bucket = self._data.setdefault(user_id, {})
-        bucket["llm_provider"] = provider
-        for key in self.MODEL_KEYS.values():
-            bucket.pop(key, None)
-        await self._save_async()
-        return True
-
-    def get_llm_provider(self, user_id: str) -> str | None:
-        return self._data.get(str(user_id), {}).get("llm_provider")
-
-    async def set_llm_model(self, user_id: str, mode: str, model: str) -> bool:
-        """mode must be 'deep' or 'quick'."""
-        key = self.MODEL_KEYS.get(mode)
-        if key is None:
-            return False
-        user_id = str(user_id)
-        self._data.setdefault(user_id, {})[key] = model
-        await self._save_async()
-        return True
-
-    def get_llm_model(self, user_id: str, mode: str) -> str | None:
-        key = self.MODEL_KEYS.get(mode)
-        if key is None:
-            return None
-        return self._data.get(str(user_id), {}).get(key)
-
-    # ─── debate rounds + effort level ───────────────────────────────────
-    # Quality knobs from tradingagents' DEFAULT_CONFIG. `max_debate_rounds`
-    # controls bull-vs-bear analyst cycles before the Research Manager
-    # decides; `effort_level` is a provider-agnostic vocabulary that
-    # `build_user_config` maps to the appropriate provider key
-    # (openai_reasoning_effort / anthropic_effort / google_thinking_level).
-    # Higher rounds = more nuanced thesis, ~2× cost on the analyst nodes.
-    # Higher effort = deeper thinking on reasoning-capable models.
-
-    async def set_max_debate_rounds(self, user_id: str, rounds: int) -> bool:
-        if rounds not in self.VALID_ROUNDS:
-            return False
-        user_id = str(user_id)
-        self._data.setdefault(user_id, {})[self.ROUNDS_KEY] = int(rounds)
-        await self._save_async()
-        return True
-
-    def get_max_debate_rounds(self, user_id: str) -> int:
-        """Returns the user's stored value, or 1 (DEFAULT_CONFIG) if unset."""
-        v = self._data.get(str(user_id), {}).get(self.ROUNDS_KEY)
-        return int(v) if isinstance(v, int) and v in self.VALID_ROUNDS else 1
-
-    async def set_effort_level(self, user_id: str, level: str | None) -> bool:
-        """`level` in {'low', 'medium', 'high'} or None to clear back to
-        provider default."""
-        if level is None:
-            user_id = str(user_id)
-            bucket = self._data.get(user_id)
-            if bucket and self.EFFORT_KEY in bucket:
-                bucket.pop(self.EFFORT_KEY)
-                await self._save_async()
-            return True
-        level = level.strip().lower()
-        if level not in self.VALID_EFFORT_LEVELS:
-            return False
-        user_id = str(user_id)
-        self._data.setdefault(user_id, {})[self.EFFORT_KEY] = level
-        await self._save_async()
-        return True
-
-    def get_effort_level(self, user_id: str) -> str | None:
-        v = self._data.get(str(user_id), {}).get(self.EFFORT_KEY)
-        return v if v in self.VALID_EFFORT_LEVELS else None
-
-    async def clear(self, user_id: str) -> bool:
-        """Remove LLM keys for a user; preserves non-LLM blocks (e.g., digest)
-        so a /config Cancel rollback doesn't wipe an unrelated digest schedule.
-        Drops the user entry entirely if nothing else is left in it."""
-        user_id = str(user_id)
-        bucket = self._data.get(user_id)
-        if not bucket:
-            return False
-        removed = False
-        for key in list(bucket.keys()):
-            if key in self.LLM_KEYS:
-                bucket.pop(key)
-                removed = True
-        if not bucket:
-            del self._data[user_id]
-        if removed:
-            await self._save_async()
-        return removed
 
     # ─── digest schedule ────────────────────────────────────────────────
 

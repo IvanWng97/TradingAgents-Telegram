@@ -8,7 +8,8 @@
 #   1. Telegram bot token (from @BotFather)
 #   2. Your Telegram user ID (from @userinfobot)
 #   3. Telegraph access token (auto-create or paste your own)
-#   4. Pick an LLM provider + paste its API key
+#   4. Pick an LLM provider + paste its API key (canonical deep/quick models
+#      written to .env — edit later to switch)
 #   5. Drop a configured .env + docker-compose.yml in ./tradingagents-telegram
 #   6. Pull the prebuilt Docker image
 # After it finishes, the script prints the exact `docker compose up -d` command
@@ -110,21 +111,30 @@ fi
 
 # ─── Step 4 — LLM provider + API key ─────────────────────────────────────
 step "Step 4/4 — LLM provider + API key"
-echo "  Pick the provider you'll use most. You can switch later via /config."
-echo "  Cost per analysis: deepseek ≈ \$0.01, openai (gpt-4o) ≈ \$0.20, anthropic (sonnet) ≈ \$0.40."
+echo "  Pick the provider you'll use most. Edit .env later to switch."
+echo "  Cost per analysis varies by provider — deepseek is cheapest, frontier"
+echo "  models (gpt-5.x, claude-opus, gemini-pro) cost \$0.20-\$0.40+ per run."
 echo
+# Each row: name|api_key_env|deep_think_model|quick_think_model
+# Models are the canonical first catalog entry from upstream tradingagents;
+# they're written to .env so the bot uses them out of the box. Edit .env
+# afterward to pick different models from the upstream catalog.
 PROVIDERS=(
-    "deepseek:DEEPSEEK_API_KEY"
-    "openai:OPENAI_API_KEY"
-    "anthropic:ANTHROPIC_API_KEY"
-    "google:GOOGLE_API_KEY"
-    "xai:XAI_API_KEY"
-    "qwen:DASHSCOPE_API_KEY"
-    "glm:ZHIPUAI_API_KEY"
-    "ollama:"
+    "deepseek|DEEPSEEK_API_KEY|deepseek-v4-pro|deepseek-v4-flash"
+    "openai|OPENAI_API_KEY|gpt-5.5|gpt-5.4-mini"
+    "anthropic|ANTHROPIC_API_KEY|claude-opus-4-7|claude-sonnet-4-6"
+    "google|GOOGLE_API_KEY|gemini-3.1-pro-preview|gemini-3-flash-preview"
+    "xai|XAI_API_KEY|grok-4.20-reasoning|grok-4.20-non-reasoning"
+    "qwen|DASHSCOPE_API_KEY|qwen3.6-plus|qwen3.6-flash"
+    "qwen-cn|DASHSCOPE_CN_API_KEY|qwen3.6-plus|qwen3.6-flash"
+    "glm|ZHIPU_API_KEY|glm-5.1|glm-5-turbo"
+    "glm-cn|ZHIPU_CN_API_KEY|glm-5.1|glm-5-turbo"
+    "minimax|MINIMAX_API_KEY|MiniMax-M2.7|MiniMax-M2.7-highspeed"
+    "minimax-cn|MINIMAX_CN_API_KEY|MiniMax-M2.7|MiniMax-M2.7-highspeed"
+    "ollama||glm-4.7-flash:latest|qwen3:latest"
 )
 for i in "${!PROVIDERS[@]}"; do
-    NAME="${PROVIDERS[$i]%%:*}"
+    IFS='|' read -r NAME _ _ _ <<< "${PROVIDERS[$i]}"
     printf "  %d) %s\n" "$((i+1))" "$NAME"
 done
 while :; do
@@ -135,8 +145,7 @@ while :; do
     fi
     warn "Out of range."
 done
-PROVIDER_NAME="${PROVIDERS[$((CHOICE-1))]%%:*}"
-KEY_NAME="${PROVIDERS[$((CHOICE-1))]##*:}"
+IFS='|' read -r PROVIDER_NAME KEY_NAME DEEP_MODEL QUICK_MODEL <<< "${PROVIDERS[$((CHOICE-1))]}"
 if [[ -n "$KEY_NAME" ]]; then
     while :; do
         ask "Paste your $KEY_NAME (input hidden):"
@@ -148,7 +157,7 @@ if [[ -n "$KEY_NAME" ]]; then
 else
     PROVIDER_LINE="# ollama — runs locally, no API key needed"
 fi
-ok "Provider: $PROVIDER_NAME."
+ok "Provider: $PROVIDER_NAME (deep=$DEEP_MODEL, quick=$QUICK_MODEL)."
 
 # ─── Materialize files ───────────────────────────────────────────────────
 step "Writing config"
@@ -164,6 +173,12 @@ TELEGRAPH_ACCESS_TOKEN=$TG_GRAPH_TOKEN
 ALLOWED_USER_IDS=$TG_USER_ID
 
 $PROVIDER_LINE
+
+# tradingagents config — .env is the single source of truth (no /config UI).
+# Edit these to pick different catalog entries, then restart the bot.
+TRADINGAGENTS_LLM_PROVIDER=$PROVIDER_NAME
+TRADINGAGENTS_DEEP_THINK_LLM=$DEEP_MODEL
+TRADINGAGENTS_QUICK_THINK_LLM=$QUICK_MODEL
 
 # Persist /history + yfinance cache via the bind-mounted ./data volume.
 TRADINGAGENTS_RESULTS_DIR=/app/data/ta-logs
@@ -193,12 +208,13 @@ ${BOLD}Next:${NC}
 ${BOLD}Then in Telegram, message your bot:${NC}
 
   /start                       # confirm auth works
-  /config                      # pick deep + quick think models for $PROVIDER_NAME
+  /status                      # see active LLM provider + models from .env
   /add NVDA AAPL               # add tickers
   /watch                       # tap Done to run your first analysis
   /digest                      # (optional) schedule a daily auto-run
 
 ${YELLOW}Tip:${NC} if /start says "Not authorized", your user ID isn't in ALLOWED_USER_IDS.
      Edit $HERE/.env, then \`docker-compose up -d\` to restart.
+     Edit TRADINGAGENTS_DEEP_THINK_LLM / TRADINGAGENTS_QUICK_THINK_LLM to switch models.
 
 EOF

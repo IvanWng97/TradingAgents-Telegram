@@ -46,8 +46,9 @@ WINDOWS: dict[str, tuple[float, float]] = {}
 _WINDOWS_LOCK = threading.Lock()
 
 
-def fake_busy_analysis(ticker, user_id, user_config_storage, reporter=None, **kw):
-    """Sleeps for RUN_DURATION (releases GIL), records window."""
+def fake_busy_analysis(ticker, reporter=None, **kw):
+    """Sleeps for RUN_DURATION (releases GIL), records window. Signature
+    matches `run_trading_analysis(ticker, reporter)` post-refactor."""
     start = time.monotonic()
     time.sleep(RUN_DURATION)
     end = time.monotonic()

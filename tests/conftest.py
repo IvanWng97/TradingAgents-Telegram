@@ -2,7 +2,9 @@
 
 Pytest discovers `tests/test_*.py` files via the default rule (no
 `python_files` override needed; see `[tool.pytest.ini_options]` in
-`pyproject.toml`). 240 `async def test_*` / `def test_*` scenarios.
+`pyproject.toml`). `async def test_*` / `def test_*` scenarios — run
+`.venv/bin/python -m pytest tests/ --collect-only -q | tail -1` for the
+live count.
 
 Cross-cutting setup carried here:
 
@@ -26,6 +28,17 @@ import os
 import sys
 
 import pytest
+
+
+# Bot-wide concurrency cap for tests. Set BEFORE any test module loads
+# `Config` so the lazy semaphore picks up the right value. Was previously
+# at the top of test_runner.py, but pytest's collection order varies with
+# the set of files collected — when test_pipeline_analysis.py was added,
+# Config could end up cached at the default (3) before test_runner.py's
+# module-top assignment ran, breaking test_basic_queue's "5 analyzing +
+# 5 queued" assertion in non-deterministic ways. conftest is the only
+# place guaranteed to fire before any test_*.py module loads.
+os.environ.setdefault("TG_BOT_MAX_CONCURRENT_ANALYSES", "5")
 
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

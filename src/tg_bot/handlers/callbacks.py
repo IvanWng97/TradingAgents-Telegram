@@ -2,9 +2,8 @@
 
 The analysis-execution pipeline (cache lookup → semaphore → propagate →
 Telegraph publish → render) and the digest scheduler live in
-`analysis_runner.py`. This module owns the picker handlers
-(`/config`, watchlist, history, digest config) and the `button_callback`
-prefix dispatcher.
+`analysis_runner.py`. This module owns the picker handlers (watchlist,
+history, digest) and the `button_callback` prefix dispatcher.
 """
 
 import asyncio
@@ -16,8 +15,6 @@ from telegram.helpers import escape_markdown
 
 from tg_bot.pipeline.analysis import (
     check_llm_configured,
-    get_model_options,
-    has_model_catalog,
     llm_setup_error_message,
 )
 from tg_bot.digest import build_digest_response
@@ -38,157 +35,9 @@ from tg_bot.handlers.pickers import (
     build_watchlist_response,
 )
 from tg_bot.storage import user_config_storage, watchlist_storage
-from tg_bot.storage.user_config import UserConfigStorage
 
 
 logger = logging.getLogger(__name__)
-
-
-def _model_keyboard(mode: str, provider: str) -> InlineKeyboardMarkup:
-    """One button per row — provider model labels can be long. A trailing
-    Cancel row lets users bail out of the multi-step config flow without
-    finishing every selection."""
-    keyboard = [
-        [InlineKeyboardButton(label, callback_data=f"{mode}:{provider}:{model_id}")]
-        for label, model_id in get_model_options(provider, mode)
-    ]
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel:config")])
-    return InlineKeyboardMarkup(keyboard)
-
-
-async def _handle_provider(query, user_id: int, provider: str) -> None:
-    if not await user_config_storage.set_llm_provider(user_id, provider):
-        await query.edit_message_text(
-            f"Failed to set provider to `{provider}`\\.", parse_mode="MarkdownV2"
-        )
-        return
-    if not has_model_catalog(provider):
-        await query.edit_message_text(
-            f"Provider set to `{provider}`\\.\n\n"
-            "This provider needs a custom model ID — model selection isn't "
-            f"wired up for it yet, so the run will use {escape_markdown('DEFAULT_CONFIG', version=2)} "
-            "models\\.",
-            parse_mode="MarkdownV2",
-        )
-        return
-    await query.edit_message_text(
-        f"Provider: `{provider}`\n\nChoose a *deep\\-think* model:",
-        parse_mode="MarkdownV2",
-        reply_markup=_model_keyboard("deep", provider),
-    )
-
-
-async def _handle_deep(query, user_id: int, provider: str, model: str) -> None:
-    await user_config_storage.set_llm_model(user_id, "deep", model)
-    await query.edit_message_text(
-        f"Provider: `{provider}`\nDeep: `{model}`\n\nChoose a *quick\\-think* model:",
-        parse_mode="MarkdownV2",
-        reply_markup=_model_keyboard("quick", provider),
-    )
-
-
-async def _handle_quick(
-    query, context: ContextTypes.DEFAULT_TYPE, user_id: int, provider: str, model: str
-) -> None:
-    await user_config_storage.set_llm_model(user_id, "quick", model)
-    deep = user_config_storage.get_llm_model(user_id, "deep")
-    # Two more steps follow: rounds (always) → effort (only for providers
-    # with a thinking knob). Snapshot stays live until effort step (or the
-    # rounds step for providers without effort) finishes.
-    current_rounds = user_config_storage.get_max_debate_rounds(user_id)
-    rows = [
-        [
-            InlineKeyboardButton(
-                f"{'✅ ' if n == current_rounds else ''}{n} — {label}",
-                callback_data=f"rounds:{n}",
-            )
-        ]
-        for n, label in [
-            (1, "Fast (default, 1× cost)"),
-            (2, "Balanced (~1.5× cost)"),
-            (3, "Thorough (~2× cost)"),
-        ]
-    ]
-    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel:config")])
-    await query.edit_message_text(
-        f"Provider: `{provider}`\nDeep: `{deep}`\nQuick: `{model}`\n\n"
-        "How many *bull/bear debate rounds*?\n"
-        "Higher \\= more nuanced thesis, more LLM calls\\.",
-        parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
-
-
-async def _handle_rounds(
-    query, context: ContextTypes.DEFAULT_TYPE, user_id: int, rounds: int
-) -> None:
-    if not await user_config_storage.set_max_debate_rounds(user_id, rounds):
-        # Out-of-range value somehow reached us — bail without ending the flow.
-        await query.answer("Invalid rounds value.", show_alert=False)
-        return
-    provider = user_config_storage.get_llm_provider(user_id)
-    deep = user_config_storage.get_llm_model(user_id, "deep")
-    quick = user_config_storage.get_llm_model(user_id, "quick")
-    # Skip the effort step for providers without a thinking knob — for them
-    # rounds is the last step, so finalize here.
-    if provider not in UserConfigStorage.PROVIDERS_WITH_EFFORT:
-        context.user_data.pop("llm_snapshot", None)
-        await query.edit_message_text(
-            "LLM configuration saved\\.\n\n"
-            f"Provider: `{provider}`\nDeep: `{deep}`\nQuick: `{quick}`\n"
-            f"Rounds: `{rounds}`",
-            parse_mode="MarkdownV2",
-        )
-        return
-    current_effort = user_config_storage.get_effort_level(user_id)
-    rows = [
-        [
-            InlineKeyboardButton(
-                f"{'✅ ' if (current_effort is None) else ''}Default (provider-decided)",
-                callback_data="effort:none",
-            )
-        ]
-    ]
-    for level in UserConfigStorage.VALID_EFFORT_LEVELS:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    f"{'✅ ' if level == current_effort else ''}{level.title()}",
-                    callback_data=f"effort:{level}",
-                )
-            ]
-        )
-    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel:config")])
-    await query.edit_message_text(
-        f"Provider: `{provider}`\nDeep: `{deep}`\nQuick: `{quick}`\n"
-        f"Rounds: `{rounds}`\n\n"
-        "Reasoning *effort* on the deep\\-think model?\n"
-        "Higher \\= deeper thinking on reasoning models, more tokens\\.",
-        parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
-
-
-async def _handle_effort(
-    query, context: ContextTypes.DEFAULT_TYPE, user_id: int, raw_level: str
-) -> None:
-    level = None if raw_level == "none" else raw_level
-    if not await user_config_storage.set_effort_level(user_id, level):
-        await query.answer("Invalid effort level.", show_alert=False)
-        return
-    provider = user_config_storage.get_llm_provider(user_id)
-    deep = user_config_storage.get_llm_model(user_id, "deep")
-    quick = user_config_storage.get_llm_model(user_id, "quick")
-    rounds = user_config_storage.get_max_debate_rounds(user_id)
-    # Effort is the last step — drop the rollback snapshot.
-    context.user_data.pop("llm_snapshot", None)
-    effort_display = level if level else "default"
-    await query.edit_message_text(
-        "LLM configuration saved\\.\n\n"
-        f"Provider: `{provider}`\nDeep: `{deep}`\nQuick: `{quick}`\n"
-        f"Rounds: `{rounds}`\nEffort: `{effort_display}`",
-        parse_mode="MarkdownV2",
-    )
 
 
 async def _handle_select_toggle(
@@ -286,11 +135,11 @@ async def _handle_done(query, context: ContextTypes.DEFAULT_TYPE, user_id: int) 
     # state-coherent state for the user re-running the command).
     mode = context.chat_data.get("watch_mode", "watch")
 
-    # Fail fast before launching N parallel tasks: a missing /config or
-    # missing API key would otherwise produce N identical generic auth
-    # errors, one per ticker. Single message at the entry point is much
-    # cleaner UX.
-    reason = check_llm_configured(user_id, user_config_storage)
+    # Fail fast before launching N parallel tasks: a missing
+    # TRADINGAGENTS_LLM_PROVIDER or its API key in .env would otherwise
+    # produce N identical generic auth errors, one per ticker. Single
+    # message at the entry point is much cleaner UX.
+    reason = check_llm_configured()
     if reason is not None:
         await query.edit_message_text(
             llm_setup_error_message(reason), parse_mode="MarkdownV2"
@@ -452,44 +301,9 @@ async def _handle_cancel(
 ) -> None:
     """Bail out of a multi-step flow. `what` names the flow being cancelled.
 
-    For `config`, restores the (provider, deep, quick) snapshot taken when
-    /config was first invoked, so any provider/model writes that happened
-    mid-flow are rolled back.
-
     For `del`, just dismisses the picker (each ❌ tap committed already).
     """
-    if what == "config":
-        snapshot = context.user_data.pop("llm_snapshot", None)
-        if snapshot is not None:
-            if snapshot["provider"]:
-                # Restore prior provider; set_llm_provider clears deep/quick,
-                # so re-write them after.
-                await user_config_storage.set_llm_provider(
-                    user_id, snapshot["provider"]
-                )
-                if snapshot["deep"]:
-                    await user_config_storage.set_llm_model(
-                        user_id, "deep", snapshot["deep"]
-                    )
-                if snapshot["quick"]:
-                    await user_config_storage.set_llm_model(
-                        user_id, "quick", snapshot["quick"]
-                    )
-            else:
-                # No prior provider — wipe whatever was just written.
-                await user_config_storage.clear(user_id)
-            # Restore rounds + effort regardless of provider — they're
-            # provider-agnostic, so they survived the wipe above and any
-            # mid-flow rounds:/effort: write needs rolling back too.
-            await user_config_storage.set_max_debate_rounds(
-                user_id, snapshot.get("rounds") or 1
-            )
-            await user_config_storage.set_effort_level(user_id, snapshot.get("effort"))
-        await query.edit_message_text(
-            "❌ LLM configuration cancelled — previous settings restored\\.",
-            parse_mode="MarkdownV2",
-        )
-    elif what == "del":
+    if what == "del":
         await query.edit_message_text("✅ Done\\.", parse_mode="MarkdownV2")
     elif what in ("watch", "hist", "digest"):
         if what == "watch":
@@ -592,8 +406,8 @@ async def _handle_digest(
         # Defensive gate: a stale callback button could fire `tt:*` for a
         # user who has no digest configured yet (no tz/hour). The picker UI
         # never exposes the ticker screen before tz is set, but a hand-
-        # crafted button or a /config Cancel mid-edit could land here. Decline
-        # and toast — never let a partial digest write happen.
+        # crafted button or a back-button race mid-edit could land here.
+        # Decline and toast — never let a partial digest write happen.
         digest = user_config_storage.get_digest(user_id)
         if not digest or not digest.get("tz"):
             await query.answer("Set a time zone first via /digest.", show_alert=True)
@@ -656,7 +470,7 @@ async def _handle_digest(
         # Fail fast on missing LLM setup before fan-out — otherwise every
         # ticker's analysis would 401 the same way and the digest message
         # would be a wall of identical errors.
-        reason = check_llm_configured(user_id, user_config_storage)
+        reason = check_llm_configured()
         if reason is not None:
             try:
                 await context.bot.send_message(
@@ -696,23 +510,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_id = update.effective_user.id
     data = query.data or ""
 
-    if data.startswith("provider:"):
-        await _handle_provider(query, user_id, data.split(":", 1)[1])
-    elif data.startswith("deep:"):
-        _, provider, model = data.split(":", 2)
-        await _handle_deep(query, user_id, provider, model)
-    elif data.startswith("quick:"):
-        _, provider, model = data.split(":", 2)
-        await _handle_quick(query, context, user_id, provider, model)
-    elif data.startswith("rounds:"):
-        try:
-            rounds = int(data.split(":", 1)[1])
-        except ValueError:
-            return
-        await _handle_rounds(query, context, user_id, rounds)
-    elif data.startswith("effort:"):
-        await _handle_effort(query, context, user_id, data.split(":", 1)[1])
-    elif data.startswith("multi:"):
+    if data.startswith("multi:"):
         await _handle_select_toggle(query, context, user_id, data.split(":", 1)[1])
     elif data.startswith("wsel:"):
         await _handle_select_bulk(query, context, user_id, data.split(":", 1)[1])
