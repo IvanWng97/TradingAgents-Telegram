@@ -53,6 +53,11 @@ Two cross-cutting concerns live here:
 2. **`_disable_digest_llm_precheck`** (session-scoped, autouse) — no-ops `check_llm_configured` on `tg_bot.handlers.callbacks` AND `tg_bot.handlers.analysis_runner` (the two modules that bind it as a module-level import). Digest fan-out / cancel / progress tests assume the precheck is a pass-through; without this they'd all have to arm a provider + matching env var.
    - **Important asymmetry:** `tg_bot.pipeline.analysis.check_llm_configured` itself is NOT patched. `test_llm_precheck_*` scenarios call the source function directly and expect real behavior. Only the rebound module-level references in the two handler modules are no-op'd.
 
+3. **`_force_markets_open_for_digest_tests`** (session-scoped, autouse) — patches `tg_bot.handlers.analysis_runner.is_market_open_for` to unconditionally return True. Without it, every digest fan-out test would silently take the "all markets closed" branch when pytest runs on Sat/Sun or a US holiday — the existing assertions on the fan-out flow would mysteriously fail with no edits/messages on weekends.
+   - **Same asymmetry as #2:** `tg_bot.market_calendar.is_market_open_for` (the source) is NOT patched. `test_market_calendar.py` calls the source function directly and expects real exchange-calendar behavior.
+   - Tests that DO exercise the calendar gate's effect on the fan-out (closed markets, partial closures) re-patch `runner.is_market_open_for` themselves inside a try/finally — see `test_digest.py::test_fanout_all_markets_closed_sends_oneliner_and_skips` and `test_fanout_partial_market_closure_drops_only_closed`.
+   - **Watch when adding new fan-out tests:** if you're writing a new test that touches `run_user_digest`, the bypass is active by default. To verify whether a future-you's test depends on the bypass being there, temporarily replace the fixture body with `yield` (no patch) and re-run — if the test depends on the gate being open, it'll fail.
+
 ## "New behavior needs a scenario" — discipline rule
 
 A new callback prefix, storage field, command, dataflow path, or Invariant from the root CLAUDE.md each need **at least one assertion** in `tests/test_*.py`. Non-negotiable — treat "no test scenario" as a merge blocker.

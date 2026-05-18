@@ -52,6 +52,7 @@ from tg_bot.rendering.formatters import (
     format_short_message,
 )
 from tg_bot.history import load_historical_state
+from tg_bot.market_calendar import is_market_open_for
 from tg_bot.pipeline.progress import (
     TOTAL_STEPS,
     CancelledByUserError,
@@ -875,6 +876,7 @@ def _format_digest_progress(
     watchlist: list[str],
     status: dict[str, object],
     safe_date: str,
+    skipped_closed: list[str] | None = None,
 ) -> str:
     """In-progress view (HTML). `status[ticker]` is one of:
       - "pending"           → ⏳ TICKER
@@ -886,6 +888,10 @@ def _format_digest_progress(
     fan-out is at any point.
 
     `safe_date` is pre-escaped (html.escape) by the caller.
+
+    `skipped_closed` (optional) names tickers dropped by the per-ticker
+    market-calendar gate. When non-empty, renders a one-line footnote
+    so users see why a ticker isn't in today's run.
     """
     done = sum(1 for s in status.values() if not (s == "pending" or _is_analyzing(s)))
     n = len(watchlist)
@@ -910,6 +916,9 @@ def _format_digest_progress(
             lines.append(f"❌ <b>{ticker_h}</b> — error")
         else:
             lines.append(_completed_digest_row(ticker_h, s))  # type: ignore[arg-type]
+    if skipped_closed:
+        skipped_h = ", ".join(_html_escape(t) for t in skipped_closed)
+        lines.append(f"\n<i>⚫️ Skipped (markets closed): {skipped_h}</i>")
     return "\n".join(lines)
 
 
@@ -921,11 +930,15 @@ def _format_digest_summary(
     watchlist: list[str],
     status: dict[str, object],
     safe_date: str,
+    skipped_closed: list[str] | None = None,
 ) -> str:
     """Final view (HTML): signal-emoji per row + Telegraph link,
     watchlist order.
 
-    `safe_date` is pre-escaped (html.escape) by the caller."""
+    `safe_date` is pre-escaped (html.escape) by the caller.
+
+    `skipped_closed` (optional) renders the same "markets closed" footnote
+    as the progress view so the final message keeps the explanation."""
     lines = [f"🌙 <b>Daily Digest</b> — {safe_date}\n"]
     failed = cancelled = 0
     n = len(watchlist)
@@ -951,6 +964,9 @@ def _format_digest_summary(
         tally_parts.append(f"{failed} failed")
     if tally_parts:
         lines.append(f"\n<i>{', '.join(tally_parts)} of {n}</i>")
+    if skipped_closed:
+        skipped_h = ", ".join(_html_escape(t) for t in skipped_closed)
+        lines.append(f"\n<i>⚫️ Skipped (markets closed): {skipped_h}</i>")
     return "\n".join(lines)
 
 
@@ -989,7 +1005,8 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
     the JobQueue doesn't keep retrying every day.
     """
     full_watchlist = watchlist_storage.get_watchlist(user_id)
-    today = date.today().isoformat()
+    today_date = date.today()
+    today = today_date.isoformat()
     # All digest captions are HTML mode now — escape for HTML, not MarkdownV2.
     safe_date = _html_escape(today)
 
@@ -1059,6 +1076,44 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
             logger.debug("digest reminder send failed: %s", e)
         return
 
+    # Calendar gate: per-ticker exchange-session check via `is_market_open_for`.
+    # Drop tickers whose exchange is closed today (weekend OR holiday) — they
+    # would just produce stale yesterday-data analyses. Watchlist order is
+    # preserved so the user-visible row order stays stable across days. If
+    # EVERY ticker's market is closed, the whole digest short-circuits with
+    # a one-line heads-up (operators wanted explicit "closed" affordance, not
+    # silent skip, per PR #71 scope discussion).
+    skipped_closed = [t for t in watchlist if not is_market_open_for(t, today_date)]
+    watchlist = [t for t in watchlist if t not in set(skipped_closed)]
+
+    if not watchlist:
+        logger.info(
+            "digest: all %d enrolled tickers' markets closed on %s — sending heads-up",
+            len(skipped_closed),
+            today,
+        )
+        skipped_h = ", ".join(_html_escape(t) for t in skipped_closed)
+        try:
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"🌙 <b>Daily Digest</b> — {safe_date}\n\n"
+                    f"⚫️ <i>Markets closed today — no digest.</i>\n"
+                    f"<i>Skipped: {skipped_h}</i>"
+                ),
+                parse_mode="HTML",
+            )
+        except Forbidden:
+            logger.warning(
+                "digest: user %s blocked the bot, disabling on closed-markets",
+                user_id,
+            )
+            await user_config_storage.disable_digest(user_id)
+            cancel_digest_job(application, user_id)
+        except Exception as e:
+            logger.debug("digest closed-markets send failed: %s", e)
+        return
+
     n = len(watchlist)
     logger.info(
         "digest: launching for user %s (%d/%d tickers after filter)",
@@ -1080,7 +1135,7 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
     try:
         header = await application.bot.send_message(
             chat_id=chat_id,
-            text=_format_digest_progress(watchlist, status, safe_date),
+            text=_format_digest_progress(watchlist, status, safe_date, skipped_closed),
             parse_mode="HTML",
         )
     except Forbidden:
@@ -1148,7 +1203,9 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
                 if blocked:
                     return
                 last_edit_at = time.monotonic()
-                text = _format_digest_progress(watchlist, status, safe_date)
+                text = _format_digest_progress(
+                    watchlist, status, safe_date, skipped_closed
+                )
                 try:
                     # Re-attach the cancel button on every edit — Telegram
                     # drops reply_markup unless re-sent with each edit.
@@ -1231,7 +1288,7 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
         await application.bot.edit_message_text(
             chat_id=chat_id,
             message_id=header.message_id,
-            text=_format_digest_summary(watchlist, status, safe_date),
+            text=_format_digest_summary(watchlist, status, safe_date, skipped_closed),
             parse_mode="HTML",
             reply_markup=None,
         )

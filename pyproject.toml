@@ -24,6 +24,19 @@ dependencies = [
     # doesn't ship system tzdata, so ZoneInfo("America/Los_Angeles") would
     # raise ZoneInfoNotFoundError without this. Pure-Python wheel, ~700 KB.
     "tzdata>=2026.2",
+    # Exchange trading-session calendars (NYSE, NASDAQ, LSE, TSE, HKEX,
+    # SSE, NSE, etc. — 102 calendars shipped). The digest gate at
+    # `market_calendar.py` resolves each ticker's exchange by yfinance
+    # suffix, then calls `calendar.is_session(date)` to drop tickers
+    # whose market is closed today (weekend OR holiday). Successor to
+    # the Quantopian `trading_calendars` project; pure Python + pandas
+    # (pandas already a transitive dep via tradingagents).
+    #
+    # Upper bound: exchange_calendars has historically renamed calendar
+    # codes across major versions (we use XSHG/XTAI/etc. in `_SUFFIX_TO_CAL`).
+    # The `test_suffix_map_codes_resolve_to_real_calendars` test catches
+    # such drift in CI, but pinning <5 lets Dependabot stage the bump.
+    "exchange_calendars>=4.5,<5",
     "tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git",
 ]
 
@@ -68,7 +81,7 @@ ignore = ["E501"]
 # Tests live in `tests/` following the pytest standard layout —
 # `test_*.py` files discovered automatically (no `python_files` override
 # needed). See `tests/conftest.py` for cross-cutting setup (sys.path
-# wiring + autouse digest-precheck disable). 240 scenarios in total.
+# wiring + autouse digest-precheck disable).
 testpaths = ["tests"]
 # `asyncio_mode = "auto"` lets pytest run `async def test_*` directly,
 # no `@pytest.mark.asyncio` annotation needed — matches how every test
