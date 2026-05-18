@@ -325,3 +325,159 @@ async def test_send_digest_email_returns_error_on_malformed_response() -> None:
     finally:
         os.environ.pop("RESEND_API_KEY", None)
         os.environ.pop("RESEND_FROM", None)
+
+
+# ─── EmailSendResult __post_init__ guard ────────────────────────────────
+
+
+async def test_email_send_result_rejects_ok_with_error() -> None:
+    """Mutual exclusivity: `ok=True` with `error` set must raise at
+    construction. Prevents the latent trap where a misconstructed result
+    silently renders the wrong footer line. Architect's "cheap hardening"
+    on PR #75."""
+    import pytest
+
+    with pytest.raises(ValueError, match="ok=True must have error=None"):
+        EmailSendResult(ok=True, recipient="x@y.com", error="wat")
+
+
+async def test_email_send_result_rejects_failure_with_message_id() -> None:
+    """Mirror of the prior guard: `ok=False` with `message_id` set is a
+    contradiction (no successful send produces a message id when ok=False).
+    Raise at construction."""
+    import pytest
+
+    with pytest.raises(ValueError, match="ok=False must have message_id=None"):
+        EmailSendResult(ok=False, recipient="x@y.com", message_id="re_abc")
+
+
+async def test_email_send_result_accepts_valid_shapes() -> None:
+    """Both legitimate shapes — success (ok + message_id) and failure
+    (not ok + error) — construct without raising. Pinning the happy
+    path so the guard above can't drift into rejecting valid results."""
+    # Success path.
+    ok_result = EmailSendResult(ok=True, recipient="x@y.com", message_id="re_x")
+    assert ok_result.message_id == "re_x"
+
+    # Failure path with error string.
+    err_result = EmailSendResult(ok=False, recipient="x@y.com", error="RuntimeError")
+    assert err_result.error == "RuntimeError"
+
+    # Failure path with no error (defensive — error is optional).
+    bare_failure = EmailSendResult(ok=False, recipient="x@y.com")
+    assert bare_failure.ok is False
+
+
+# ─── /email test failure-path regression guard ──────────────────────────
+
+
+async def test_email_test_command_reports_failure_when_send_fails() -> None:
+    """Reviewer caught on PR #75: `commands.py:631` was `if ok:` which
+    tested truthiness of the EmailSendResult dataclass (always True since
+    non-None). The fix is `if result.ok:`. This test pins the failure
+    branch so a future refactor can't regress it back to the always-success
+    shape.
+
+    Stubs `send_digest_email` to return `ok=False`; asserts the user
+    receives the ❌ failure message, NOT the ✅ success message.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from tg_bot.handlers import commands
+
+    # Minimal Update + Context fakes — email_cmd only reaches for
+    # `update.effective_user.id`, `update.message.reply_text`, and
+    # `context.args`.
+    reply_mock = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        message=SimpleNamespace(reply_text=reply_mock),
+    )
+    context = SimpleNamespace(args=["test"])
+
+    os.environ["RESEND_API_KEY"] = "re_fake"
+    os.environ["RESEND_FROM"] = "bot@example.com"
+
+    class _StubUserConfig:
+        def get_digest(self, _uid):
+            return {"email": "user@example.com"}
+
+    orig_uc = commands.user_config_storage
+    commands.user_config_storage = _StubUserConfig()
+
+    async def fake_send(**kwargs):
+        return EmailSendResult(
+            ok=False,
+            recipient=kwargs["to_addr"],
+            error="RuntimeError",
+        )
+
+    try:
+        with patch.object(commands, "send_digest_email", side_effect=fake_send):
+            await commands.email_cmd(update, context)
+
+        reply_mock.assert_called_once()
+        sent_text = reply_mock.call_args[0][0]
+        assert "❌ Test email failed" in sent_text, (
+            f"expected failure message; got: {sent_text!r}"
+        )
+        # The success message must NOT appear — guards against the
+        # always-truthy `if ok:` regression.
+        assert "✅ Test email sent" not in sent_text
+    finally:
+        os.environ.pop("RESEND_API_KEY", None)
+        os.environ.pop("RESEND_FROM", None)
+        commands.user_config_storage = orig_uc
+
+
+async def test_email_test_command_reports_success_when_send_succeeds() -> None:
+    """Counterpart to the failure-path test: `ok=True` should produce
+    the ✅ success message. Together they pin the `if result.ok` boolean
+    branching in `commands.py:email_cmd`."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from tg_bot.handlers import commands
+
+    reply_mock = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        message=SimpleNamespace(reply_text=reply_mock),
+    )
+    context = SimpleNamespace(args=["test"])
+
+    os.environ["RESEND_API_KEY"] = "re_fake"
+    os.environ["RESEND_FROM"] = "bot@example.com"
+
+    class _StubUserConfig:
+        def get_digest(self, _uid):
+            return {"email": "user@example.com"}
+
+    orig_uc = commands.user_config_storage
+    commands.user_config_storage = _StubUserConfig()
+
+    async def fake_send(**kwargs):
+        return EmailSendResult(
+            ok=True,
+            recipient=kwargs["to_addr"],
+            message_id="re_abc",
+        )
+
+    try:
+        with patch.object(commands, "send_digest_email", side_effect=fake_send):
+            await commands.email_cmd(update, context)
+
+        sent_text = reply_mock.call_args[0][0]
+        assert "✅ Test email sent" in sent_text, (
+            f"expected success message; got: {sent_text!r}"
+        )
+        # MarkdownV2 escapes the `.` in the address — assert on the
+        # escaped form, not raw.
+        assert "user@example\\.com" in sent_text, (
+            f"recipient missing/wrong-escaped in success message: {sent_text!r}"
+        )
+    finally:
+        os.environ.pop("RESEND_API_KEY", None)
+        os.environ.pop("RESEND_FROM", None)
+        commands.user_config_storage = orig_uc

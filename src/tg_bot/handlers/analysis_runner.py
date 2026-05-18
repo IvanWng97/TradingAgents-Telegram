@@ -1368,6 +1368,19 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
                 parse_mode="HTML",
                 reply_markup=None,
             )
+        except Forbidden:
+            # User blocked the bot between the primary summary edit and
+            # the footer edit — same handling as the primary edit's
+            # Forbidden branch above. Without this, the JobQueue would
+            # keep firing tomorrow's digest until that fire's send_message
+            # hits Forbidden — one spurious LLM fan-out wasted.
+            logger.warning(
+                "digest: user %s blocked the bot between primary summary "
+                "and email footer edits, disabling",
+                user_id,
+            )
+            await user_config_storage.disable_digest(user_id)
+            cancel_digest_job(application, user_id)
         except Exception as e:
             # Best-effort: a failed second edit doesn't undo the primary
             # summary or the email send. Logged at INFO (not WARN) — the

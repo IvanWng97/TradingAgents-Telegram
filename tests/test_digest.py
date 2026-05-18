@@ -2287,3 +2287,95 @@ async def test_fanout_no_email_status_line_when_not_opted_in() -> None:
         runner.watchlist_storage = orig_w
         runner.user_config_storage = orig_uc
         runner._analyze_one_for_digest = orig_a
+
+
+async def test_fanout_second_edit_forbidden_disables_digest() -> None:
+    """User blocks the bot between the primary summary edit and the
+    email-status footer edit → the second edit raises Forbidden, which
+    must trigger disable_digest + cancel_digest_job (same as the primary
+    edit's Forbidden handler). Without this branch, the JobQueue would
+    keep firing tomorrow's digest one more time, wasting an LLM fan-out
+    before the next send_message hits Forbidden too. Reviewer finding
+    on PR #75."""
+    import os
+    from unittest.mock import patch
+
+    from telegram.error import Forbidden
+
+    from tg_bot.handlers import analysis_runner as runner
+
+    class _W:
+        def get_watchlist(self, _uid):
+            return ["NVDA"]
+
+    async def _fake_analyze(_uid, ticker, reporter=None):
+        return {
+            "ticker": ticker,
+            "signal": "BUY",
+            "telegraph_url": f"https://telegra.ph/{ticker}",
+        }
+
+    class _DisableTrackingUserConfig(_UserConfigWithEmail):
+        def __init__(self, email: str | None) -> None:
+            super().__init__(email)
+            self.disable_called_for: list[int] = []
+
+        async def disable_digest(self, uid):
+            self.disable_called_for.append(uid)
+            return True
+
+    class _ForbiddenOnFooterEditBot(_FakeFanOutBot):
+        """Raises Forbidden specifically when the email-status footer
+        edit fires (text contains the `📧` emoji marker — only the
+        footer edit carries it). Lets progress edits + primary summary
+        edit succeed normally so we exercise the new second-edit
+        Forbidden handler in isolation."""
+
+        async def edit_message_text(self, chat_id, message_id, text, **kw):
+            if "📧" in text:
+                raise Forbidden("user blocked the bot")
+            await super().edit_message_text(chat_id, message_id, text, **kw)
+
+    os.environ["RESEND_API_KEY"] = "re_test"
+    os.environ["RESEND_FROM"] = "bot@example.com"
+    uc = _DisableTrackingUserConfig("user@example.com")
+    orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
+    orig_a = runner._analyze_one_for_digest
+    runner.watchlist_storage = _W()
+    runner.user_config_storage = uc
+    runner._analyze_one_for_digest = _fake_analyze
+    try:
+
+        async def fake_send(**kwargs):
+            return runner.EmailSendResult(
+                ok=True, recipient=kwargs["to_addr"], message_id="re_x"
+            )
+
+        with patch.object(runner, "send_digest_email", side_effect=fake_send):
+            app = _FakeFanOutApp()
+            app.bot = _ForbiddenOnFooterEditBot()
+            await runner.run_user_digest(app, 42, 999)
+
+        assert uc.disable_called_for == [42], (
+            f"expected disable_digest(42) on footer-edit Forbidden; got {uc.disable_called_for}"
+        )
+        # Primary summary text must have landed before the footer Forbidden
+        # fired — at least one recorded edit, and the LAST one carries the
+        # signal-emoji + NVDA (the summary).
+        assert any("NVDA" in e["text"] for e in app.bot.edits), (
+            f"expected primary summary to land before footer-edit Forbidden; "
+            f"got edits: {[e['text'] for e in app.bot.edits]}"
+        )
+        # And no recorded edit carries the email-status emoji — the
+        # footer edit was the one that raised, so it never got recorded.
+        for e in app.bot.edits:
+            assert "📧" not in e["text"], (
+                f"unexpected footer in recorded edits: {e['text']!r}"
+            )
+    finally:
+        os.environ.pop("RESEND_API_KEY", None)
+        os.environ.pop("RESEND_FROM", None)
+        runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
+        runner._analyze_one_for_digest = orig_a

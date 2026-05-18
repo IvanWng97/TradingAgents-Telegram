@@ -56,12 +56,29 @@ class EmailSendResult:
     populated (caller passes the address in) so the Telegram summary
     appender doesn't have to re-read storage to render "📧 Sent to
     <addr>".
+
+    `__post_init__` enforces mutual exclusivity (`ok and not error`,
+    `not ok and not message_id`) — the fields are nominally independent
+    by type, but a misconstruction would silently render the wrong
+    footer line. Raising at construction time prevents the trap from
+    propagating to the renderer.
     """
 
     ok: bool
     recipient: str
     message_id: str | None = None
     error: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.ok and self.error is not None:
+            raise ValueError(
+                f"EmailSendResult: ok=True must have error=None, got {self.error!r}"
+            )
+        if not self.ok and self.message_id is not None:
+            raise ValueError(
+                f"EmailSendResult: ok=False must have message_id=None, "
+                f"got {self.message_id!r}"
+            )
 
 
 # Inline-style constants. Gmail/Outlook strip <style> blocks; everything

@@ -614,7 +614,7 @@ async def email_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         from html import escape as _html_escape
 
         today = _date.today().isoformat()
-        ok = await send_digest_email(
+        result = await send_digest_email(
             to_addr=current,
             watchlist=["TEST"],
             status={
@@ -628,7 +628,7 @@ async def email_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             date_iso=today,
             skipped_closed=["FAKE.HK"],
         )
-        if ok:
+        if result.ok:
             await update.message.reply_text(
                 f"✅ Test email sent to `{escape_markdown(current, version=2)}`\\. "
                 "Check your inbox \\(and spam folder\\)\\.",
