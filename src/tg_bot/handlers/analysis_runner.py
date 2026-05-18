@@ -60,7 +60,11 @@ from tg_bot.pipeline.progress import (
     resolve_step,
 )
 from tg_bot.storage import user_config_storage, watchlist_storage
-from tg_bot.rendering.email_client import is_email_configured, send_digest_email
+from tg_bot.rendering.email_client import (
+    EmailSendResult,
+    is_email_configured,
+    send_digest_email,
+)
 from tg_bot.rendering.telegraph_client import (
     _path_from_telegraph_url,
     publish_to_telegraph,
@@ -1285,11 +1289,12 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
 
     # Final edit — drops the cancel button (run is over) and bypasses
     # the throttle so the summary always lands.
+    summary_text = _format_digest_summary(watchlist, status, safe_date, skipped_closed)
     try:
         await application.bot.edit_message_text(
             chat_id=chat_id,
             message_id=header.message_id,
-            text=_format_digest_summary(watchlist, status, safe_date, skipped_closed),
+            text=summary_text,
             parse_mode="HTML",
             reply_markup=None,
         )
@@ -1310,9 +1315,10 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
     # is the exact failure mode the mirror pattern exists to prevent.
     digest = user_config_storage.get_digest(user_id)
     email_to = (digest or {}).get("email")
+    email_result: EmailSendResult | None = None
     if email_to and is_email_configured():
         try:
-            await send_digest_email(
+            email_result = await send_digest_email(
                 to_addr=email_to,
                 watchlist=watchlist,
                 status=status,
@@ -1329,6 +1335,9 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
                 type(e).__name__,
             )
             logger.debug("email mirror unexpected traceback:", exc_info=True)
+            email_result = EmailSendResult(
+                ok=False, recipient=email_to, error=type(e).__name__
+            )
     elif email_to and not is_email_configured():
         # User opted in but env isn't configured. Log loud so the
         # operator notices — `/email test` would have caught this too,
@@ -1340,6 +1349,59 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
             user_id,
             email_to,
         )
+
+    # Append an email-status footer to the summary when the user has
+    # opt-in (regardless of whether the send happened) — so the user
+    # always learns the outcome of their own opt-in choice. No line at
+    # all when email isn't opted in, to keep the existing Telegram-only
+    # UX unchanged for non-email users. Done as a SECOND edit so the
+    # primary summary edit above is unaffected by Resend latency — the
+    # email-mirror invariant (Telegram unaffected by email) holds even
+    # on the rendering side.
+    email_line = _build_email_status_line(email_to, email_result)
+    if email_line is not None:
+        try:
+            await application.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=header.message_id,
+                text=f"{summary_text}\n\n<i>{email_line}</i>",
+                parse_mode="HTML",
+                reply_markup=None,
+            )
+        except Exception as e:
+            # Best-effort: a failed second edit doesn't undo the primary
+            # summary or the email send. Logged at INFO (not WARN) — the
+            # email itself is the load-bearing artifact; the footer is
+            # UX.
+            logger.info(
+                "digest: failed to append email status footer for user %s (%s); "
+                "primary summary + email send unaffected",
+                user_id,
+                type(e).__name__,
+            )
+
+
+def _build_email_status_line(
+    email_to: str | None, result: EmailSendResult | None
+) -> str | None:
+    """Render the trailing "📧 …" line for the digest summary footer.
+
+    Returns None when the user hasn't opted in (so non-email users keep
+    the existing summary shape exactly). Otherwise returns one of three
+    shapes for the opted-in user, HTML-escaped:
+      - success → `📧 Sent to <addr>`
+      - failure → `📧 Email failed — check logs`
+      - opted-in-but-env-missing → `📧 Email opt-in but server not configured`
+    """
+    if not email_to:
+        return None
+    recipient_h = _html_escape(email_to)
+    if result is None:
+        # Opted in, but the env-configured gate above blocked the send.
+        return "📧 Email opt-in but server not configured"
+    if result.ok:
+        return f"📧 Sent to {recipient_h}"
+    return "📧 Email failed — check logs"
 
 
 async def _handle_digest_cancel(

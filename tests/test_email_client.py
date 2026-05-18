@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from tg_bot.rendering.email_client import (  # noqa: E402
+    EmailSendResult,
     _build_html,
     _build_subject,
     _signal_tally,
@@ -207,8 +208,9 @@ async def test_build_html_html_escapes_ticker_with_special_chars() -> None:
 async def test_send_digest_email_short_circuits_when_env_missing() -> None:
     """Defensive second-line gate inside `send_digest_email`: if
     `RESEND_API_KEY` was hot-removed between caller-side check and the
-    send, the function must return False, log a warning, and skip the
-    Resend SDK call entirely (no ImportError or KeyError leaks)."""
+    send, the function must return an `ok=False` result tagged
+    `not_configured`, log a warning, and skip the Resend SDK call
+    entirely (no ImportError or KeyError leaks)."""
     saved_key = os.environ.pop("RESEND_API_KEY", None)
     saved_from = os.environ.pop("RESEND_FROM", None)
     try:
@@ -219,7 +221,11 @@ async def test_send_digest_email_short_circuits_when_env_missing() -> None:
             safe_date="2026-05-18",
             date_iso="2026-05-18",
         )
-        assert result is False
+        assert isinstance(result, EmailSendResult)
+        assert result.ok is False
+        assert result.recipient == "user@example.com"
+        assert result.error == "not_configured"
+        assert result.message_id is None
     finally:
         if saved_key is not None:
             os.environ["RESEND_API_KEY"] = saved_key
@@ -227,10 +233,11 @@ async def test_send_digest_email_short_circuits_when_env_missing() -> None:
             os.environ["RESEND_FROM"] = saved_from
 
 
-async def test_send_digest_email_calls_resend_and_returns_true_on_success() -> None:
+async def test_send_digest_email_calls_resend_and_returns_ok_on_success() -> None:
     """Happy path: env configured + opt-in addr set → `resend.Emails.send`
-    is called with the right payload shape, returns True on success.
-    Stubs the SDK entirely so no network call fires."""
+    is called with the right payload shape, returns `ok=True` carrying the
+    Resend message id for downstream log correlation. Stubs the SDK
+    entirely so no network call fires."""
     os.environ["RESEND_API_KEY"] = "re_fake"
     os.environ["RESEND_FROM"] = "bot@example.com"
 
@@ -249,7 +256,12 @@ async def test_send_digest_email_calls_resend_and_returns_true_on_success() -> N
                 safe_date="2026-05-18",
                 date_iso="2026-05-18",
             )
-        assert result is True, "expected True from resend.Emails.send id"
+        assert result.ok is True, "expected ok=True from resend.Emails.send id"
+        assert result.recipient == "user@example.com"
+        assert result.message_id == "re_message_abc123", (
+            "message id must round-trip — used for log correlation"
+        )
+        assert result.error is None
         assert captured_payload["from"] == "bot@example.com"
         assert captured_payload["to"] == ["user@example.com"]
         assert "🌙 Daily Digest" in captured_payload["subject"]
@@ -260,10 +272,13 @@ async def test_send_digest_email_calls_resend_and_returns_true_on_success() -> N
         os.environ.pop("RESEND_FROM", None)
 
 
-async def test_send_digest_email_swallows_exception_and_returns_false() -> None:
-    """Resend API outage / network error: function must log + return False,
-    never propagate the exception. The whole point of the email-as-mirror
-    pattern is that email failures don't break the Telegram digest."""
+async def test_send_digest_email_swallows_exception_and_returns_error() -> None:
+    """Resend API outage / network error: function must log + return an
+    `ok=False` result with `error` set to the exception class name, never
+    propagate the exception. The whole point of the email-as-mirror pattern
+    is that email failures don't break the Telegram digest. The exception
+    class name on the result is what drives the summary footer's "Email
+    failed" line — pin it here so a refactor can't drop the breadcrumb."""
     os.environ["RESEND_API_KEY"] = "re_fake"
     os.environ["RESEND_FROM"] = "bot@example.com"
     try:
@@ -278,16 +293,20 @@ async def test_send_digest_email_swallows_exception_and_returns_false() -> None:
                 safe_date="2026-05-18",
                 date_iso="2026-05-18",
             )
-        assert result is False
+        assert result.ok is False
+        assert result.recipient == "user@example.com"
+        assert result.error == "RuntimeError"
+        assert result.message_id is None
     finally:
         os.environ.pop("RESEND_API_KEY", None)
         os.environ.pop("RESEND_FROM", None)
 
 
-async def test_send_digest_email_returns_false_on_malformed_response() -> None:
+async def test_send_digest_email_returns_error_on_malformed_response() -> None:
     """If Resend's response doesn't include an `id` field (defensive against
     a future SDK shape change or partial network response), we log + return
-    False rather than treating it as success — keeps observability honest."""
+    an `ok=False` result tagged `malformed_response` rather than treating
+    it as success — keeps observability honest."""
     os.environ["RESEND_API_KEY"] = "re_fake"
     os.environ["RESEND_FROM"] = "bot@example.com"
     try:
@@ -299,7 +318,10 @@ async def test_send_digest_email_returns_false_on_malformed_response() -> None:
                 safe_date="2026-05-18",
                 date_iso="2026-05-18",
             )
-        assert result is False
+        assert result.ok is False
+        assert result.recipient == "user@example.com"
+        assert result.error == "malformed_response"
+        assert result.message_id is None
     finally:
         os.environ.pop("RESEND_API_KEY", None)
         os.environ.pop("RESEND_FROM", None)

@@ -883,7 +883,11 @@ async def test_fanout_calls_email_mirror_when_opted_in_and_configured() -> None:
 
         async def fake_send(**kwargs):
             sent_to.append(kwargs["to_addr"])
-            return True
+            return runner.EmailSendResult(
+                ok=True,
+                recipient=kwargs["to_addr"],
+                message_id="re_fake_id",
+            )
 
         with patch.object(runner, "send_digest_email", side_effect=fake_send):
             app = _FakeFanOutApp()
@@ -2071,3 +2075,215 @@ async def test_fanout_empty_filter_reminder() -> None:
 
 
 # --- Runner ----------------------------------------------------------------
+
+
+# ─── Email-status footer ────────────────────────────────────────────────
+#
+# Pins the second `edit_message_text` that appends "📧 …" to the summary.
+# Four branches: opted-in+success, opted-in+failure, opted-in+env-missing,
+# not-opted-in (status quo — no footer). The shared scaffolding stubs
+# `_analyze_one_for_digest` to a fixed BUY signal and `send_digest_email`
+# to a configurable return so the test can drive the email outcome.
+
+
+async def test_fanout_appends_email_status_line_on_success() -> None:
+    """Opt-in + RESEND configured + send returns ok=True → the digest
+    summary is followed by a second edit that appends `📧 Sent to <addr>`.
+    Pins the happy path of the user-visible email-status footer (the
+    receipt confirmation in the Telegram message)."""
+    import os
+    from unittest.mock import patch
+
+    from tg_bot.handlers import analysis_runner as runner
+
+    class _W:
+        def get_watchlist(self, _uid):
+            return ["NVDA"]
+
+    async def _fake_analyze(_uid, ticker, reporter=None):
+        return {
+            "ticker": ticker,
+            "signal": "BUY",
+            "telegraph_url": f"https://telegra.ph/{ticker}",
+        }
+
+    os.environ["RESEND_API_KEY"] = "re_test"
+    os.environ["RESEND_FROM"] = "bot@example.com"
+    orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
+    orig_a = runner._analyze_one_for_digest
+    runner.watchlist_storage = _W()
+    runner.user_config_storage = _UserConfigWithEmail("user@example.com")
+    runner._analyze_one_for_digest = _fake_analyze
+    try:
+
+        async def fake_send(**kwargs):
+            return runner.EmailSendResult(
+                ok=True, recipient=kwargs["to_addr"], message_id="re_xyz"
+            )
+
+        with patch.object(runner, "send_digest_email", side_effect=fake_send):
+            app = _FakeFanOutApp()
+            await runner.run_user_digest(app, 42, 999)
+
+        # Last edit MUST be the second pass with the email-status footer.
+        final = app.bot.edits[-1]["text"]
+        assert "📧 Sent to user@example.com" in final, (
+            f"expected success email-status footer; got: {final!r}"
+        )
+        # Primary summary content must still be present in the final edit.
+        assert "NVDA" in final
+        assert "BUY" in final
+    finally:
+        os.environ.pop("RESEND_API_KEY", None)
+        os.environ.pop("RESEND_FROM", None)
+        runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
+        runner._analyze_one_for_digest = orig_a
+
+
+async def test_fanout_appends_email_failed_line_on_send_failure() -> None:
+    """Opt-in + RESEND configured + send returns ok=False (Resend exception
+    or malformed response) → the digest summary is followed by a second
+    edit that appends `📧 Email failed — check logs`. Pins the
+    user-visible signal that the email mirror didn't deliver."""
+    import os
+    from unittest.mock import patch
+
+    from tg_bot.handlers import analysis_runner as runner
+
+    class _W:
+        def get_watchlist(self, _uid):
+            return ["NVDA"]
+
+    async def _fake_analyze(_uid, ticker, reporter=None):
+        return {
+            "ticker": ticker,
+            "signal": "BUY",
+            "telegraph_url": f"https://telegra.ph/{ticker}",
+        }
+
+    os.environ["RESEND_API_KEY"] = "re_test"
+    os.environ["RESEND_FROM"] = "bot@example.com"
+    orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
+    orig_a = runner._analyze_one_for_digest
+    runner.watchlist_storage = _W()
+    runner.user_config_storage = _UserConfigWithEmail("user@example.com")
+    runner._analyze_one_for_digest = _fake_analyze
+    try:
+
+        async def fake_send(**kwargs):
+            return runner.EmailSendResult(
+                ok=False,
+                recipient=kwargs["to_addr"],
+                error="RuntimeError",
+            )
+
+        with patch.object(runner, "send_digest_email", side_effect=fake_send):
+            app = _FakeFanOutApp()
+            await runner.run_user_digest(app, 42, 999)
+
+        final = app.bot.edits[-1]["text"]
+        assert "📧 Email failed" in final, (
+            f"expected failure email-status footer; got: {final!r}"
+        )
+
+    finally:
+        os.environ.pop("RESEND_API_KEY", None)
+        os.environ.pop("RESEND_FROM", None)
+        runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
+        runner._analyze_one_for_digest = orig_a
+
+
+async def test_fanout_appends_not_configured_line_when_env_missing() -> None:
+    """Opt-in but RESEND env NOT set → `send_digest_email` is never
+    invoked (the call-site gate catches it), but the user still gets a
+    footer line — `📧 Email opt-in but server not configured` — so they
+    know their opt-in choice didn't take effect. Pins the operator-side
+    misconfiguration signal that's user-facing (not just in bot logs)."""
+    import os
+    from unittest.mock import patch
+
+    from tg_bot.handlers import analysis_runner as runner
+
+    class _W:
+        def get_watchlist(self, _uid):
+            return ["NVDA"]
+
+    async def _fake_analyze(_uid, ticker, reporter=None):
+        return {
+            "ticker": ticker,
+            "signal": "BUY",
+            "telegraph_url": f"https://telegra.ph/{ticker}",
+        }
+
+    saved_key = os.environ.pop("RESEND_API_KEY", None)
+    saved_from = os.environ.pop("RESEND_FROM", None)
+    orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
+    orig_a = runner._analyze_one_for_digest
+    runner.watchlist_storage = _W()
+    runner.user_config_storage = _UserConfigWithEmail("user@example.com")
+    runner._analyze_one_for_digest = _fake_analyze
+    try:
+        with patch.object(runner, "send_digest_email") as mock_send:
+            app = _FakeFanOutApp()
+            await runner.run_user_digest(app, 42, 999)
+        mock_send.assert_not_called()
+
+        final = app.bot.edits[-1]["text"]
+        assert "📧 Email opt-in but server not configured" in final, (
+            f"expected not-configured footer; got: {final!r}"
+        )
+    finally:
+        if saved_key is not None:
+            os.environ["RESEND_API_KEY"] = saved_key
+        if saved_from is not None:
+            os.environ["RESEND_FROM"] = saved_from
+        runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
+        runner._analyze_one_for_digest = orig_a
+
+
+async def test_fanout_no_email_status_line_when_not_opted_in() -> None:
+    """User has NO email set → no footer line in the final summary edit.
+    Pins the existing Telegram-only UX for users who haven't run
+    `/email <addr>`; the new footer must never appear unannounced."""
+    from unittest.mock import patch
+
+    from tg_bot.handlers import analysis_runner as runner
+
+    class _W:
+        def get_watchlist(self, _uid):
+            return ["NVDA"]
+
+    async def _fake_analyze(_uid, ticker, reporter=None):
+        return {
+            "ticker": ticker,
+            "signal": "BUY",
+            "telegraph_url": f"https://telegra.ph/{ticker}",
+        }
+
+    orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
+    orig_a = runner._analyze_one_for_digest
+    runner.watchlist_storage = _W()
+    runner.user_config_storage = _UserConfigWithEmail(None)  # no opt-in
+    runner._analyze_one_for_digest = _fake_analyze
+    try:
+        with patch.object(runner, "send_digest_email") as mock_send:
+            app = _FakeFanOutApp()
+            await runner.run_user_digest(app, 42, 999)
+        mock_send.assert_not_called()
+
+        # NO edit text should carry the email-status emoji 📧.
+        for edit in app.bot.edits:
+            assert "📧" not in edit["text"], (
+                f"unexpected email footer in non-opt-in path: {edit['text']!r}"
+            )
+    finally:
+        runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
+        runner._analyze_one_for_digest = orig_a
