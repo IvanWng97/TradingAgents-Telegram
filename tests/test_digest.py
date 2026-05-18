@@ -2484,3 +2484,104 @@ async def test_fanout_uses_user_local_date_for_market_gate_and_cache() -> None:
         runner.watchlist_storage = orig_w
         runner.user_config_storage = orig_uc
         runner._analyze_one_for_digest = orig_a
+
+
+async def test_fanout_invalid_tz_falls_back_to_utc() -> None:
+    """`ZoneInfoNotFoundError` branch in run_user_digest: a corrupt saved
+    `digest.tz` (e.g. left over from a renamed IANA zone or hand-edited
+    user_config.json) must not crash the fan-out — it falls back to UTC
+    and logs a WARNING. Carry-over finding from PR #76's auto-review
+    that the post-feedback push didn't address.
+
+    Pins both the no-crash invariant AND the UTC fallback date threading
+    to the cache key.
+    """
+    from datetime import datetime as _datetime
+    from zoneinfo import ZoneInfo
+
+    from tg_bot.handlers import analysis_runner as runner
+
+    class _W:
+        def get_watchlist(self, _uid):
+            return ["NVDA"]
+
+    captured_today: list[str] = []
+
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
+        captured_today.append(today_iso or "")
+        return {
+            "ticker": ticker,
+            "signal": "BUY",
+            "telegraph_url": f"https://telegra.ph/{ticker}",
+        }
+
+    class _BadTzConfig:
+        def get_enrolled_tickers(self, _uid, watchlist):
+            return list(watchlist)
+
+        def get_digest(self, _uid):
+            return {"enabled": True, "tickers": None, "tz": "Not/AValidTz"}
+
+        async def disable_digest(self, _uid):
+            return True
+
+    orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
+    orig_a = runner._analyze_one_for_digest
+    runner.watchlist_storage = _W()
+    runner.user_config_storage = _BadTzConfig()
+    runner._analyze_one_for_digest = _fake_analyze
+    try:
+        # Expected fallback date is the UTC date at the moment the
+        # fan-out runs. Compute BOTH before and after the call to
+        # accept either date in the rare case a midnight boundary
+        # crosses during the test — avoids flaky weekly midnight CI
+        # failures.
+        utc_before = _datetime.now(ZoneInfo("UTC")).date().isoformat()
+        with _caplog_warning("tg_bot.handlers.analysis_runner") as warns:
+            app = _FakeFanOutApp()
+            await runner.run_user_digest(app, 42, 999)
+        utc_after = _datetime.now(ZoneInfo("UTC")).date().isoformat()
+
+        # No crash — fan-out reached _analyze_one_for_digest.
+        assert len(captured_today) == 1, (
+            f"expected one analyze call; got {len(captured_today)}"
+        )
+        assert captured_today[0] in (utc_before, utc_after), (
+            f"expected UTC date in cache key (one of {utc_before!r}, "
+            f"{utc_after!r}); got {captured_today[0]!r}"
+        )
+        # The WARNING log surfaces the invalid tz so operators notice
+        # the corrupt saved value (per the diagnostic-logging discipline
+        # added with progress.py's silent-failure surfaces).
+        assert any("invalid tz" in w.getMessage() for w in warns), (
+            f"expected 'invalid tz' WARNING; got: {[w.getMessage() for w in warns]}"
+        )
+    finally:
+        runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
+        runner._analyze_one_for_digest = orig_a
+
+
+def _caplog_warning(logger_name: str):  # noqa: E402  (function, not import)
+    """Minimal log-capture context manager so tests in this file don't
+    need the pytest `caplog` fixture (some legacy scenarios in the file
+    avoid it). Yields the list of LogRecord instances at WARNING+ level
+    captured from `logger_name`."""
+    import logging
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _cm():
+        logger = logging.getLogger(logger_name)
+        handler = logging.Handler()
+        handler.setLevel(logging.WARNING)
+        captured: list[logging.LogRecord] = []
+        handler.emit = captured.append
+        logger.addHandler(handler)
+        try:
+            yield captured
+        finally:
+            logger.removeHandler(handler)
+
+    return _cm()
