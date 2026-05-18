@@ -251,9 +251,9 @@ async def send_digest_email(
         )
         return False
 
+    # Cheap pure-Python work stays on the loop thread.
     subject = _build_subject(safe_date, status)
     html = _build_html(watchlist, status, safe_date, skipped_closed)
-    attachments = _build_attachments(watchlist, status, date_iso)
 
     # Lazy import — keep the dep import cost out of cold-start when the
     # operator never uses email. The dep is in pyproject.toml as a hard
@@ -262,29 +262,45 @@ async def send_digest_email(
 
     api_key = os.environ["RESEND_API_KEY"]
     from_addr = os.environ["RESEND_FROM"]
-    resend.api_key = api_key
 
-    payload = {
-        "from": from_addr,
-        "to": [to_addr],
-        "subject": subject,
-        "html": html,
-    }
-    if attachments:
-        payload["attachments"] = attachments
-
-    def _send_blocking():
-        return resend.Emails.send(payload)
+    def _send_blocking() -> tuple[object, int]:
+        # Everything blocking happens here:
+        #   1. Disk I/O for `.md` attachment build (per-ticker
+        #      `load_historical_state` reads the on-disk JSON log) —
+        #      ~5-50ms per ticker, O(N) on the fan-out.
+        #   2. Network I/O via `resend.Emails.send` — HTTPS POST to
+        #      Resend's API, typically ~50-300ms.
+        # Both are kept in the same `to_thread` call so the digest
+        # fan-out can't stall concurrent /watch handlers, cancel
+        # taps, or progress-edit coroutines on the event loop while
+        # the email is building + going on the wire. Setting
+        # `resend.api_key` (a module-level global) inside this thread
+        # is safe because we run one send at a time (one per digest
+        # per user, serialized through this coroutine).
+        # Returns (resend_result, attachment_count) so the caller can
+        # log the attachment count without re-running _build_attachments
+        # back on the loop thread.
+        resend.api_key = api_key
+        attachments = _build_attachments(watchlist, status, date_iso)
+        payload = {
+            "from": from_addr,
+            "to": [to_addr],
+            "subject": subject,
+            "html": html,
+        }
+        if attachments:
+            payload["attachments"] = attachments
+        return resend.Emails.send(payload), len(attachments)
 
     try:
-        result = await asyncio.to_thread(_send_blocking)
+        result, n_attachments = await asyncio.to_thread(_send_blocking)
         # Resend SDK returns a dict like {"id": "re_..."} on success.
         if isinstance(result, dict) and result.get("id"):
             logger.info(
                 "email: sent digest to %s (id=%s, %d attachments)",
                 to_addr,
                 result["id"],
-                len(attachments),
+                n_attachments,
             )
             return True
         logger.warning(
