@@ -269,6 +269,37 @@ def test_dispatch_raises_cancelled_when_event_set() -> None:
         loop.close()
 
 
+def test_dispatch_logs_warning_when_loop_is_closed(caplog) -> None:
+    """Loop closed before event fires (analysis outlived the chat) — must
+    log WARNING, not raise and not silently swallow. Was previously a
+    bare `pass` (silent swallow); this PR bumped it to WARN so an
+    outlived-chat race surfaces in production logs instead of producing
+    invisible event loss."""
+    bot = MagicMock()
+    closed_loop = asyncio.new_event_loop()
+    closed_loop.close()
+    try:
+        reporter = ProgressReporter(
+            bot=bot, chat_id=1, message_id=2, ticker="TEST", loop=closed_loop
+        )
+        set_reporter(reporter)
+        cb = _DelegatingProgressCallback()
+        with caplog.at_level(logging.WARNING, logger="tg_bot.pipeline.progress"):
+            cb._dispatch({"metadata": {"langgraph_node": "market_analyst"}})
+        warns = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "run_coroutine_threadsafe failed" in r.getMessage()
+        ]
+        assert len(warns) == 1, [r.getMessage() for r in caplog.records]
+        msg = warns[0].getMessage()
+        assert "TEST" in msg
+        assert "market_analyst" in msg
+    finally:
+        set_reporter(None)
+
+
 # ─── ProgressReporter.report ────────────────────────────────────────────
 
 

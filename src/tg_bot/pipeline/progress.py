@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 #     `"Social Analyst"`, but later HEAD builds emit `"Sentiment Analyst"`
 #     directly (observed on the user's VPS). Both alias to step 2 so the
 #     "(2/12)" badge survives the upstream switch.
-# See `tests/test_progress.py::test_step_map_covers_all_upstream_nodes`
+# See `tests/test_progress.py::test_step_map_covers_all_upstream_v025_nodes`
 # for the alignment pin — bump it AND this map when upgrading tradingagents.
 _STEP_MAP: dict[str, tuple[str, int]] = {
     "market analyst": ("Market Analyst", 1),
@@ -271,12 +271,15 @@ class _DelegatingProgressCallback(BaseCallbackHandler):
         logger.info(
             "dispatch: progress event ticker=%s node=%s", reporter.ticker, node_name
         )
+        # Build the coroutine separately so we can `.close()` it cleanly if
+        # the loop is gone — otherwise gc surfaces a `coroutine was never
+        # awaited` RuntimeWarning on shutdown for every leaked dispatch.
+        coro = reporter.report(str(node_name))
         try:
-            asyncio.run_coroutine_threadsafe(
-                reporter.report(str(node_name)), reporter.loop
-            )
+            asyncio.run_coroutine_threadsafe(coro, reporter.loop)
         except RuntimeError as e:
             # Loop closed (analysis outlived the chat) — drop the event.
+            coro.close()
             logger.warning(
                 "dispatch: run_coroutine_threadsafe failed ticker=%s node=%s (%s)",
                 reporter.ticker,
