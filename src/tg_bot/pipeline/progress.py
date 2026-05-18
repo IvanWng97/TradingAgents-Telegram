@@ -24,9 +24,21 @@ logger = logging.getLogger(__name__)
 # Friendly-name + ordinal map for the canonical TradingAgents pipeline.
 # The langgraph node identifier is matched case-insensitively against the
 # keys; unknown nodes fall back to a raw name display.
+#
+# Pinned against tradingagents v0.2.5 `graph/setup.py:97-112` `add_node()`
+# calls. Aliases below cover upstream rename churn we've observed across
+# versions installed via `pip install git+...`:
+#   - `sentiment analyst` — issue #557 renamed `create_social_analyst` →
+#     `create_sentiment_analyst`. v0.2.5 keeps the back-compat node name
+#     `"Social Analyst"`, but later HEAD builds emit `"Sentiment Analyst"`
+#     directly (observed on the user's VPS). Both alias to step 2 so the
+#     "(2/12)" badge survives the upstream switch.
+# See `tests/test_progress.py::test_step_map_covers_all_upstream_v025_nodes`
+# for the alignment pin — bump it AND this map when upgrading tradingagents.
 _STEP_MAP: dict[str, tuple[str, int]] = {
     "market analyst": ("Market Analyst", 1),
     "social analyst": ("Social Analyst", 2),
+    "sentiment analyst": ("Social Analyst", 2),  # alias: upstream issue #557
     "news analyst": ("News Analyst", 3),
     "fundamentals analyst": ("Fundamentals Analyst", 4),
     "bull researcher": ("Bull Researcher", 5),
@@ -37,11 +49,10 @@ _STEP_MAP: dict[str, tuple[str, int]] = {
     "conservative analyst": ("Conservative Risk Analyst", 10),
     "neutral analyst": ("Neutral Risk Analyst", 11),
     "portfolio manager": ("Portfolio Manager", 12),
-    "risk judge": ("Portfolio Manager", 12),
 }
 # Derived from `_STEP_MAP` so adding/removing entries auto-updates the
 # "(N/M)" badge. Counts unique ordinals (some node names alias to the same
-# step — e.g. `risk judge` and `portfolio manager` both map to step 12).
+# step — e.g. `sentiment analyst` and `social analyst` both map to step 2).
 TOTAL_STEPS = max(ordinal for _name, ordinal in _STEP_MAP.values())
 
 
@@ -62,6 +73,17 @@ def resolve_step(raw_name: str) -> tuple[str, int | None]:
     cleaned_lower = key.replace("tools ", "").replace(" tools", "").strip()
     if cleaned_lower in _STEP_MAP:
         return _STEP_MAP[cleaned_lower]
+    # WARN on fallback: a node name not in `_STEP_MAP` means either upstream
+    # tradingagents renamed something or a new node was added. Either way
+    # the ordinal badge `(n/12)` disappears and the user-visible step name
+    # may look off ("Sentiment Analyst" instead of "Social Analyst").
+    logger.warning(
+        "resolve_step: unknown node %r (cleaned=%r) — falling back to title-case; "
+        "expected one of %s",
+        raw_name,
+        cleaned_lower,
+        sorted(_STEP_MAP.keys()),
+    )
     return cleaned_lower.title() or raw_name, None
 
 
@@ -146,10 +168,26 @@ class ProgressReporter:
                 parse_mode="MarkdownV2",
                 reply_markup=reply_markup,
             )
+            logger.info(
+                "report: caption updated ticker=%s node=%s friendly=%s ord=%s/%s",
+                self.ticker,
+                raw_node_name,
+                friendly,
+                ordinal if ordinal is not None else "?",
+                TOTAL_STEPS,
+            )
         except Exception as e:
             # Final result may have already replaced the caption, or Telegram
-            # may have rate-limited — neither should crash the analysis.
-            logger.debug("Progress edit skipped for %r: %s", raw_node_name, e)
+            # may have rate-limited — neither should crash the analysis. WARN
+            # (not debug) so a wedged progress surface is visible without
+            # raising the bot's log verbosity globally.
+            logger.warning(
+                "report: caption edit FAILED ticker=%s node=%s (%s: %s)",
+                self.ticker,
+                raw_node_name,
+                type(e).__name__,
+                e,
+            )
 
 
 class _DelegatingProgressCallback(BaseCallbackHandler):
@@ -194,7 +232,15 @@ class _DelegatingProgressCallback(BaseCallbackHandler):
     def _dispatch(self, kwargs: dict) -> None:
         reporter: ProgressReporter | None = getattr(_current_reporter, "value", None)
         if reporter is None:
-            logger.debug("dispatch: no reporter on this thread, ignoring callback")
+            # WARN (not debug) — a missing reporter means our threadlocal
+            # binding lost the run (sub-thread spawned by a langgraph node
+            # would do this). Surfaces silently otherwise.
+            logger.warning(
+                "dispatch: no reporter on this thread (thread=%s) — event dropped; "
+                "kwargs keys=%s",
+                threading.current_thread().name,
+                sorted(kwargs.keys()),
+            )
             return
         # Check the cancel flag BEFORE dispatching the next step's UI update —
         # this is our only hook into the running pipeline. Raising here aborts
@@ -210,16 +256,36 @@ class _DelegatingProgressCallback(BaseCallbackHandler):
         node_name = metadata.get("langgraph_node")
         if not node_name:
             # Not an LLM call inside a langgraph node — ignore noise from
-            # any LLM client warm-ups or auxiliary calls.
-            return
-        logger.debug("Progress event: node=%s", node_name)
-        try:
-            asyncio.run_coroutine_threadsafe(
-                reporter.report(str(node_name)), reporter.loop
+            # any LLM client warm-ups or auxiliary calls. INFO (not silent)
+            # so we can confirm callbacks are firing at all and see what
+            # langgraph/langchain version is sending us — if every event
+            # lands here, the metadata shape changed upstream.
+            logger.info(
+                "dispatch: event without langgraph_node ticker=%s "
+                "metadata_keys=%s kwargs_keys=%s",
+                reporter.ticker,
+                sorted(metadata.keys()),
+                sorted(kwargs.keys()),
             )
-        except RuntimeError:
+            return
+        logger.info(
+            "dispatch: progress event ticker=%s node=%s", reporter.ticker, node_name
+        )
+        # Build the coroutine separately so we can `.close()` it cleanly if
+        # the loop is gone — otherwise gc surfaces a `coroutine was never
+        # awaited` RuntimeWarning on shutdown for every leaked dispatch.
+        coro = reporter.report(str(node_name))
+        try:
+            asyncio.run_coroutine_threadsafe(coro, reporter.loop)
+        except RuntimeError as e:
             # Loop closed (analysis outlived the chat) — drop the event.
-            pass
+            coro.close()
+            logger.warning(
+                "dispatch: run_coroutine_threadsafe failed ticker=%s node=%s (%s)",
+                reporter.ticker,
+                node_name,
+                e,
+            )
 
 
 # Single instance reused across all cached graphs — the per-run target lives
