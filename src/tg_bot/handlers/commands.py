@@ -569,7 +569,7 @@ async def email_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         if not is_email_configured():
             line += (
-                "\n\n⚠️ `RESEND_API_KEY` / `RESEND_FROM` not set in `\\.env`\\ — "
+                "\n\n⚠️ `RESEND_API_KEY` / `RESEND_FROM` not set in `\\.env` — "
                 "even with an address configured, email won't send until the "
                 "operator wires those\\."
             )
@@ -602,8 +602,16 @@ async def email_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
         # Synthetic test payload — one fake "HOLD" ticker so the template
-        # renders the same shape a real digest produces, just empty.
+        # renders the same shape a real digest produces. Include a fake
+        # `skipped_closed` entry so the footnote template path is exercised
+        # too (the architect review for PR #73 noted the template-coverage
+        # gap). `safe_date` goes through `_html_escape` to match the
+        # documented contract in `_build_html` ("safe_date is pre-escaped
+        # by the caller") — for ISO dates this is a no-op today, but a
+        # future locale-aware date format would break injection safety on
+        # the test path without it.
         from datetime import date as _date
+        from html import escape as _html_escape
 
         today = _date.today().isoformat()
         ok = await send_digest_email(
@@ -616,9 +624,9 @@ async def email_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     "telegraph_url": None,
                 }
             },
-            safe_date=today,
+            safe_date=_html_escape(today),
             date_iso=today,
-            skipped_closed=None,
+            skipped_closed=["FAKE.HK"],
         )
         if ok:
             await update.message.reply_text(
