@@ -31,7 +31,12 @@ dependencies = [
     # whose market is closed today (weekend OR holiday). Successor to
     # the Quantopian `trading_calendars` project; pure Python + pandas
     # (pandas already a transitive dep via tradingagents).
-    "exchange_calendars>=4.5",
+    #
+    # Upper bound: exchange_calendars has historically renamed calendar
+    # codes across major versions (we use XSHG/XTAI/etc. in `_SUFFIX_TO_CAL`).
+    # The `test_suffix_map_codes_resolve_to_real_calendars` test catches
+    # such drift in CI, but pinning <5 lets Dependabot stage the bump.
+    "exchange_calendars>=4.5,<5",
     "tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git",
 ]
 

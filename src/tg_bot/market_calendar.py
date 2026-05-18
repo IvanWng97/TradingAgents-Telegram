@@ -94,9 +94,17 @@ def is_market_open_for(ticker: str, on_date: date) -> bool:
 
     Used by `run_user_digest` to drop tickers from today's fan-out when
     their market is closed (weekend or holiday). On any unexpected error
-    (e.g. exchange_calendars data-range exhausted on a very-future date)
-    we fail-OPEN and return True — better to run a redundant analysis
-    than to silently drop the user's digest.
+    from `is_session` (e.g. exchange_calendars data-range exhausted on a
+    very-future date) we fail-OPEN and return True — better to run a
+    redundant analysis than to silently drop the user's digest.
+
+    Note: this fallback does NOT cover ImportError on `exchange_calendars`
+    itself. The dep is imported at module load (top-of-file
+    `from exchange_calendars import get_calendar`); a missing or broken
+    install fails the entire bot at process start. The dep is declared
+    in `pyproject.toml` as a hard requirement — restructuring the fallback
+    to cover ImportError would mean making the gate optional, which would
+    silently degrade to "always open" without operator visibility.
     """
     try:
         return _calendar_for(ticker).is_session(on_date)
