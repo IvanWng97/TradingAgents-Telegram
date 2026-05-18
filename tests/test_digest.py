@@ -2437,6 +2437,13 @@ async def test_fanout_uses_user_local_date_for_market_gate_and_cache() -> None:
     # 21:00 UTC on 2026-05-17 = 06:00 JST on 2026-05-18 (Tokyo is +9h).
     pinned_utc = _datetime(2026, 5, 17, 21, 0, tzinfo=ZoneInfo("UTC"))
 
+    # _PinnedDatetime replaces `runner.datetime` so `datetime.now(user_tz)`
+    # in run_user_digest returns our fixed moment. SAFE TODAY because
+    # `_analyze_one_for_digest` is stubbed below, so the real function's
+    # `datetime.now(UTC)` call for the Telegraph `generated_at` timestamp
+    # never fires. If a future test un-stubs the analyze function while
+    # keeping this patch, the Telegraph timestamp will be pinned too —
+    # noted here so the next author catches the coupling.
     class _PinnedDatetime:
         @classmethod
         def now(cls, tz=None):

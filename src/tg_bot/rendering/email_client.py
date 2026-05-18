@@ -120,6 +120,52 @@ def is_email_configured() -> bool:
     )
 
 
+async def check_resend_domain(domain: str) -> tuple[str | None, str | None]:
+    """Look up the Resend verification status for `domain`. Returns
+    `(status, error)` where exactly one is non-None:
+
+      - `("verified", None)` — domain present in account, status verified
+      - `("pending", None)` — domain present but DNS not propagated
+      - `(other, None)` — Resend reports another status (e.g. `not_started`)
+      - `(None, "not_in_account")` — API succeeded but domain isn't there
+      - `(None, "<ExceptionClass>")` — API call failed; exception class
+        name returned for log/UI correlation
+
+    Lives here (not in `commands.py`) so all Resend SDK access stays in
+    one module — same pattern as `telegraph_client.py` owning every
+    Telegraph SDK call. `_email_diagnose` in `commands.py` is the only
+    caller today, but a future operator-side health check or admin
+    command would reuse this without re-imitating the SDK shape.
+    """
+    if not is_email_configured():
+        return None, "not_configured"
+
+    # Lazy import — the SDK isn't needed at module-load time and we
+    # already lazy-import it in `send_digest_email`.
+    import resend
+
+    api_key = os.environ["RESEND_API_KEY"]
+
+    def _list_blocking() -> object:
+        resend.api_key = api_key
+        return resend.Domains.list()
+
+    try:
+        result = await asyncio.to_thread(_list_blocking)
+    except Exception as e:
+        logger.warning(
+            "check_resend_domain: Domains.list failed (%s)",
+            type(e).__name__,
+        )
+        return None, type(e).__name__
+
+    domains = result.get("data", []) if isinstance(result, dict) else []
+    match = next((d for d in domains if d.get("name") == domain), None)
+    if match is None:
+        return None, "not_in_account"
+    return match.get("status", "unknown"), None
+
+
 def _signal_tally(status: dict) -> str:
     """Render a one-line "3 BUY · 2 HOLD · 1 SELL" tally for the subject
     line. Counts only completed (dict) status entries — cancelled and

@@ -751,7 +751,8 @@ async def _analyze_one_for_digest(
     user_id: int,
     ticker: str,
     reporter: _DigestProgressReporter | None = None,
-    today_iso: str | None = None,
+    *,
+    today_iso: str,
 ) -> dict | None:
     """Headless analysis for one ticker. Returns
     {ticker, signal, telegraph_url} or None on failure.
@@ -764,9 +765,10 @@ async def _analyze_one_for_digest(
     `reporter`, when supplied, drives the per-ticker step display in the
     shared digest message — same LangChain hook as the manual flow.
 
-    `today_iso`, when supplied, is the user-local date string (from
-    `run_user_digest`'s tz-aware computation) used as the cache key
-    date. Falls back to server-local for the legacy no-arg call shape.
+    `today_iso` is the user-local date string (from `run_user_digest`'s
+    tz-aware computation) used as the cache key date. Keyword-only +
+    required so callers can't silently fall back to server-local (which
+    would re-introduce the Tokyo-tz bug fixed in PR #76).
     """
     # INVARIANT — keep in sync with `_run_analysis_for_ticker`. The two
     # analysis paths share three structural surfaces that must drift
@@ -781,8 +783,6 @@ async def _analyze_one_for_digest(
     # the "Starting…" reporter event.
     config = build_config()
     key = AnalysisConfigKey.from_config(config)
-    if today_iso is None:
-        today_iso = result_cache.today_iso()
     cached = result_cache.lookup(key, ticker, today_iso)
     if cached:
         logger.info("digest: result_cache HIT for %s — skipping LLM run", ticker)

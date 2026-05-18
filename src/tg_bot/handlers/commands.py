@@ -17,10 +17,10 @@ from tg_bot.pipeline.analysis import (
     EFFORT_KEY_BY_PROVIDER,
     build_config,
     check_llm_configured,
-    estimate_token_cost_usd,
     llm_setup_error_message,
     pool_stats,
 )
+from tg_bot.pipeline.pricing import estimate_token_cost_usd
 from tg_bot.pipeline.progress import get_token_totals
 from tg_bot.handlers.analysis_runner import _run_analysis_for_ticker
 from tg_bot.rendering.email_client import is_email_configured, send_digest_email
@@ -606,7 +606,12 @@ async def _email_diagnose(update: Update, current: str | None) -> None:
     from datetime import date as _date
     from html import escape as _html_escape
 
-    lines = ["🔍 *Email diagnose*\n"]
+    from tg_bot.rendering.email_client import check_resend_domain
+
+    # Title + intentional blank line, then bullets. Using explicit
+    # blank-line separator (vs the prior `"🔍 …\n"` form which would
+    # compound with `"\n".join(...)` into a double blank line).
+    lines = ["🔍 *Email diagnose*", ""]
 
     api_key_set = bool(os.environ.get("RESEND_API_KEY"))
     from_addr = os.environ.get("RESEND_FROM", "")
@@ -620,47 +625,31 @@ async def _email_diagnose(update: Update, current: str | None) -> None:
         )
     )
 
-    # Domain status — derive expected domain from RESEND_FROM and ping
-    # Resend's Domains.list() to find a matching entry. Best-effort:
-    # API errors are reported, not swallowed.
+    # Domain status — `check_resend_domain` lives in email_client.py so
+    # all Resend SDK access stays in one module (parity with how
+    # telegraph_client.py owns every Telegraph SDK call).
     if api_key_set and from_addr and "@" in from_addr:
         expected_domain = from_addr.rsplit("@", 1)[1]
-        try:
-            import resend
-
-            def _list_domains():
-                resend.api_key = os.environ["RESEND_API_KEY"]
-                return resend.Domains.list()
-
-            result = await asyncio.to_thread(_list_domains)
-            domains = result.get("data", []) if isinstance(result, dict) else []
-            match = next(
-                (d for d in domains if d.get("name") == expected_domain),
-                None,
+        domain_h = escape_markdown(expected_domain, version=2)
+        status, error = await check_resend_domain(expected_domain)
+        if error == "not_in_account":
+            lines.append(
+                f"• Domain status: ❌ `{domain_h}` not in your Resend account "
+                "— add it in the dashboard\\."
             )
-            if match is None:
-                lines.append(
-                    f"• Domain status: ❌ `{escape_markdown(expected_domain, version=2)}` "
-                    "not in your Resend account — add it in the dashboard\\."
-                )
-            else:
-                status = match.get("status", "unknown")
-                if status == "verified":
-                    lines.append(
-                        f"• Domain status: ✅ `{escape_markdown(expected_domain, version=2)}` "
-                        "verified"
-                    )
-                else:
-                    lines.append(
-                        f"• Domain status: ⏳ `{escape_markdown(expected_domain, version=2)}` "
-                        f"is `{escape_markdown(status, version=2)}` "
-                        "\\(DNS not propagated yet, or pending in Resend\\)"
-                    )
-        except Exception as e:
+        elif error is not None:
             lines.append(
                 f"• Domain status: ❌ Resend API error "
-                f"\\(`{escape_markdown(type(e).__name__, version=2)}`\\) "
+                f"\\(`{escape_markdown(error, version=2)}`\\) "
                 "— check `RESEND_API_KEY` value"
+            )
+        elif status == "verified":
+            lines.append(f"• Domain status: ✅ `{domain_h}` verified")
+        else:
+            status_h = escape_markdown(status or "unknown", version=2)
+            lines.append(
+                f"• Domain status: ⏳ `{domain_h}` is `{status_h}` "
+                "\\(DNS not propagated yet, or pending in Resend\\)"
             )
     else:
         lines.append(

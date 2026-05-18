@@ -94,6 +94,19 @@ def _add_token_usage(input_tokens: int, output_tokens: int) -> None:
         _total_output_tokens += output_tokens
 
 
+def reset_token_totals() -> None:
+    """Reset the bot-wide token accumulators to zero. Intended for tests
+    that need a clean baseline; production callers should never reset
+    these (the lifetime is "since process start" by design).
+
+    Public so tests don't have to reach into private module state via
+    `_token_counter_lock` / `_total_input_tokens` directly."""
+    global _total_input_tokens, _total_output_tokens
+    with _token_counter_lock:
+        _total_input_tokens = 0
+        _total_output_tokens = 0
+
+
 def _extract_token_usage(response: Any) -> tuple[int, int] | None:
     """Best-effort extraction of `(input, output)` token counts from
     LangChain's `LLMResult` shape. Returns None when no usage data is
@@ -130,12 +143,29 @@ def _extract_token_usage(response: Any) -> tuple[int, int] | None:
                 break
     if usage is None:
         return None
-    in_tokens = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
-    out_tokens = usage.get("completion_tokens") or usage.get("output_tokens") or 0
+    # Explicit None check — a truthy-`or` chain would treat legitimate
+    # zero-token reports (e.g. fully-cached prompts on some providers)
+    # as "missing" and fall through to the alternate key, silently
+    # misattributing the count. Pinned by `test_token_extraction_treats_zero_as_valid`.
+    in_tokens = _first_present(usage, "prompt_tokens", "input_tokens")
+    out_tokens = _first_present(usage, "completion_tokens", "output_tokens")
+    if in_tokens is None and out_tokens is None:
+        return None
     try:
-        return int(in_tokens), int(out_tokens)
+        return int(in_tokens or 0), int(out_tokens or 0)
     except (TypeError, ValueError):
         return None
+
+
+def _first_present(d: dict, *keys: str) -> Any:
+    """Return the first key's value that's actually set (not None) in `d`,
+    treating 0 as present. Used by `_extract_token_usage` to disambiguate
+    between absent keys and zero counts."""
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            return v
+    return None
 
 
 def resolve_step(raw_name: str) -> tuple[str, int | None]:

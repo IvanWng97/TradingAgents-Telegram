@@ -439,9 +439,7 @@ async def test_token_accumulator_is_thread_safe() -> None:
     from tg_bot.pipeline import progress as p
 
     # Snapshot starting state so other tests' writes don't pollute.
-    with p._token_counter_lock:
-        p._total_input_tokens = 0
-        p._total_output_tokens = 0
+    p.reset_token_totals()
 
     def worker():
         for _ in range(1000):
@@ -466,9 +464,7 @@ async def test_on_llm_end_accumulates_into_bot_wide_totals() -> None:
 
     from tg_bot.pipeline import progress as p
 
-    with p._token_counter_lock:
-        p._total_input_tokens = 0
-        p._total_output_tokens = 0
+    p.reset_token_totals()
 
     cb = p._DelegatingProgressCallback()
     response = SimpleNamespace(
@@ -488,7 +484,7 @@ async def test_on_llm_end_accumulates_into_bot_wide_totals() -> None:
 async def test_estimate_cost_returns_dollar_amount_for_known_model() -> None:
     """For a (provider, model) in the price table, the function must
     return a float dollar amount. 1M input tokens of gpt-4o = $2.50."""
-    from tg_bot.pipeline.analysis import estimate_token_cost_usd
+    from tg_bot.pipeline.pricing import estimate_token_cost_usd
 
     cost = estimate_token_cost_usd("openai", "gpt-4o", "gpt-4o-mini", 1_000_000, 0)
     # 50/50 split between gpt-4o (input $2.50/M) and gpt-4o-mini (input
@@ -499,7 +495,45 @@ async def test_estimate_cost_returns_dollar_amount_for_known_model() -> None:
 async def test_estimate_cost_returns_none_for_unknown_provider() -> None:
     """No price entry for either model → None. The /status renderer
     falls back to tokens-only rendering instead of inventing a number."""
-    from tg_bot.pipeline.analysis import estimate_token_cost_usd
+    from tg_bot.pipeline.pricing import estimate_token_cost_usd
 
     cost = estimate_token_cost_usd("unknown-llm", "ghost-1", "ghost-2", 1000, 500)
     assert cost is None
+
+
+async def test_token_extraction_treats_zero_as_valid_count() -> None:
+    """A provider reporting `prompt_tokens=0, completion_tokens=500` is
+    a legitimate value (fully-cached prompts on some providers). The
+    extractor must NOT silently fall through to `input_tokens` (which
+    isn't set in OpenAI shape) — the resulting (0, 500) is the right
+    answer, but the more dangerous case is when BOTH key naming
+    conventions are present and the truthy-or chain silently prefers
+    `input_tokens` over a zero `prompt_tokens`. Reviewer finding on
+    PR #76."""
+    from types import SimpleNamespace
+
+    from tg_bot.pipeline.progress import _extract_token_usage
+
+    # OpenAI shape with prompt_tokens=0 should still return (0, 500),
+    # not None.
+    response = SimpleNamespace(
+        llm_output={"token_usage": {"prompt_tokens": 0, "completion_tokens": 500}},
+        generations=[],
+    )
+    assert _extract_token_usage(response) == (0, 500)
+
+    # Dual-shape (both prompt_tokens and input_tokens present) — the
+    # truthy-or chain would silently prefer input_tokens=999 when
+    # prompt_tokens=0. Explicit None check picks prompt_tokens=0 because
+    # it's the first set value, not None.
+    response = SimpleNamespace(
+        llm_output={
+            "token_usage": {
+                "prompt_tokens": 0,
+                "input_tokens": 999,
+                "completion_tokens": 250,
+            }
+        },
+        generations=[],
+    )
+    assert _extract_token_usage(response) == (0, 250)
