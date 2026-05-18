@@ -72,3 +72,28 @@ def _disable_digest_llm_precheck():
     yield
     callbacks.check_llm_configured = orig_callbacks
     analysis_runner.check_llm_configured = orig_runner
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _force_markets_open_for_digest_tests():
+    """Patch `is_market_open_for` to unconditionally return True for the
+    digest test suite. Without this, every digest fan-out test would
+    silently take the "all markets closed" branch when pytest happens
+    to run on Sat/Sun or a US holiday — the test asserts a fan-out
+    flow that the calendar gate skips entirely.
+
+    The source function at `tg_bot.market_calendar.is_market_open_for`
+    is NOT touched — `test_market_calendar.py` calls it directly to
+    verify real behavior. Only the module-level reference in
+    `analysis_runner` (used inside `run_user_digest`) is no-op'd.
+
+    Tests that exercise the calendar gate's effect on the fan-out
+    (closed markets, partial closures) re-patch this attribute themselves
+    inside a try/finally — see `test_digest.py:test_fanout_*_market*`.
+    """
+    from tg_bot.handlers import analysis_runner
+
+    orig = analysis_runner.is_market_open_for
+    analysis_runner.is_market_open_for = lambda *_args, **_kwargs: True
+    yield
+    analysis_runner.is_market_open_for = orig
