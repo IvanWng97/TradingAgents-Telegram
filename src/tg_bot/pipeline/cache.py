@@ -46,6 +46,7 @@ import time
 from datetime import date as _date, datetime, UTC
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from tg_bot.pipeline.config_key import AnalysisConfigKey
 
@@ -70,16 +71,29 @@ def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
-def today_iso() -> str:
+def today_iso(tz: ZoneInfo | None = None) -> str:
     """Local-date ISO string used as the cache lookup key AND the
     tradingagents log filename (`full_states_log_<date>.json`). Returned
     from a helper so callers don't repeat `date.today().isoformat()` and
     so the convention is documented in one place.
 
-    Local-date (not UTC) is deliberate: matches tradingagents' on-disk
-    log filename convention. Using a UTC stamp would 404 for late-night
-    runs from negative-UTC zones (e.g. 23:00 PDT → 06:00 UTC next day)."""
-    return _date.today().isoformat()
+    With no `tz`, returns the server's local date (which inside Docker is
+    typically UTC). Manual `/watch` taps call this no-arg form so their
+    cache key matches tradingagents' on-disk log filename convention —
+    using a UTC stamp would 404 for late-night runs from negative-UTC
+    zones (e.g. 23:00 PDT → 06:00 UTC next day).
+
+    With `tz` set, returns the user-local date in that timezone. The
+    digest fan-out passes `ZoneInfo(digest.tz)` here so a Tokyo user
+    firing at 09:00 JST = 00:00 UTC (prior day in server-local) sees
+    today's date threaded through the cache key + calendar gate +
+    rendered header consistently. Without this, the architect review
+    of PR #71 traced the Tokyo failure mode where holiday-boundary
+    days produced wrong market-closed skips.
+    """
+    if tz is None:
+        return _date.today().isoformat()
+    return datetime.now(tz).date().isoformat()
 
 
 def parse_generated_at(s: str | None) -> datetime | None:

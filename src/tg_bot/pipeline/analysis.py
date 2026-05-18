@@ -138,6 +138,11 @@ PROVIDER_ENV_KEYS: dict[str, str | None] = {
 }
 
 
+# LLM pricing data + estimate_token_cost_usd live in pipeline/pricing.py
+# (split out per PR #76 architect review — pricing is observability cold
+# path, separate from this module's LLM execution wiring).
+
+
 def check_llm_configured(config: dict | None = None) -> str | None:
     """Return None if the bot is ready to run analyses, or a short reason
     string explaining what to fix. Callers wrap the reason in their own

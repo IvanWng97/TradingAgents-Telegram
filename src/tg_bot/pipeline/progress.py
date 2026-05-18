@@ -61,6 +61,113 @@ TOTAL_STEPS = max(ordinal for _name, ordinal in _STEP_MAP.values())
 _current_reporter = threading.local()
 
 
+# Bot-wide LLM token usage accumulator. Populated by `_DelegatingProgressCallback.on_llm_end`
+# from LangChain's `LLMResult.llm_output["token_usage"]`. Surfaced in `/status` so the
+# operator can see real-time consumption + an estimated dollar cost without a separate
+# observability pipeline. Thread-safe — `on_llm_end` runs on the analysis worker thread
+# while `/status` reads on the asyncio loop, so the lock is load-bearing.
+_token_counter_lock = threading.Lock()
+_total_input_tokens = 0
+_total_output_tokens = 0
+
+
+def get_token_totals() -> tuple[int, int]:
+    """Return `(input_tokens, output_tokens)` accumulated since process start.
+
+    Read under the lock so a partial update from a concurrent `on_llm_end`
+    can't produce a torn read on 32-bit platforms (defensive — CPython
+    int writes are atomic on 64-bit, but the lock is cheap and makes the
+    contract explicit).
+    """
+    with _token_counter_lock:
+        return _total_input_tokens, _total_output_tokens
+
+
+def _add_token_usage(input_tokens: int, output_tokens: int) -> None:
+    """Internal: accumulate into the bot-wide totals. Called from
+    `_DelegatingProgressCallback.on_llm_end`."""
+    global _total_input_tokens, _total_output_tokens
+    if input_tokens < 0 or output_tokens < 0:
+        return  # ignore malformed inputs
+    with _token_counter_lock:
+        _total_input_tokens += input_tokens
+        _total_output_tokens += output_tokens
+
+
+def reset_token_totals() -> None:
+    """Reset the bot-wide token accumulators to zero. Intended for tests
+    that need a clean baseline; production callers should never reset
+    these (the lifetime is "since process start" by design).
+
+    Public so tests don't have to reach into private module state via
+    `_token_counter_lock` / `_total_input_tokens` directly."""
+    global _total_input_tokens, _total_output_tokens
+    with _token_counter_lock:
+        _total_input_tokens = 0
+        _total_output_tokens = 0
+
+
+def _extract_token_usage(response: Any) -> tuple[int, int] | None:
+    """Best-effort extraction of `(input, output)` token counts from
+    LangChain's `LLMResult` shape. Returns None when no usage data is
+    present (some providers don't surface it; tool calls don't either).
+
+    LangChain wraps the provider's native usage shape in `llm_output`
+    (top-level) or per-`Generation`'s `generation_info`. The provider
+    keys vary:
+      OpenAI:    {"prompt_tokens": N, "completion_tokens": M, "total_tokens": ...}
+      Anthropic: {"input_tokens": N, "output_tokens": M}
+      Gemini:    {"input_tokens": N, "output_tokens": M}
+      DeepSeek:  follows OpenAI shape
+    The fallback chain tries both naming conventions in both locations.
+    """
+    if response is None:
+        return None
+    # Primary location: response.llm_output["token_usage"].
+    llm_output = getattr(response, "llm_output", None) or {}
+    usage = llm_output.get("token_usage") if isinstance(llm_output, dict) else None
+    if not isinstance(usage, dict):
+        usage = None
+    # Fallback: walk Generation.generation_info for the same dict.
+    if usage is None:
+        generations = getattr(response, "generations", None) or []
+        for gen_list in generations:
+            for gen in gen_list:
+                info = getattr(gen, "generation_info", None) or {}
+                if isinstance(info, dict) and "token_usage" in info:
+                    candidate = info["token_usage"]
+                    if isinstance(candidate, dict):
+                        usage = candidate
+                        break
+            if usage is not None:
+                break
+    if usage is None:
+        return None
+    # Explicit None check — a truthy-`or` chain would treat legitimate
+    # zero-token reports (e.g. fully-cached prompts on some providers)
+    # as "missing" and fall through to the alternate key, silently
+    # misattributing the count. Pinned by `test_token_extraction_treats_zero_as_valid`.
+    in_tokens = _first_present(usage, "prompt_tokens", "input_tokens")
+    out_tokens = _first_present(usage, "completion_tokens", "output_tokens")
+    if in_tokens is None and out_tokens is None:
+        return None
+    try:
+        return int(in_tokens or 0), int(out_tokens or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_present(d: dict, *keys: str) -> Any:
+    """Return the first key's value that's actually set (not None) in `d`,
+    treating 0 as present. Used by `_extract_token_usage` to disambiguate
+    between absent keys and zero counts."""
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            return v
+    return None
+
+
 def resolve_step(raw_name: str) -> tuple[str, int | None]:
     """Map a langgraph node name to (friendly_name, ordinal). Falls back to
     a Title-Cased version of the raw name with no ordinal when unknown."""
@@ -228,6 +335,21 @@ class _DelegatingProgressCallback(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         self._dispatch(kwargs)
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        """Accumulate token usage into the bot-wide counter on every LLM
+        call completion. Best-effort — providers that don't report usage
+        (or future LangChain shape changes) silently no-op. The counter
+        feeds `/status` for operator-visible spend tracking."""
+        try:
+            usage = _extract_token_usage(response)
+        except Exception as e:
+            logger.debug("token-usage extraction failed: %s", e)
+            return
+        if usage is None:
+            return
+        in_tokens, out_tokens = usage
+        _add_token_usage(in_tokens, out_tokens)
 
     def _dispatch(self, kwargs: dict) -> None:
         reporter: ProgressReporter | None = getattr(_current_reporter, "value", None)

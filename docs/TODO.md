@@ -18,3 +18,20 @@ Snapshot every saved analysis's signal + entry price, then sample the price peri
 Right now there's no feedback loop between the bot's verdicts and what the market actually did. Adding accuracy data does three things: builds user trust, surfaces when a provider is consistently wrong (so they switch), and gives us a metric that's not "did the LLM finish without crashing".
 
 **Out of scope.** No backtesting against historical entry points. No leaderboard across users (privacy). No "auto-trade if confidence > X" — that crosses the disclaimer line.
+
+
+## Watchlist export / import (`/export`, `/import`)
+
+Backup and portability: serialize a user's watchlist to JSON so it can be saved, shared, or re-applied to a fresh bot instance. Mirrors the "data isn't trapped" principle the rest of the bot already follows (watchlist.json on disk, telegraph URLs in cache, etc.).
+
+**Sketch.**
+
+- `/export` — sends the user's watchlist + digest config as a JSON document via `chat.send_document`. Filename: `<user_id>_watchlist_<YYYY-MM-DD>.json`. Shape: `{"version": 1, "watchlist": ["NVDA", ...], "digest": {"enabled": ..., "hour_local": ..., "tz": ..., "tickers": [...], "email": "..."}}`. No timestamps or LLM-config in the payload (process-wide; user shouldn't carry it across).
+- `/import` — bare command opens a ForceReply prompt asking for a JSON file (mirroring `/email`'s ForceReply pattern). Accept either an uploaded `.json` document or pasted JSON text. Validate `version`, validate each ticker via `validate_ticker`, report `✅ Imported: NVDA, AAPL · ❓ Invalid: XXXX · ⏭️ Skipped (already in watchlist): TSLA`. Digest config merges into the existing one (additive: new tickers added to enrolled set; existing schedule preserved unless explicitly overridden).
+- Single-user scope today (Telegram user id is the key); the JSON does NOT include any cross-user state. Future multi-user instances can reuse the same shape.
+
+**Why.**
+
+Two use cases the architect review on PR #75 flagged would benefit: (1) migrating between bot instances when the operator restarts on a fresh Docker host without persistent `data/` mount; (2) sharing a watchlist between accounts (e.g., personal + work Telegram accounts maintained by the same person). Today both require manual `/add NVDA AAPL ...` line-by-line.
+
+**Out of scope.** No CSV/XLSX support (JSON is enough). No partial export (whole user state or nothing). No history/cache export (that's separate — `data/result_cache/` is server-side and isn't user-shareable anyway).

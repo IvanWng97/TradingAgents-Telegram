@@ -748,7 +748,11 @@ class _DigestProgressReporter:
 
 
 async def _analyze_one_for_digest(
-    user_id: int, ticker: str, reporter: _DigestProgressReporter | None = None
+    user_id: int,
+    ticker: str,
+    reporter: _DigestProgressReporter | None = None,
+    *,
+    today_iso: str,
 ) -> dict | None:
     """Headless analysis for one ticker. Returns
     {ticker, signal, telegraph_url} or None on failure.
@@ -760,6 +764,11 @@ async def _analyze_one_for_digest(
 
     `reporter`, when supplied, drives the per-ticker step display in the
     shared digest message — same LangChain hook as the manual flow.
+
+    `today_iso` is the user-local date string (from `run_user_digest`'s
+    tz-aware computation) used as the cache key date. Keyword-only +
+    required so callers can't silently fall back to server-local (which
+    would re-introduce the Tokyo-tz bug fixed in PR #76).
     """
     # INVARIANT — keep in sync with `_run_analysis_for_ticker`. The two
     # analysis paths share three structural surfaces that must drift
@@ -774,7 +783,6 @@ async def _analyze_one_for_digest(
     # the "Starting…" reporter event.
     config = build_config()
     key = AnalysisConfigKey.from_config(config)
-    today_iso = result_cache.today_iso()
     cached = result_cache.lookup(key, ticker, today_iso)
     if cached:
         logger.info("digest: result_cache HIT for %s — skipping LLM run", ticker)
@@ -1010,7 +1018,24 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
     the JobQueue doesn't keep retrying every day.
     """
     full_watchlist = watchlist_storage.get_watchlist(user_id)
-    today_date = date.today()
+    # User-local date: derive from `digest.tz` so a Tokyo user firing at
+    # 09:00 JST = 00:00 UTC (prior day server-local) sees today's date
+    # threaded through the cache key + market-calendar gate + rendered
+    # header. Without the tz arg, `date.today()` would pull the server's
+    # local date (typically UTC inside Docker) and produce wrong skips
+    # on holiday-boundary days. See `pipeline/cache.py:today_iso`.
+    user_digest = user_config_storage.get_digest(user_id) or {}
+    user_tz_str = user_digest.get("tz") or "UTC"
+    try:
+        user_tz = ZoneInfo(user_tz_str)
+    except ZoneInfoNotFoundError:
+        logger.warning(
+            "digest: user %s has invalid tz %r — falling back to UTC",
+            user_id,
+            user_tz_str,
+        )
+        user_tz = ZoneInfo("UTC")
+    today_date = datetime.now(user_tz).date()
     today = today_date.isoformat()
     # All digest captions are HTML mode now — escape for HTML, not MarkdownV2.
     safe_date = _html_escape(today)
@@ -1262,7 +1287,9 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
             ticker, loop, _on_step, cancel_event=cancel_event
         )
         try:
-            result = await _analyze_one_for_digest(user_id, ticker, reporter)
+            result = await _analyze_one_for_digest(
+                user_id, ticker, reporter, today_iso=today
+            )
             # Race: cancel could have fired after analyze returned but
             # before we record the result. Honour the flag — discard.
             if cancel_event.is_set():

@@ -790,7 +790,7 @@ async def test_fanout_partial_market_closure_drops_only_closed() -> None:
     def _selective_open(ticker, _date):
         return ticker == "NVDA"
 
-    async def _fake_analyze(_uid, ticker, reporter=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -863,7 +863,7 @@ async def test_fanout_calls_email_mirror_when_opted_in_and_configured() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    async def _fake_analyze(_uid, ticker, reporter=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -916,7 +916,7 @@ async def test_fanout_skips_email_mirror_when_no_opt_in() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    async def _fake_analyze(_uid, ticker, reporter=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -955,7 +955,7 @@ async def test_fanout_email_failure_does_not_break_telegram_path() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    async def _fake_analyze(_uid, ticker, reporter=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -1045,7 +1045,7 @@ async def test_fanout_summary_renders() -> None:
         "TSLA": None,  # simulate one failure
     }
 
-    async def _fake_analyze(_uid, ticker, reporter=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
         # Mimic the real analyze's per-step callback so the digest's
         # progress view exercises the analyzing-state branch.
         if reporter is not None:
@@ -1099,7 +1099,7 @@ async def test_render_deferred_captures_latest_state() -> None:
 
     started = {"NVDA": False, "AAPL": False}
 
-    async def _fake(_uid, ticker, reporter=None):
+    async def _fake(_uid, ticker, reporter=None, today_iso=None):
         # Fire `report_starting` on both nearly simultaneously — this is
         # the exact race the deferred render is meant to handle.
         if reporter is not None:
@@ -1178,7 +1178,7 @@ async def test_render_trampolines_after_cache_hit_neighbour() -> None:
             super().__init__()
             self.bot = _YieldingBot()
 
-    async def _fake(_uid, ticker, reporter=None):
+    async def _fake(_uid, ticker, reporter=None, today_iso=None):
         if ticker == "CACHED":
             # Cache-hit path: no report_starting, instant return. Mirrors
             # the real `_analyze_one_for_digest` short-circuit.
@@ -1292,7 +1292,7 @@ async def test_fanout_cancel_pending_via_task_cancel() -> None:
     orig_sem = runner._run_semaphore
     runner._run_semaphore = asyncio.Semaphore(1)
 
-    async def _slow(_uid, ticker, reporter=None):
+    async def _slow(_uid, ticker, reporter=None, today_iso=None):
         # Mimic _analyze_one_for_digest's sem.acquire so the test
         # actually exercises the pending → cancelled path.
         sem = runner._get_run_semaphore()
@@ -1376,7 +1376,7 @@ async def test_fanout_pending_task_cancel_sets_status_cancelled() -> None:
     orig_sem = runner._run_semaphore
     runner._run_semaphore = asyncio.Semaphore(1)  # cap=1 so B queues
 
-    async def _slow(_uid, ticker, reporter=None):
+    async def _slow(_uid, ticker, reporter=None, today_iso=None):
         sem = runner._get_run_semaphore()
         await sem.acquire()
         try:
@@ -1470,7 +1470,7 @@ async def test_fanout_forbidden_during_progress_edit() -> None:
         def get_watchlist(self, _u):
             return ["A", "B", "C"]
 
-    async def _slow(_uid, _t, reporter=None):
+    async def _slow(_uid, _t, reporter=None, today_iso=None):
         # Trigger an edit by reporting a step.
         if reporter is not None:
             await reporter.report_starting()
@@ -1608,7 +1608,7 @@ async def test_fanout_cancel_mid_run() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA", "AAPL", "TSLA"]
 
-    async def _slow_analyze(_uid, _ticker, reporter=None):
+    async def _slow_analyze(_uid, _ticker, reporter=None, today_iso=None):
         # Signal that at least one analysis has reached the running phase.
         started.set()
         # Mimic running until the cancel signal lands.
@@ -1880,7 +1880,7 @@ async def test_fanout_filter_intersects() -> None:
 
     seen: list[str] = []
 
-    async def _fake(_uid, ticker, reporter=None):
+    async def _fake(_uid, ticker, reporter=None, today_iso=None):
         seen.append(ticker)
         return {"ticker": ticker, "signal": "BUY", "telegraph_url": None}
 
@@ -2052,7 +2052,7 @@ async def test_fanout_empty_filter_reminder() -> None:
 
     ran: list[str] = []
 
-    async def _fake(_uid, ticker, reporter=None):
+    async def _fake(_uid, ticker, reporter=None, today_iso=None):
         ran.append(ticker)
         return {"ticker": ticker, "signal": "BUY", "telegraph_url": None}
 
@@ -2100,7 +2100,7 @@ async def test_fanout_appends_email_status_line_on_success() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    async def _fake_analyze(_uid, ticker, reporter=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -2156,7 +2156,7 @@ async def test_fanout_appends_email_failed_line_on_send_failure() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    async def _fake_analyze(_uid, ticker, reporter=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -2212,7 +2212,7 @@ async def test_fanout_appends_not_configured_line_when_env_missing() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    async def _fake_analyze(_uid, ticker, reporter=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -2259,7 +2259,7 @@ async def test_fanout_no_email_status_line_when_not_opted_in() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    async def _fake_analyze(_uid, ticker, reporter=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -2308,7 +2308,7 @@ async def test_fanout_second_edit_forbidden_disables_digest() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    async def _fake_analyze(_uid, ticker, reporter=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -2379,3 +2379,209 @@ async def test_fanout_second_edit_forbidden_disables_digest() -> None:
         runner.watchlist_storage = orig_w
         runner.user_config_storage = orig_uc
         runner._analyze_one_for_digest = orig_a
+
+
+async def test_fanout_uses_user_local_date_for_market_gate_and_cache() -> None:
+    """User in Asia/Tokyo firing digest at 09:00 JST = 00:00 UTC (prior
+    day server-local) must see TODAY's date — not yesterday's UTC date —
+    threaded through the market-calendar gate, the cache key, AND the
+    rendered header. Pins the fix for the known limitation flagged in
+    PR #71's architect review.
+
+    Test setup pins a specific UTC moment so the "user-tz date is one
+    ahead of UTC date" condition is deterministic. With the fix:
+    Tokyo-local sees a date string in `safe_date` that matches the
+    Tokyo wall clock, not the UTC server's date.
+    """
+    import os
+    from datetime import datetime as _datetime
+    from unittest.mock import patch
+    from zoneinfo import ZoneInfo
+
+    from tg_bot.handlers import analysis_runner as runner
+
+    class _W:
+        def get_watchlist(self, _uid):
+            return ["NVDA"]
+
+    captured_today: list[str] = []
+
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
+        captured_today.append(today_iso or "<server-default>")
+        return {
+            "ticker": ticker,
+            "signal": "BUY",
+            "telegraph_url": f"https://telegra.ph/{ticker}",
+        }
+
+    class _TokyoUserConfig:
+        """Like _UserConfigWithEmail but pins Asia/Tokyo as the user's tz."""
+
+        def get_enrolled_tickers(self, _uid, watchlist):
+            return list(watchlist)
+
+        def get_digest(self, _uid):
+            return {"enabled": True, "tickers": None, "tz": "Asia/Tokyo"}
+
+        async def disable_digest(self, _uid):
+            return True
+
+    orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
+    orig_a = runner._analyze_one_for_digest
+    runner.watchlist_storage = _W()
+    runner.user_config_storage = _TokyoUserConfig()
+    runner._analyze_one_for_digest = _fake_analyze
+
+    # Pin "now" to a moment where Tokyo-local date diverges from UTC date.
+    # 21:00 UTC on 2026-05-17 = 06:00 JST on 2026-05-18 (Tokyo is +9h).
+    pinned_utc = _datetime(2026, 5, 17, 21, 0, tzinfo=ZoneInfo("UTC"))
+
+    # _PinnedDatetime replaces `runner.datetime` so `datetime.now(user_tz)`
+    # in run_user_digest returns our fixed moment. SAFE TODAY because
+    # `_analyze_one_for_digest` is stubbed below, so the real function's
+    # `datetime.now(UTC)` call for the Telegraph `generated_at` timestamp
+    # never fires. If a future test un-stubs the analyze function while
+    # keeping this patch, the Telegraph timestamp will be pinned too —
+    # noted here so the next author catches the coupling.
+    class _PinnedDatetime:
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return pinned_utc.replace(tzinfo=None)
+            return pinned_utc.astimezone(tz)
+
+    try:
+        with patch.object(runner, "datetime", _PinnedDatetime):
+            app = _FakeFanOutApp()
+            await runner.run_user_digest(app, 42, 999)
+
+        # The user-local date in Asia/Tokyo at this moment is 2026-05-18.
+        # The server-local UTC date would be 2026-05-17. Pin that the
+        # cache-key date threaded through to _analyze_one_for_digest is
+        # the Tokyo one.
+        assert captured_today == ["2026-05-18"], (
+            f"expected Tokyo-local date '2026-05-18' in cache key; got {captured_today}"
+        )
+
+        # And the rendered header in the summary edit must also carry
+        # the Tokyo-local date, not the UTC date.
+        for edit in app.bot.edits:
+            assert "2026-05-17" not in edit["text"], (
+                f"server-local UTC date leaked into Telegram message: {edit['text']!r}"
+            )
+        # At least one edit (the summary) carries the user-local date.
+        assert any("2026-05-18" in e["text"] for e in app.bot.edits), (
+            f"user-local date missing from rendered edits: "
+            f"{[e['text'] for e in app.bot.edits]}"
+        )
+
+        # Strong confirmation that the captured cache date is the Tokyo
+        # date for the pinned moment.
+        os.environ.pop("RESEND_API_KEY", None)
+        os.environ.pop("RESEND_FROM", None)
+    finally:
+        runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
+        runner._analyze_one_for_digest = orig_a
+
+
+async def test_fanout_invalid_tz_falls_back_to_utc() -> None:
+    """`ZoneInfoNotFoundError` branch in run_user_digest: a corrupt saved
+    `digest.tz` (e.g. left over from a renamed IANA zone or hand-edited
+    user_config.json) must not crash the fan-out — it falls back to UTC
+    and logs a WARNING. Carry-over finding from PR #76's auto-review
+    that the post-feedback push didn't address.
+
+    Pins both the no-crash invariant AND the UTC fallback date threading
+    to the cache key.
+    """
+    from datetime import datetime as _datetime
+    from zoneinfo import ZoneInfo
+
+    from tg_bot.handlers import analysis_runner as runner
+
+    class _W:
+        def get_watchlist(self, _uid):
+            return ["NVDA"]
+
+    captured_today: list[str] = []
+
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
+        captured_today.append(today_iso or "")
+        return {
+            "ticker": ticker,
+            "signal": "BUY",
+            "telegraph_url": f"https://telegra.ph/{ticker}",
+        }
+
+    class _BadTzConfig:
+        def get_enrolled_tickers(self, _uid, watchlist):
+            return list(watchlist)
+
+        def get_digest(self, _uid):
+            return {"enabled": True, "tickers": None, "tz": "Not/AValidTz"}
+
+        async def disable_digest(self, _uid):
+            return True
+
+    orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
+    orig_a = runner._analyze_one_for_digest
+    runner.watchlist_storage = _W()
+    runner.user_config_storage = _BadTzConfig()
+    runner._analyze_one_for_digest = _fake_analyze
+    try:
+        # Expected fallback date is the UTC date at the moment the
+        # fan-out runs. Compute BOTH before and after the call to
+        # accept either date in the rare case a midnight boundary
+        # crosses during the test — avoids flaky weekly midnight CI
+        # failures.
+        utc_before = _datetime.now(ZoneInfo("UTC")).date().isoformat()
+        with _caplog_warning("tg_bot.handlers.analysis_runner") as warns:
+            app = _FakeFanOutApp()
+            await runner.run_user_digest(app, 42, 999)
+        utc_after = _datetime.now(ZoneInfo("UTC")).date().isoformat()
+
+        # No crash — fan-out reached _analyze_one_for_digest.
+        assert len(captured_today) == 1, (
+            f"expected one analyze call; got {len(captured_today)}"
+        )
+        assert captured_today[0] in (utc_before, utc_after), (
+            f"expected UTC date in cache key (one of {utc_before!r}, "
+            f"{utc_after!r}); got {captured_today[0]!r}"
+        )
+        # The WARNING log surfaces the invalid tz so operators notice
+        # the corrupt saved value (per the diagnostic-logging discipline
+        # added with progress.py's silent-failure surfaces).
+        assert any("invalid tz" in w.getMessage() for w in warns), (
+            f"expected 'invalid tz' WARNING; got: {[w.getMessage() for w in warns]}"
+        )
+    finally:
+        runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
+        runner._analyze_one_for_digest = orig_a
+
+
+def _caplog_warning(logger_name: str):  # noqa: E402  (function, not import)
+    """Minimal log-capture context manager so tests in this file don't
+    need the pytest `caplog` fixture (some legacy scenarios in the file
+    avoid it). Yields the list of LogRecord instances at WARNING+ level
+    captured from `logger_name`."""
+    import logging
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _cm():
+        logger = logging.getLogger(logger_name)
+        handler = logging.Handler()
+        handler.setLevel(logging.WARNING)
+        captured: list[logging.LogRecord] = []
+        handler.emit = captured.append
+        logger.addHandler(handler)
+        try:
+            yield captured
+        finally:
+            logger.removeHandler(handler)
+
+    return _cm()
