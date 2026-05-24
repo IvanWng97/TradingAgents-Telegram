@@ -36,7 +36,7 @@ dependencies = [
     # codes across major versions (we use XSHG/XTAI/etc. in `_SUFFIX_TO_CAL`).
     # The `test_suffix_map_codes_resolve_to_real_calendars` test catches
     # such drift in CI, but pinning <5 lets Dependabot stage the bump.
-    "exchange_calendars>=4.5,<5",
+    "exchange_calendars>=4.13.2,<5",
     # Resend transactional-email API client. Used by
     # `rendering/email_client.py` to mirror the daily digest summary
     # to the operator's email when they opt in via `/email set <addr>`.
