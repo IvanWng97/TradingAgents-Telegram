@@ -54,7 +54,7 @@ jobs:
       id-token: write
       actions: read           # Read CI status when reviewing.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0      # Full history for base-branch diff context.
 
