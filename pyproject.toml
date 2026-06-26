@@ -57,7 +57,7 @@ dev = [
     # pytest runs the `tests/test_*.py` suite (config in
     # [tool.pytest.ini_options] below). pytest-asyncio's auto mode lets
     # `async def test_*` functions run without a per-test marker.
-    "pytest>=9.0.3",
+    "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
 ]
 
