@@ -42,7 +42,7 @@ dependencies = [
     # to the operator's email when they opt in via `/email set <addr>`.
     # Free tier: 3000 emails/mo, 100/day — comfortably covers a
     # single-operator deployment. REST + small dep footprint.
-    "resend>=2.30.1",
+    "resend>=2.32.2",
     "tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git",
 ]
 
