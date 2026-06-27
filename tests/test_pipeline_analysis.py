@@ -148,9 +148,33 @@ async def test_check_llm_configured_openrouter_names_openrouter_key() -> None:
             os.environ["OPENROUTER_API_KEY"] = saved
 
 
+async def test_check_llm_configured_kimi_names_moonshot_key() -> None:
+    """kimi (Moonshot AI) authenticates with MOONSHOT_API_KEY — the env-var
+    name doesn't echo the provider name, so without the explicit
+    `kimi → MOONSHOT_API_KEY` row the precheck would silently pass and the
+    run would 401 at upstream API-call time. Pins the row added in the v0.3.0
+    sync (mistral/kimi/groq/nvidia)."""
+    saved = os.environ.pop("MOONSHOT_API_KEY", None)
+    try:
+        reason = check_llm_configured({"llm_provider": "kimi"})
+        assert reason is not None and "MOONSHOT_API_KEY" in reason, reason
+    finally:
+        if saved is not None:
+            os.environ["MOONSHOT_API_KEY"] = saved
+
+
 async def test_check_llm_configured_ollama_no_env_needed() -> None:
     """ollama runs locally — no env var required, gate opens immediately."""
     assert check_llm_configured({"llm_provider": "ollama"}) is None
+
+
+async def test_check_llm_configured_bedrock_no_env_needed() -> None:
+    """bedrock authenticates via the AWS credential chain (env/profile/IAM),
+    not a single API key, so its `PROVIDER_ENV_KEYS` value is `None` — the
+    precheck must open the gate (return None) rather than invent an env-var
+    name to demand. Pairs with the ollama/`None`-value branch; pins that a
+    `None` map value is a pass, not a `KeyError`/false-block."""
+    assert check_llm_configured({"llm_provider": "bedrock"}) is None
 
 
 async def test_check_llm_configured_cn_variant_names_cn_suffixed_key() -> None:
@@ -254,3 +278,50 @@ async def test_pool_stats_returns_one_pool_with_instance_count_after_init() -> N
         assert analysis_mod.pool_stats() == (1, 1)
     finally:
         analysis_mod._graph_pool = saved
+
+
+# ─── import guard degrades on upstream fail-loud (v0.3.0+) ──────────────
+
+
+async def test_import_guard_degrades_on_config_valueerror() -> None:
+    """tradingagents v0.3.0+ fails LOUD at lib import on an invalid
+    `TRADINGAGENTS_*` env value — `_apply_env_overrides` raises `ValueError`
+    (e.g. `TRADINGAGENTS_MAX_DEBATE_ROUNDS=two`), not `ImportError`. The
+    import guard's `except ValueError` clause must catch it so the bot
+    degrades to `TRADINGAGENTS_AVAILABLE=False` (analysis paths short-circuit
+    with a helpful error) instead of crashing the whole process at startup.
+
+    Loads a FRESH copy of `analysis.py` (not a reload of the shared module,
+    which would clobber the real one for later tests) with
+    `tradingagents.default_config` stubbed to raise on the `DEFAULT_CONFIG`
+    attribute access the guard performs."""
+    import importlib.util
+    import types
+
+    src_path = ROOT / "src" / "tg_bot" / "pipeline" / "analysis.py"
+
+    class _RaisingDefaultConfig(types.ModuleType):
+        def __getattr__(self, name: str):
+            if name == "DEFAULT_CONFIG":
+                raise ValueError(
+                    "Invalid value for TRADINGAGENTS_MAX_DEBATE_ROUNDS: 'two'"
+                )
+            raise AttributeError(name)
+
+    saved = sys.modules.get("tradingagents.default_config")
+    sys.modules["tradingagents.default_config"] = _RaisingDefaultConfig(
+        "tradingagents.default_config"
+    )
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "tg_bot.pipeline._analysis_guard_probe", src_path
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert mod.TRADINGAGENTS_AVAILABLE is False
+        assert mod.DEFAULT_CONFIG is None
+    finally:
+        if saved is not None:
+            sys.modules["tradingagents.default_config"] = saved
+        else:
+            sys.modules.pop("tradingagents.default_config", None)
