@@ -10,6 +10,7 @@ from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
+    ContextTypes,
     MessageHandler,
     TypeHandler,
     filters,
@@ -174,6 +175,20 @@ async def _post_stop(application: Application) -> None:
         await asyncio.sleep(2.0)
 
 
+async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Top-level error handler: log any unhandled handler exception.
+
+    Registered via `add_error_handler` so PTB never logs the bare
+    "No error handlers are registered" warning and, more importantly, so an
+    unhandled exception in a handler is surfaced rather than silently
+    swallowed. Pairs with the auth gate's own try/except (see `auth.py`)."""
+    logger.error(
+        "Unhandled exception while processing update: %s",
+        context.error,
+        exc_info=context.error,
+    )
+
+
 def _build_application() -> Application:
     # concurrent_updates=True is load-bearing for cancellation. Without it
     # PTB processes updates with a single worker, so a Cancel-button tap
@@ -202,6 +217,15 @@ def _build_application() -> Application:
         .post_stop(_post_stop)
         .build()
     )
+
+    # Global error handler — defense in depth. Without one, an unhandled
+    # exception in ANY handler makes PTB's process_error return False, and
+    # for the group=-1 auth gate that means an update could continue into
+    # later handler groups (the fail-open path H1 guards). Registering this
+    # ensures unhandled handler exceptions are logged, never silently
+    # swallowed, and never alter dispatch flow. The auth gate's own
+    # try/except (auth.py) is the primary fix; this is the backstop.
+    application.add_error_handler(_on_error)
 
     # Auth gate runs at group=-1 so it intercepts every update before any
     # specific command/callback handler.

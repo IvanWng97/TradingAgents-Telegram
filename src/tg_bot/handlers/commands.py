@@ -653,7 +653,7 @@ async def _email_diagnose(update: Update, current: str | None) -> None:
             )
     else:
         lines.append(
-            "• Domain status: ⏭ skipped \\(needs both env vars + valid FROM\\)"
+            "• Domain status: ⏭ skipped \\(needs both env vars \\+ valid FROM\\)"
         )
 
     # Test send — only if all prereqs above are met AND user has an
@@ -914,9 +914,12 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         out_str = _format_token_count(out_tokens)
         cost = estimate_token_cost_usd(provider, deep, quick, in_tokens, out_tokens)
         if cost is not None:
+            # Wrap the dollar figure in its own code span: the `.` in
+            # `12.34` (and `$`, `~`, `(`, `)`) are MarkdownV2-reserved and
+            # would break the whole message with `can't parse entities` if
+            # left bare outside a span. Inside a code span they're literal.
             tokens_line = (
-                f"• Tokens since boot: `{in_str} in / {out_str} out` "
-                f"\\(\\~${cost:.2f}\\)\n"
+                f"• Tokens since boot: `{in_str} in / {out_str} out` `(~${cost:.2f})`\n"
             )
         else:
             tokens_line = f"• Tokens since boot: `{in_str} in / {out_str} out`\n"

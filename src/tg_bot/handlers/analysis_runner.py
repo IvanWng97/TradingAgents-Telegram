@@ -815,6 +815,15 @@ async def _analyze_one_for_digest(
                 ticker,
                 reporter,
             )
+        except CancelledByUserError:
+            # In-flight cancel raised from the progress callback during
+            # propagate() — the common digest-cancel case. Let it propagate
+            # to `_wrapped` (which marks the row "cancelled") instead of the
+            # generic handler below, which would log it as an ERROR
+            # "analysis failed" traceback indistinguishable from a real
+            # crash. Mirrors the manual path's dedicated except (Invariant
+            # #5: same exception boundary on both paths).
+            raise
         except Exception:
             logger.exception("digest: analysis failed for %s", ticker)
             return None

@@ -7,11 +7,13 @@ the fail-closed `effective_user is None` path would be silent in
 logs and let bot-management updates through to handlers in a closed
 deployment.
 
-Four scenarios:
+Scenarios:
   - allowlist empty + any user → pass through (open mode)
   - allowlist set + user in list → pass through
   - allowlist set + user NOT in list → raise ApplicationHandlerStop
   - allowlist set + effective_user is None → raise (fail-closed)
+  - allowlist set + user NOT in list + the rejection notification itself
+    raises → STILL raise ApplicationHandlerStop (H1 fail-open regression)
 
 Run with: pytest tests/test_auth.py
 """
@@ -165,3 +167,71 @@ async def test_allowlist_fail_closed_on_missing_user() -> None:
             "fail-closed broken: effective_user=None passed through "
             "with non-empty allowlist"
         )
+
+
+# ─── H1: notification failure must NOT defeat the stop ──────────────────
+
+
+async def test_fail_closed_when_message_notification_raises() -> None:
+    """H1 regression (message surface). The "Not authorized" reply is
+    best-effort and MUST NOT gate the stop. If `reply_text` raises — a
+    transient `TimedOut`/`NetworkError` under burst, or `Forbidden` — the
+    gate must STILL raise `ApplicationHandlerStop`. Pre-fix the un-guarded
+    `await reply_text(...)` raised before the `raise`, so the unauthorized
+    update leaked past the only access-control gate into the handler
+    groups (token burn + watchlist/digest mutation)."""
+    from telegram.ext import ApplicationHandlerStop
+
+    auth = _reload_auth_with_allowlist("42,99")
+
+    class _BoomMessage:
+        async def reply_text(self, text: str, parse_mode: str | None = None) -> None:
+            raise RuntimeError("simulated Telegram failure (e.g. TimedOut)")
+
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=7),
+        callback_query=None,
+        effective_message=_BoomMessage(),
+    )
+    try:
+        await auth.authorize(update, context=None)
+    except ApplicationHandlerStop:
+        pass
+    except RuntimeError:
+        raise AssertionError(
+            "fail-OPEN: notification failure propagated instead of being "
+            "swallowed — the gate's ApplicationHandlerStop was skipped"
+        ) from None
+    else:
+        raise AssertionError("expected ApplicationHandlerStop")
+
+
+async def test_fail_closed_when_callback_answer_raises() -> None:
+    """H1 regression (callback surface). A stale inline button makes
+    `query.answer` raise `BadRequest: Query is too old` — deterministic,
+    not even network-dependent. The gate must still raise
+    `ApplicationHandlerStop`, not let the tap fall through."""
+    from telegram.ext import ApplicationHandlerStop
+
+    auth = _reload_auth_with_allowlist("42,99")
+
+    class _BoomQuery:
+        async def answer(self, text: str = "", show_alert: bool = False) -> None:
+            raise RuntimeError("Query is too old")
+
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=7),
+        callback_query=_BoomQuery(),
+        effective_message=None,
+    )
+    try:
+        await auth.authorize(update, context=None)
+    except ApplicationHandlerStop:
+        pass
+    except RuntimeError:
+        raise AssertionError(
+            "fail-OPEN: callback-answer failure propagated instead of being "
+            "swallowed — the gate's ApplicationHandlerStop was skipped"
+        ) from None
+    else:
+        raise AssertionError("expected ApplicationHandlerStop")

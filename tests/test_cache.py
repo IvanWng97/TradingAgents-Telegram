@@ -161,6 +161,64 @@ async def test_lazy_eviction_drops_old_dates() -> None:
     assert today_path.is_file()
 
 
+async def test_lazy_eviction_keeps_newer_sibling_on_out_of_order_store() -> None:
+    """L1 regression. The sweep must drop ONLY strictly-older siblings, not
+    'every other name'. When two runs straddle midnight and finish out of
+    order — an older frozen-date store (D1) landing AFTER a newer one (D2)
+    already wrote its file — a blanket sweep would delete the newer D2 file,
+    turning the next D2 tap into a redundant paid LLM run. Date-gating keeps
+    D2 alive regardless of write order."""
+    _fresh_data_dir()
+    from tg_bot.pipeline import cache
+
+    # Newer-date run (D2) lands first.
+    cache.store(DEFAULT_KEY, "NVDA", "2026-05-09", SAMPLE_STATE, "BUY", PLACEHOLDER_URL)
+    newer_path = (
+        Path(os.environ["TG_BOT_DATA_DIR"])
+        / "result_cache"
+        / DEFAULT_SLUG
+        / "NVDA"
+        / "2026-05-09.json"
+    )
+    assert newer_path.is_file()
+
+    # Older-date run (D1) — captured pre-midnight — completes last.
+    cache.store(
+        DEFAULT_KEY, "NVDA", "2026-05-08", SAMPLE_STATE, "HOLD", PLACEHOLDER_URL
+    )
+
+    # The newer sibling must survive; the older one it just wrote stays too
+    # (it's the just-written file, never swept).
+    assert newer_path.is_file(), (
+        "newer-date sibling wrongly evicted by an older-date store "
+        "(blanket sweep regression)"
+    )
+    assert newer_path.with_name("2026-05-08.json").is_file()
+    # And the newer entry is still readable (not just present on disk).
+    assert cache.lookup(DEFAULT_KEY, "NVDA", "2026-05-09")["signal"] == "BUY"
+
+
+async def test_lazy_eviction_leaves_unparseable_sibling_untouched() -> None:
+    """The date-gated sweep must never delete a sibling whose stem isn't a
+    valid ISO date — we only evict what we can positively date as older.
+    Guards an unrelated `.json` artifact (or a future schema file) from
+    being collateral-swept."""
+    _fresh_data_dir()
+    from tg_bot.pipeline import cache
+
+    ticker_dir = (
+        Path(os.environ["TG_BOT_DATA_DIR"]) / "result_cache" / DEFAULT_SLUG / "NVDA"
+    )
+    ticker_dir.mkdir(parents=True, exist_ok=True)
+    stray = ticker_dir / "metadata.json"
+    stray.write_text("{}")
+
+    # A normal store should sweep older DATED siblings but leave the
+    # non-dated file alone.
+    cache.store(DEFAULT_KEY, "NVDA", "2026-05-09", SAMPLE_STATE, "BUY", PLACEHOLDER_URL)
+    assert stray.is_file(), "non-date-named sibling must not be swept"
+
+
 async def test_corrupt_file_returns_none() -> None:
     """A truncated / hand-edited cache file should never crash a run."""
     _fresh_data_dir()
