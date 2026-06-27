@@ -787,6 +787,7 @@ async def test_queued_caption_shown_before_semaphore_wait() -> None:
     runner.Config.MAX_CONCURRENT_ANALYSES = 1
     runner._run_semaphore = asyncio.Semaphore(1)
 
+    tasks: list[asyncio.Task] = []
     try:
         bot, ctx = install_mocks()  # uses fake_busy_analysis (holds on _STOP_SIGNAL)
         tickers = ["AAA", "BBB"]
@@ -794,21 +795,30 @@ async def test_queued_caption_shown_before_semaphore_wait() -> None:
             asyncio.create_task(runner._run_analysis_for_ticker(ctx, 1, 1, t))
             for t in tickers
         ]
-        # Let both send_photo calls land. AAA gets the slot ("Analyzing"),
-        # BBB shows "⏳ ... queued" since cap=1.
+        # Let both send_photo calls land. With cap=1 exactly one ticker holds
+        # the slot ("Analyzing") and the other shows "⏳ ... queued".
         await asyncio.sleep(0.3)
 
         caps = {t: bot.captions.get(_msg_id_for(bot, t)) or "" for t in tickers}
-        assert caps["AAA"].startswith("📊 Analyzing"), (
-            f"AAA should be Analyzing (held the slot); got {caps['AAA']!r}"
+        # WHICH ticker wins the single slot is NOT guaranteed by task-creation
+        # order — asyncio scheduling (plus the cache-lookup to_thread hop) lets
+        # either go first, and on a loaded CI runner BBB often wins. Assert the
+        # order-agnostic invariant the test actually cares about: exactly one is
+        # Analyzing and exactly one is queued at the same instant.
+        analyzing = [t for t in tickers if caps[t].startswith("📊 Analyzing")]
+        queued = [t for t in tickers if "queued" in caps[t].lower()]
+        assert len(analyzing) == 1 and len(queued) == 1, (
+            "with cap=1 exactly one ticker should hold the slot and the other "
+            f"show queued before the holder releases; got {caps!r}"
         )
-        assert "queued" in caps["BBB"].lower(), (
-            f"BBB should show queued before AAA releases; got {caps['BBB']!r}"
-        )
-
+    finally:
+        # Release the busy thread in finally — a failed assert above must NOT
+        # leave the in-flight fake_busy_analysis blocked on _STOP_SIGNAL: the
+        # executor then can't join that thread at loop teardown, which on CI
+        # manifests as a 300s "executor did not finish joining its threads"
+        # hang and blows the job's 15-min timeout.
         _STOP_SIGNAL.set()
         await asyncio.gather(*tasks, return_exceptions=True)
-    finally:
         runner.Config.MAX_CONCURRENT_ANALYSES = cap_backup
         runner._run_semaphore = sem_backup
 
