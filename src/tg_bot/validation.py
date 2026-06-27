@@ -75,12 +75,21 @@ def _yfinance_has_data(symbol: str) -> bool:
         logger.debug("yfinance lookup failed for %s: %s", symbol, e)
         ok = False
     # Bounded FIFO eviction: pop the oldest insertion when full. Python
-    # dicts preserve insertion order since 3.7, so iter() yields oldest first.
+    # dicts preserve insertion order since 3.7, so the first key is oldest.
+    #
+    # `validate_ticker` runs N tokens of a bulk `/add` concurrently, each on
+    # its own `to_thread` worker; the yfinance call releases the GIL so the
+    # workers genuinely mutate this unsynchronized module-global in parallel.
+    # `next(iter(_CACHE))` would risk `RuntimeError: dictionary changed size
+    # during iteration` (a write landing between iter() and next()) and a
+    # double-pop `KeyError`. Snapshot the first key into a list (atomic
+    # under the GIL) and `pop(..., None)` so a concurrent eviction of the
+    # same key is a no-op instead of raising — neither would be caught here
+    # and would fail the whole `/add` (L5).
     if len(_CACHE) >= _CACHE_MAX and symbol not in _CACHE:
-        try:
-            _CACHE.pop(next(iter(_CACHE)))
-        except StopIteration:
-            pass
+        keys = list(_CACHE)
+        if keys:
+            _CACHE.pop(keys[0], None)
     _CACHE[symbol] = (ok, now + _CACHE_TTL)
     return ok
 

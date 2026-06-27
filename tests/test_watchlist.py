@@ -108,6 +108,34 @@ async def test_remove_last_ticker_drops_user_key() -> None:
     assert storage.get_watchlist("1") == []
 
 
+async def test_load_skips_non_list_values_instead_of_crashing() -> None:
+    """L4: a structurally-valid watchlist.json with a wrong value type must
+    NOT crash the singleton build or char-split a string. `JsonStorage._load`
+    recovers only from JSONDecodeError; the WatchlistStorage._load type guard
+    skips non-list rows (int/null → would raise TypeError on iteration; a bare
+    string → would silently become single-letter 'tickers'). Good rows
+    survive."""
+    _fresh_data_dir()
+    from tg_bot.storage.watchlist import WatchlistStorage
+
+    path = Path(os.environ["TG_BOT_DATA_DIR"]) / "watchlist.json"
+    # Hand-corrupted file the bot never writes itself: a bare string, an int,
+    # a null, plus one legitimately-shaped row.
+    path.write_text(json.dumps({"1": "NVDA", "2": 5, "3": None, "4": ["aapl", "tsla"]}))
+
+    # Must construct without raising (this runs in the module-level singleton
+    # build in production).
+    storage = WatchlistStorage(path)
+
+    # The bad rows are dropped, NOT char-split or coerced.
+    assert "1" not in storage._data, "bare-string row must be skipped, not split"
+    assert "2" not in storage._data
+    assert "3" not in storage._data
+    # The valid row survives, normalized (upper + sorted).
+    assert storage._data.get("4") == ["AAPL", "TSLA"]
+    assert storage.get_watchlist("1") == []  # corrupted user → empty surface
+
+
 # ─── picker rendering ──────────────────────────────────────────────────
 
 
@@ -647,6 +675,48 @@ async def test_handle_done_watch_threads_force_refresh_false() -> None:
     assert recorded["force_refresh"] is False, recorded
     assert "watch_mode" not in context.chat_data, context.chat_data
     assert "watch_selection" not in context.chat_data, context.chat_data
+
+
+async def test_handle_done_preserves_state_when_precheck_fails(monkeypatch) -> None:
+    """L10: when the LLM precheck FAILS, `_handle_done` must NOT pop the
+    picker state — so the user can fix `.env` (+ restart) and re-run without
+    re-selecting tickers — and must NOT invoke the runner. The autouse
+    conftest fixture no-ops `check_llm_configured`, so this test re-patches it
+    to return a reason to drive the failure branch (the documented
+    'delay the pop until after the precheck' contract)."""
+    import tg_bot.handlers.callbacks as callbacks
+
+    monkeypatch.setattr(
+        callbacks, "check_llm_configured", lambda *a, **k: "no provider set"
+    )
+
+    ran: list = []
+
+    async def fake_run(*a, **k):
+        ran.append(a)
+        return "completed"
+
+    monkeypatch.setattr(callbacks, "_run_analysis_for_ticker", fake_run)
+
+    query = _FakeQuery(chat_id=555)
+    context = SimpleNamespace(
+        chat_data={
+            "watch_mode": "refresh",
+            "watch_selection": {"NVDA", "AAPL"},
+            "watch_page": 3,
+        }
+    )
+    await callbacks._handle_done(query, context, 1)
+
+    # Runner never invoked on a failed precheck.
+    assert ran == [], "precheck failure must not launch any analysis"
+    # The user sees the setup-error message (edit, MarkdownV2).
+    assert query.edits, "expected a setup-error edit_message_text"
+    assert query.edits[-1][1].get("parse_mode") == "MarkdownV2"
+    # All three picker keys SURVIVE so a post-fix re-run keeps the selection.
+    assert context.chat_data.get("watch_mode") == "refresh"
+    assert context.chat_data.get("watch_selection") == {"NVDA", "AAPL"}
+    assert context.chat_data.get("watch_page") == 3
 
 
 async def test_handle_cancel_pops_watch_state_only_for_watch_what() -> None:

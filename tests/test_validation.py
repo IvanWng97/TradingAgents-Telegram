@@ -127,3 +127,34 @@ async def test_unknown_class_share_form_fails_after_both_lookups(
 
     assert symbol is None
     assert hint is not None and "not found" in hint
+
+
+def test_cache_eviction_at_capacity_stays_bounded_and_exception_free(
+    monkeypatch,
+) -> None:
+    """L5: a full-cache eviction must pop the oldest key, keep the bound, and
+    never raise. The fix snapshots the first key (`list(_CACHE)[0]`) and
+    `pop(key, None)` instead of `pop(next(iter(_CACHE)))` — which, under the
+    concurrent bulk-`/add` workload where workers mutate the unsynchronized
+    `_CACHE` in parallel (yfinance releases the GIL), could raise
+    `RuntimeError: dictionary changed size during iteration` or a double-pop
+    `KeyError` and fail the whole `/add`. That race isn't deterministically
+    reproducible single-threaded, so this is a coverage pin on the eviction
+    arithmetic (bound preserved, oldest dropped, no raise)."""
+    import time
+
+    validation._CACHE.clear()
+    future = time.time() + 10_000  # live TTL so nothing is treated as expired
+    for i in range(validation._CACHE_MAX):
+        validation._CACHE[f"SYM{i}"] = (True, future)
+    oldest = next(iter(validation._CACHE))  # SYM0, inserted first
+    assert len(validation._CACHE) == validation._CACHE_MAX
+
+    monkeypatch.setattr(validation.yf, "Ticker", _make_fake_ticker({"NEWSYM"}))
+    ok = validation._yfinance_has_data("NEWSYM")  # forces one eviction
+
+    assert ok is True
+    assert "NEWSYM" in validation._CACHE
+    assert oldest not in validation._CACHE, "oldest entry should be evicted"
+    assert len(validation._CACHE) == validation._CACHE_MAX, "bound preserved"
+    validation._CACHE.clear()

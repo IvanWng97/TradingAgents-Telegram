@@ -1,6 +1,11 @@
 """Per-user ticker watchlists."""
 
+import logging
+
 from ._base import JsonStorage
+
+
+logger = logging.getLogger(__name__)
 
 
 class WatchlistStorage(JsonStorage):
@@ -12,12 +17,28 @@ class WatchlistStorage(JsonStorage):
         # /del — sees a stable alphabetical order. Sorting here also
         # repairs older saves that landed in insertion / arbitrary order.
         raw = super()._load()
-        return {
-            user_id: sorted(
+        cleaned: dict[str, list[str]] = {}
+        for user_id, tickers in raw.items():
+            # `JsonStorage._load` only recovers from JSONDecodeError, so a
+            # structurally-valid file with a wrong value type slips through
+            # to here. A non-list value (int/null → TypeError on iteration;
+            # a bare string → silently char-split into single-letter
+            # "tickers") would crash at module-import time (this runs in the
+            # `watchlist_storage = WatchlistStorage(...)` singleton build) or
+            # durably corrupt the watchlist. Skip + warn so a hand-edited /
+            # externally-corrupted file degrades gracefully (L4); mirrors the
+            # loud guard `set_digest_tickers` already has for this footgun.
+            if not isinstance(tickers, list):
+                logger.warning(
+                    "watchlist: user %s has non-list value (%s) — skipping row",
+                    user_id,
+                    type(tickers).__name__,
+                )
+                continue
+            cleaned[user_id] = sorted(
                 {t.upper() for t in tickers if isinstance(t, str) and t.strip()}
             )
-            for user_id, tickers in raw.items()
-        }
+        return cleaned
 
     async def add_ticker(self, user_id: str, ticker: str) -> bool:
         """Returns True if added, False if already present or invalid."""

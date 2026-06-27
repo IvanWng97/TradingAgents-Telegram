@@ -144,3 +144,47 @@ async def test_email_diagnose_skipped_line_escapes_plus() -> None:
     assert "Domain status: ⏭ skipped" in text, f"wrong branch rendered:\n{text}"
     assert "env vars \\+ valid FROM" in text, "plus must be escaped (\\+)"
     assert "env vars + valid" not in text, "bare unescaped '+' would break parse"
+
+
+# ─── L6: /status next-digest line failure is logged, not silently dropped ─
+
+
+async def test_status_bad_digest_tz_logs_warning_and_drops_line(
+    monkeypatch, caplog
+) -> None:
+    """L6: if the stored digest tz/hour is unresolvable (e.g. a tzdata-less
+    image, or a corrupted config), rendering the 'Next digest' line raises.
+    The handler must LOG a warning and fall back to omitting just that line —
+    not `except Exception: pass`, which would hide a broken digest schedule
+    behind a normal-looking `/status` (defeating its 'spot a broken bot'
+    purpose). The rest of `/status` still renders."""
+    import logging
+
+    monkeypatch.setattr(commands, "get_token_totals", lambda: (0, 0))
+
+    class _StubUserConfig:
+        def get_digest(self, _uid):
+            return {
+                "enabled": True,
+                "hour_local": 9,
+                "tz": "Not/AZone",  # unresolvable → next_fire raises
+            }
+
+    monkeypatch.setattr(commands, "user_config_storage", _StubUserConfig())
+
+    reply_mock = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        message=SimpleNamespace(reply_text=reply_mock),
+    )
+    context = SimpleNamespace(bot_data={"start_time": time.time()})
+
+    with caplog.at_level(logging.WARNING, logger="tg_bot.handlers.commands"):
+        await commands.status_cmd(update, context)
+
+    text = reply_mock.call_args[0][0]
+    assert "Next digest" not in text, "broken digest line should be omitted"
+    assert "*Bot status*" in text, "the rest of /status must still render"
+    assert any("next-digest" in r.getMessage() for r in caplog.records), (
+        "the failure must be logged at WARNING, not silently swallowed"
+    )
