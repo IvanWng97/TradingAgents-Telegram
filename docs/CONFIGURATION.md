@@ -26,6 +26,7 @@ Upstream `tradingagents` reads these env vars at library-import time via its `_E
 | `TRADINGAGENTS_OPENAI_REASONING_EFFORT` | no | `low`/`medium`/`high`. Applied only when provider is `openai`. Native upstream knob (v0.3.0+), gated to models that accept it. |
 | `TRADINGAGENTS_ANTHROPIC_EFFORT` | no | `low`/`medium`/`high`. Applied only when provider is `anthropic`. Native upstream knob (v0.3.0+). |
 | `TRADINGAGENTS_GOOGLE_THINKING_LEVEL` | no | `low`/`medium`/`high`. Applied only when provider is `google`. Native upstream knob (v0.3.0+). |
+| `TRADINGAGENTS_TEMPERATURE` | no | Cross-provider sampling temperature (v0.3.0+), forwarded to every provider when set. Blank = provider default. When set it joins the config identity, so the cache slug / caption / Telegraph title reflect it. |
 
 ### Bot tuning + persistence
 
