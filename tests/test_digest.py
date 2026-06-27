@@ -2605,7 +2605,11 @@ async def test_post_init_registers_enabled_digests_only() -> None:
     Seed two fully-configured enabled digests + one disabled; call the
     real `_post_init` against a fake app whose `_FakeJobQueue` records
     `run_daily`; assert EXACTLY the two enabled users got a `digest:<uid>`
-    job and the disabled one was skipped."""
+    job and the disabled one was skipped. A spy on `register_digest_job`
+    additionally asserts the disabled uid never REACHES it — that, not the
+    "no digest:333 job" check, is what pins the `iter_enabled_digests`
+    choice, since `register_digest_job` has its own enabled-guard that would
+    otherwise mask an `iter_users_with_digest` substitution."""
     from tg_bot import app as appmod
 
     s, _ = fresh_storage()
@@ -2629,11 +2633,22 @@ async def test_post_init_registers_enabled_digests_only() -> None:
     orig_uc = appmod.user_config_storage
     orig_w = appmod.watchlist_storage
     orig_llm = appmod.check_llm_configured
+    orig_reg = appmod.register_digest_job
+    # Spy on register_digest_job (called via the app module global at
+    # app.py:126) to capture which uids `_post_init` passes it — the disabled
+    # row must be filtered BEFORE the call.
+    reg_uids: list[int] = []
+
+    def _spy_register(application, uid, digest):
+        reg_uids.append(uid)
+        return orig_reg(application, uid, digest)
+
     # Swap the module-level storage singletons `_post_init` reads, and
     # stub the LLM precheck so the walk is hermetic (not env-dependent).
     appmod.user_config_storage = s
     appmod.watchlist_storage = _W()
     appmod.check_llm_configured = lambda *_a, **_kw: None
+    appmod.register_digest_job = _spy_register
     try:
         app = _FakeFanOutApp()
         # `_post_init` stamps bot_data["start_time"] and calls
@@ -2650,6 +2665,12 @@ async def test_post_init_registers_enabled_digests_only() -> None:
         # Pin the EXACT scheduled set — no extra jobs leaked, no dupes.
         names = sorted(j.name for j in app.job_queue._jobs if not j.removed)
         assert names == ["digest:111", "digest:222"], names
+        # _post_init filtered via iter_enabled_digests BEFORE calling
+        # register_digest_job: the disabled uid never reached it. This catches
+        # an `iter_users_with_digest` substitution that the job-name asserts
+        # above would miss (register_digest_job's own enabled-guard masks it).
+        assert sorted(reg_uids) == [111, 222], reg_uids
+        assert 333 not in reg_uids
         # Each enabled job carries the user's hour/tz/chat_id from storage.
         j111 = app.job_queue.get_jobs_by_name("digest:111")[0]
         assert j111.time.hour == 9
@@ -2661,6 +2682,7 @@ async def test_post_init_registers_enabled_digests_only() -> None:
         appmod.user_config_storage = orig_uc
         appmod.watchlist_storage = orig_w
         appmod.check_llm_configured = orig_llm
+        appmod.register_digest_job = orig_reg
 
 
 # --- Digest success-then-cancel race-close (Invariant #5 success branch) ---
