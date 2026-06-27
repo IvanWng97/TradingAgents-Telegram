@@ -2972,3 +2972,82 @@ async def test_fanout_late_render_does_not_overwrite_summary(monkeypatch) -> Non
         runner.watchlist_storage = orig_w
         runner.user_config_storage = orig_uc
         runner._analyze_one_for_digest = orig_a
+
+
+# ─── M7: digest `▶ Run now` re-entry guard ──────────────────────────────
+
+
+async def test_digest_run_now_reentry_guard(monkeypatch) -> None:
+    """M7: `digest:run` sets `chat_data["digest_running:<uid>"]` and schedules
+    ONE fan-out. A second tap while the flag is set must answer "already
+    running" and schedule NO second fan-out — otherwise a button-mash spawns
+    N parallel digests (N headers, N× token burn). Drives the real
+    `_handle_digest('digest:run')` with a fake `_run_digest_with_guard` so the
+    schedule is observable without running a real fan-out."""
+    from types import SimpleNamespace
+
+    from tg_bot.handlers import callbacks
+
+    guard_calls: list[str] = []
+
+    async def _fake_guard(chat_data, running_key, application, user_id, chat_id):
+        # Mimic scheduling but DON'T clear the key — so the second tap still
+        # sees an active run (the real guard clears in its finally).
+        guard_calls.append(running_key)
+
+    monkeypatch.setattr(callbacks, "_run_digest_with_guard", _fake_guard)
+
+    answers: list[tuple] = []
+
+    class _Q:
+        def __init__(self) -> None:
+            self.message = SimpleNamespace(chat_id=999)
+
+        async def answer(self, text="", show_alert=False):
+            answers.append((text, show_alert))
+
+    class _Bot:
+        async def send_message(self, **_kw):
+            pass
+
+    context = SimpleNamespace(chat_data={}, bot=_Bot(), application=object())
+
+    # First tap: schedules one fan-out, sets the guard key.
+    await callbacks._handle_digest(_Q(), context, 42, "digest:run")
+    assert context.chat_data.get("digest_running:42") is True
+    await asyncio.sleep(0)  # let the scheduled task run
+    assert guard_calls == ["digest_running:42"], "exactly one fan-out scheduled"
+
+    # Second tap while still flagged: refuses + schedules nothing more.
+    await callbacks._handle_digest(_Q(), context, 42, "digest:run")
+    await asyncio.sleep(0)
+    assert guard_calls == ["digest_running:42"], "second tap scheduled a 2nd fan-out"
+    assert any("already running" in (t or "").lower() for t, _ in answers), (
+        f"second tap should alert 'already running'; answers={answers}"
+    )
+
+
+async def test_run_digest_with_guard_clears_key_on_exception() -> None:
+    """M7 (other half): `_run_digest_with_guard` must clear the re-entry key in
+    its `finally` even when `run_user_digest` raises — otherwise a crashed
+    fan-out would wedge the guard and block every future `▶ Run now` for that
+    user until restart."""
+    import pytest
+
+    from tg_bot.handlers import analysis_runner as runner
+
+    chat_data = {"digest_running:42": True}
+
+    async def _boom(application, user_id, chat_id):
+        raise RuntimeError("fan-out blew up")
+
+    orig = runner.run_user_digest
+    runner.run_user_digest = _boom
+    try:
+        with pytest.raises(RuntimeError):
+            await runner._run_digest_with_guard(
+                chat_data, "digest_running:42", object(), 42, 999
+            )
+        assert "digest_running:42" not in chat_data, "guard must clear even on raise"
+    finally:
+        runner.run_user_digest = orig

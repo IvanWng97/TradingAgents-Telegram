@@ -25,16 +25,18 @@ logger = logging.getLogger(__name__)
 # The langgraph node identifier is matched case-insensitively against the
 # keys; unknown nodes fall back to a raw name display.
 #
-# Pinned against tradingagents v0.2.5 `graph/setup.py:97-112` `add_node()`
-# calls. Aliases below cover upstream rename churn we've observed across
-# versions installed via `pip install git+...`:
+# Pinned against tradingagents v0.3.0: the four analyst node names come from
+# `AnalystNodeSpec.agent_node` in `graph/analyst_execution.py` (Market /
+# Sentiment / News / Fundamentals Analyst); the rest are the hardcoded
+# `add_node()` calls in `graph/setup.py`. Aliases below cover upstream rename
+# churn we've observed across versions installed via `pip install git+...`:
 #   - `sentiment analyst` — issue #557 renamed `create_social_analyst` →
-#     `create_sentiment_analyst`. v0.2.5 keeps the back-compat node name
-#     `"Social Analyst"`, but later HEAD builds emit `"Sentiment Analyst"`
-#     directly (observed on the user's VPS). Both alias to step 2 so the
-#     "(2/12)" badge survives the upstream switch.
-# See `tests/test_progress.py::test_step_map_covers_all_upstream_v025_nodes`
-# for the alignment pin — bump it AND this map when upgrading tradingagents.
+#     `create_sentiment_analyst`. v0.2.5 kept the back-compat node name
+#     `"Social Analyst"`; v0.3.0 emits `"Sentiment Analyst"` directly. Both
+#     alias to step 2 so the "(2/12)" badge survives the upstream switch.
+# See `tests/test_progress.py::test_step_map_covers_all_upstream_v030_nodes`
+# (+ the `_UPSTREAM_LLM_NODE_NAMES_V030` constant) for the alignment pin —
+# bump BOTH (and the version suffix) AND this map when upgrading tradingagents.
 _STEP_MAP: dict[str, tuple[str, int]] = {
     "market analyst": ("Market Analyst", 1),
     "social analyst": ("Social Analyst", 2),

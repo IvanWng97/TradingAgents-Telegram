@@ -883,7 +883,14 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 f"\\({escape_markdown(humanize_delta(fire), version=2)}\\)\n"
             )
         except Exception:
-            pass
+            # Don't let a bad stored tz / hour (or a future delta-math bug)
+            # silently drop the whole line — that defeats /status's "spot a
+            # broken bot" purpose. Log + fall back to the empty line (L6).
+            logger.warning(
+                "status: failed to render next-digest line for user %s",
+                user_id,
+                exc_info=True,
+            )
 
     # Email mirror line: always shown (set OR not set) so users can verify
     # their own opt-in state from `/status` without invoking `/email`.
