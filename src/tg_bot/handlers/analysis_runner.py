@@ -129,7 +129,11 @@ async def _handle_get_full_md(
     so the pairing stays visually anchored. Falls back to a brief inline
     text when the log file is missing (e.g. ephemeral Docker filesystem
     after restart without TRADINGAGENTS_RESULTS_DIR persistence)."""
-    state = load_historical_state(ticker, date_str)
+    # Offload the disk read — `load_historical_state` does a blocking
+    # open() + json.load() of a potentially large log file; on the loop it
+    # would stall every concurrent handler (other analyses' progress edits,
+    # Cancel taps) for the read duration (L2).
+    state = await asyncio.to_thread(load_historical_state, ticker, date_str)
     if state is None:
         await context.bot.send_message(
             chat_id=query.message.chat_id,
@@ -144,7 +148,11 @@ async def _handle_get_full_md(
     except ValueError:
         gen_date = None
     try:
-        md = format_full_md_report(ticker, state, generated_at=gen_date)
+        # `format_full_md_report` is an unbounded synchronous markdown build
+        # — offload so the assembly doesn't block the loop either (L2).
+        md = await asyncio.to_thread(
+            format_full_md_report, ticker, state, generated_at=gen_date
+        )
         doc = InputFile(BytesIO(md.encode("utf-8")), filename=f"{ticker}_{date_str}.md")
         await query.message.chat.send_document(
             document=doc,
@@ -283,7 +291,11 @@ async def _run_analysis_for_ticker(
     # the codebase had before this PR.
     key = AnalysisConfigKey.from_config(config)
     today_iso = result_cache.today_iso()
-    cached = result_cache.lookup(key, ticker, today_iso)
+    # Offload the cache read — `lookup` does a blocking file open + json.load
+    # off the shared data dir; on a busy/networked FS that would stall the
+    # single PTB event loop (other tickers' progress edits, Cancel taps).
+    # Mirrors how propagate()/Telegraph are already offloaded (L2).
+    cached = await asyncio.to_thread(result_cache.lookup, key, ticker, today_iso)
     # Capture the prior Telegraph URL for edit-in-place on refresh, then
     # let force_refresh suppress the cache-hit short-circuit below so a
     # fresh LLM run + Telegraph edit_page happens.
@@ -374,12 +386,17 @@ async def _run_analysis_for_ticker(
     # themselves "Analyzing" even though only N can actually run.
     sem = _get_run_semaphore()
     acquired = _try_acquire_nonblocking(sem)
+    # `_value` / `_waiters` are CPython-private — read via getattr so these
+    # eager debug args (evaluated regardless of log level) can't raise
+    # AttributeError on a future CPython reshape and crash the run. The
+    # `_try_acquire_nonblocking` fallback already degrades gracefully; this
+    # keeps the diagnostics from defeating that guarantee (L7).
     logger.debug(
-        "[%s] sem state after sync-acquire: acquired=%s, _value=%d, _waiters=%d",
+        "[%s] sem state after sync-acquire: acquired=%s, _value=%s, _waiters=%d",
         ticker,
         acquired,
-        sem._value,
-        len(sem._waiters) if sem._waiters else 0,
+        getattr(sem, "_value", "?"),
+        len(getattr(sem, "_waiters", None) or []),
     )
 
     initial_caption = (
@@ -613,7 +630,17 @@ async def _run_analysis_for_ticker(
         # short-circuit at the top of the function. `cache.store` enforces
         # the cache-hygiene gate internally — a falsy `telegraph_url` is
         # a no-op (skips the store + logs). See PR #30 / INTU 2026-05-11.
-        result_cache.store(key, ticker, today_iso, final_state, signal, telegraph_url)
+        # Offloaded: `store` does mkdir + json.dump(final_state) + fsync +
+        # rename + sweep — blocking I/O that must not run on the loop (L2).
+        await asyncio.to_thread(
+            result_cache.store,
+            key,
+            ticker,
+            today_iso,
+            final_state,
+            signal,
+            telegraph_url,
+        )
         return "completed"
     except CancelledByUserError:
         logger.info("Analysis cancelled by user for %s", ticker)
@@ -632,10 +659,10 @@ async def _run_analysis_for_ticker(
         if acquired:
             sem.release()
             logger.debug(
-                "[%s] sem released, _value=%d, _waiters=%d",
+                "[%s] sem released, _value=%s, _waiters=%d",
                 ticker,
-                sem._value,
-                len(sem._waiters) if sem._waiters else 0,
+                getattr(sem, "_value", "?"),
+                len(getattr(sem, "_waiters", None) or []),
             )
         cancel_registry.pop(run_id, None)
         logger.debug(
@@ -753,6 +780,7 @@ async def _analyze_one_for_digest(
     reporter: _DigestProgressReporter | None = None,
     *,
     today_iso: str,
+    acquired_tracker: set[str] | None = None,
 ) -> dict | None:
     """Headless analysis for one ticker. Returns
     {ticker, signal, telegraph_url} or None on failure.
@@ -769,6 +797,14 @@ async def _analyze_one_for_digest(
     tz-aware computation) used as the cache key date. Keyword-only +
     required so callers can't silently fall back to server-local (which
     would re-introduce the Tokyo-tz bug fixed in PR #76).
+
+    `acquired_tracker`, when supplied, records `ticker` while this run
+    holds a semaphore slot (added on acquire, discarded on release). The
+    digest-cancel handler reads it to avoid `Task.cancel()`-ing an
+    in-flight ticker — cancelling mid-`to_thread(propagate)` would release
+    the slot while the worker thread keeps its pool graph, transiently
+    breaking the semaphore-cap == pool-size invariant (L3). In-flight
+    tickers unwind cooperatively via `cancel_event` instead.
     """
     # INVARIANT — keep in sync with `_run_analysis_for_ticker`. The two
     # analysis paths share three structural surfaces that must drift
@@ -783,7 +819,7 @@ async def _analyze_one_for_digest(
     # the "Starting…" reporter event.
     config = build_config()
     key = AnalysisConfigKey.from_config(config)
-    cached = result_cache.lookup(key, ticker, today_iso)
+    cached = await asyncio.to_thread(result_cache.lookup, key, ticker, today_iso)
     if cached:
         logger.info("digest: result_cache HIT for %s — skipping LLM run", ticker)
         return {
@@ -802,6 +838,8 @@ async def _analyze_one_for_digest(
     try:
         await sem.acquire()
         acquired = True
+        if acquired_tracker is not None:
+            acquired_tracker.add(ticker)
         if not TRADINGAGENTS_AVAILABLE:
             return None
         # Flip the digest status from ⏳ → "Starting…" the moment we have
@@ -866,13 +904,23 @@ async def _analyze_one_for_digest(
         # the same ticker only pays for one actual LLM run. `cache.store`
         # enforces the cache-hygiene gate internally (skips on falsy
         # `telegraph_url`), so a transient publish failure doesn't
-        # poison the cache.
-        result_cache.store(key, ticker, today_iso, final_state, signal, telegraph_url)
+        # poison the cache. Offloaded — blocking fsync/json.dump off the loop (L2).
+        await asyncio.to_thread(
+            result_cache.store,
+            key,
+            ticker,
+            today_iso,
+            final_state,
+            signal,
+            telegraph_url,
+        )
 
         return {"ticker": ticker, "signal": signal, "telegraph_url": telegraph_url}
     finally:
         if acquired:
             sem.release()
+        if acquired_tracker is not None:
+            acquired_tracker.discard(ticker)
 
 
 _DIGEST_PROGRESS_INTERVAL = 2.0  # min seconds between progressive edits
@@ -1170,6 +1218,13 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
     # iterates this list to .cancel() each. Mutable so the registry entry
     # references the same list we mutate.
     tasks_holder: list[asyncio.Task] = []
+    # L3 plumbing: `acquired_tickers` holds the tickers currently holding a
+    # semaphore slot (mutated by `_analyze_one_for_digest`); `task_tickers`
+    # maps each Task back to its ticker. The cancel handler uses both to
+    # `.cancel()` only PENDING tasks and leave in-flight ones to unwind via
+    # `cancel_event` (so the slot + pool graph release together).
+    acquired_tickers: set[str] = set()
+    task_tickers: dict[asyncio.Task, str] = {}
 
     try:
         header = await application.bot.send_message(
@@ -1204,12 +1259,23 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
     digest_cancels[header.message_id] = {
         "cancel_event": cancel_event,
         "tasks": tasks_holder,
+        "acquired": acquired_tickers,
+        "task_tickers": task_tickers,
     }
 
     last_edit_at = 0.0
     edit_in_flight = False
     pending_rerender = False
     blocked = False
+    # `finished` closes the M5 race: the render owner is often an `_on_step`
+    # coroutine scheduled via `run_coroutine_threadsafe` (progress.py) —
+    # NOT one of the tasks `asyncio.gather` awaits. If the last ticker
+    # completes while such an owner sits in its throttle `sleep`, `gather`
+    # returns, the summary edit fires, then the owner wakes and repaints a
+    # stale in-progress view (dead Cancel button, no tally). Setting
+    # `finished` before the summary edit and bailing on it inside `_render`
+    # guarantees no progress paint can land after the summary.
+    finished = False
 
     async def _render() -> None:
         """Single-flight, trampolining render.
@@ -1227,7 +1293,7 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
         `last_edit_at`.
         """
         nonlocal last_edit_at, edit_in_flight, pending_rerender, blocked
-        if blocked:
+        if blocked or finished:
             return
         if edit_in_flight:
             pending_rerender = True
@@ -1239,7 +1305,10 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
                 wait = _DIGEST_PROGRESS_INTERVAL - (time.monotonic() - last_edit_at)
                 if wait > 0:
                     await asyncio.sleep(wait)
-                if blocked:
+                # Re-check AFTER the throttle sleep: the run may have
+                # finished (or the user blocked the bot) while we slept, in
+                # which case painting progress now would clobber the summary.
+                if blocked or finished:
                     return
                 last_edit_at = time.monotonic()
                 text = _format_digest_progress(
@@ -1266,11 +1335,11 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
                     # remaining fan-out so we stop spending LLM tokens on
                     # a chat we'll never deliver to. Mirrors the user-tap
                     # cancel path: threading event for in-flight tickers,
-                    # asyncio.cancel for pending ones.
+                    # asyncio.cancel for pending ones only (L3).
                     cancel_event.set()
-                    for t in tasks_holder:
-                        if not t.done():
-                            t.cancel()
+                    _cancel_pending_digest_tasks(
+                        tasks_holder, task_tickers, acquired_tickers
+                    )
                     return
                 except Exception as e:
                     # "message is not modified" or transient — keep going.
@@ -1297,7 +1366,11 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
         )
         try:
             result = await _analyze_one_for_digest(
-                user_id, ticker, reporter, today_iso=today
+                user_id,
+                ticker,
+                reporter,
+                today_iso=today,
+                acquired_tracker=acquired_tickers,
             )
             # Race: cancel could have fired after analyze returned but
             # before we record the result. Honour the flag — discard.
@@ -1316,9 +1389,17 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
     try:
         tasks = [asyncio.create_task(_wrapped(t)) for t in watchlist]
         tasks_holder.extend(tasks)
+        for t, ticker in zip(tasks, watchlist, strict=True):
+            task_tickers[t] = ticker
         await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         digest_cancels.pop(header.message_id, None)
+
+    # Latch the run as finished BEFORE the summary edit, with no `await`
+    # between `gather` returning and this assignment — so any progress
+    # render already queued on the loop (e.g. a threadsafe `_on_step`)
+    # observes `finished` and bails instead of overwriting the summary (M5).
+    finished = True
 
     if blocked:
         return
@@ -1453,14 +1534,41 @@ def _build_email_status_line(
     return "📧 Email failed — check logs"
 
 
+def _cancel_pending_digest_tasks(tasks: list, task_tickers: dict, acquired: set) -> int:
+    """`Task.cancel()` only the PENDING digest tickers; return the count.
+
+    A ticker whose name is in `acquired` is mid-`to_thread(propagate)`
+    holding both a semaphore slot and a pool graph. `Task.cancel()`-ing it
+    would inject `CancelledError`, run its `finally: sem.release()`
+    immediately, yet leave the executor thread running `propagate()` with
+    the graph still checked out — so free slots would exceed free graphs
+    and a concurrent manual `/watch` could hit `GraphPool`'s blocking
+    branch (the "sizing invariant broken" path). Such tickers are left to
+    unwind cooperatively via the already-set `cancel_event` at the next
+    LLM-call boundary, where slot + graph release together (L3, matching
+    the manual `/watch` cancel path). Only tickers still queued on
+    `sem.acquire()` — which `cancel_event` can't wake — are cancelled, so
+    they unwind without ever acquiring a slot."""
+    cancelled = 0
+    for t in tasks:
+        if t.done():
+            continue
+        ticker = task_tickers.get(t)
+        if ticker is not None and ticker in acquired:
+            continue  # in-flight — cancel_event unwinds it, slot+graph together
+        t.cancel()
+        cancelled += 1
+    return cancelled
+
+
 async def _handle_digest_cancel(
     context: ContextTypes.DEFAULT_TYPE, query, message_id_str: str
 ) -> None:
     """Cancel an in-progress digest run identified by its header
     message_id. Sets the threading cancel_event (in-flight tickers
     raise CancelledByUserError at the next LLM-call boundary) and
-    cancels each ticker's asyncio.Task (pending tickers unwind without
-    acquiring a slot).
+    `Task.cancel()`s only the PENDING tickers (in-flight ones unwind via
+    the cancel_event so their slot + pool graph release together — L3).
     """
     try:
         message_id = int(message_id_str)
@@ -1473,13 +1581,13 @@ async def _handle_digest_cancel(
         logger.info("digest_cancel: no in-flight run for message_id=%s", message_id)
         return
     entry["cancel_event"].set()
-    cancelled = 0
-    for t in entry["tasks"]:
-        if not t.done():
-            t.cancel()
-            cancelled += 1
+    cancelled = _cancel_pending_digest_tasks(
+        entry["tasks"],
+        entry.get("task_tickers") or {},
+        entry.get("acquired") or set(),
+    )
     logger.info(
-        "digest_cancel: signalled message_id=%s — cancelled %d task(s)",
+        "digest_cancel: signalled message_id=%s — cancelled %d pending task(s)",
         message_id,
         cancelled,
     )

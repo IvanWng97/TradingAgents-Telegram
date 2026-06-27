@@ -790,7 +790,7 @@ async def test_fanout_partial_market_closure_drops_only_closed() -> None:
     def _selective_open(ticker, _date):
         return ticker == "NVDA"
 
-    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -863,7 +863,7 @@ async def test_fanout_calls_email_mirror_when_opted_in_and_configured() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -916,7 +916,7 @@ async def test_fanout_skips_email_mirror_when_no_opt_in() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -955,7 +955,7 @@ async def test_fanout_email_failure_does_not_break_telegram_path() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -1045,7 +1045,7 @@ async def test_fanout_summary_renders() -> None:
         "TSLA": None,  # simulate one failure
     }
 
-    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         # Mimic the real analyze's per-step callback so the digest's
         # progress view exercises the analyzing-state branch.
         if reporter is not None:
@@ -1099,7 +1099,7 @@ async def test_render_deferred_captures_latest_state() -> None:
 
     started = {"NVDA": False, "AAPL": False}
 
-    async def _fake(_uid, ticker, reporter=None, today_iso=None):
+    async def _fake(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         # Fire `report_starting` on both nearly simultaneously — this is
         # the exact race the deferred render is meant to handle.
         if reporter is not None:
@@ -1178,7 +1178,7 @@ async def test_render_trampolines_after_cache_hit_neighbour() -> None:
             super().__init__()
             self.bot = _YieldingBot()
 
-    async def _fake(_uid, ticker, reporter=None, today_iso=None):
+    async def _fake(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         if ticker == "CACHED":
             # Cache-hit path: no report_starting, instant return. Mirrors
             # the real `_analyze_one_for_digest` short-circuit.
@@ -1292,7 +1292,7 @@ async def test_fanout_cancel_pending_via_task_cancel() -> None:
     orig_sem = runner._run_semaphore
     runner._run_semaphore = asyncio.Semaphore(1)
 
-    async def _slow(_uid, ticker, reporter=None, today_iso=None):
+    async def _slow(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         # Mimic _analyze_one_for_digest's sem.acquire so the test
         # actually exercises the pending → cancelled path.
         sem = runner._get_run_semaphore()
@@ -1376,7 +1376,7 @@ async def test_fanout_pending_task_cancel_sets_status_cancelled() -> None:
     orig_sem = runner._run_semaphore
     runner._run_semaphore = asyncio.Semaphore(1)  # cap=1 so B queues
 
-    async def _slow(_uid, ticker, reporter=None, today_iso=None):
+    async def _slow(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         sem = runner._get_run_semaphore()
         await sem.acquire()
         try:
@@ -1470,7 +1470,7 @@ async def test_fanout_forbidden_during_progress_edit() -> None:
         def get_watchlist(self, _u):
             return ["A", "B", "C"]
 
-    async def _slow(_uid, _t, reporter=None, today_iso=None):
+    async def _slow(_uid, _t, reporter=None, today_iso=None, **_kwargs):
         # Trigger an edit by reporting a step.
         if reporter is not None:
             await reporter.report_starting()
@@ -1608,7 +1608,7 @@ async def test_fanout_cancel_mid_run() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA", "AAPL", "TSLA"]
 
-    async def _slow_analyze(_uid, _ticker, reporter=None, today_iso=None):
+    async def _slow_analyze(_uid, _ticker, reporter=None, today_iso=None, **_kwargs):
         # Signal that at least one analysis has reached the running phase.
         started.set()
         # Mimic running until the cancel signal lands.
@@ -1880,7 +1880,7 @@ async def test_fanout_filter_intersects() -> None:
 
     seen: list[str] = []
 
-    async def _fake(_uid, ticker, reporter=None, today_iso=None):
+    async def _fake(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         seen.append(ticker)
         return {"ticker": ticker, "signal": "BUY", "telegraph_url": None}
 
@@ -2052,7 +2052,7 @@ async def test_fanout_empty_filter_reminder() -> None:
 
     ran: list[str] = []
 
-    async def _fake(_uid, ticker, reporter=None, today_iso=None):
+    async def _fake(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         ran.append(ticker)
         return {"ticker": ticker, "signal": "BUY", "telegraph_url": None}
 
@@ -2100,7 +2100,7 @@ async def test_fanout_appends_email_status_line_on_success() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -2156,7 +2156,7 @@ async def test_fanout_appends_email_failed_line_on_send_failure() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -2212,7 +2212,7 @@ async def test_fanout_appends_not_configured_line_when_env_missing() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -2259,7 +2259,7 @@ async def test_fanout_no_email_status_line_when_not_opted_in() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -2308,7 +2308,7 @@ async def test_fanout_second_edit_forbidden_disables_digest() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         return {
             "ticker": ticker,
             "signal": "BUY",
@@ -2406,7 +2406,7 @@ async def test_fanout_uses_user_local_date_for_market_gate_and_cache() -> None:
 
     captured_today: list[str] = []
 
-    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         captured_today.append(today_iso or "<server-default>")
         return {
             "ticker": ticker,
@@ -2507,7 +2507,7 @@ async def test_fanout_invalid_tz_falls_back_to_utc() -> None:
 
     captured_today: list[str] = []
 
-    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None):
+    async def _fake_analyze(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
         captured_today.append(today_iso or "")
         return {
             "ticker": ticker,
@@ -2712,7 +2712,9 @@ async def test_fanout_success_then_cancel_discards_result() -> None:
         def get_watchlist(self, _uid):
             return ["NVDA"]
 
-    async def _success_then_cancel(_uid, ticker, reporter=None, today_iso=None):
+    async def _success_then_cancel(
+        _uid, ticker, reporter=None, today_iso=None, **_kwargs
+    ):
         # The analysis completes with a real result, but the cancel button
         # was tapped while `to_thread(propagate)` was on the wire — set the
         # SHARED cancel_event (the reporter holds the same object the
@@ -2801,3 +2803,172 @@ async def test_digest_inflight_cancel_propagates_not_logged_as_failure(
     store_mock.assert_not_called()
     # Slot released in `finally` even on the raised cancel path — no leak.
     assert sem._value == 1, "semaphore slot leaked on the cancel path"
+
+
+# ─── L3: selective digest cancel (spare in-flight, cancel pending) ──────
+
+
+async def test_cancel_pending_digest_tasks_spares_inflight() -> None:
+    """L3: `_cancel_pending_digest_tasks` must `Task.cancel()` ONLY pending
+    tickers (not yet holding a slot). An in-flight ticker (name in the
+    `acquired` set) is left for `cancel_event` to unwind so its semaphore
+    slot and pool graph release together — `Task.cancel()`-ing it would free
+    the slot while the worker thread keeps the graph, breaking the
+    sem-cap == pool-size invariant and exposing GraphPool's blocking branch.
+    Done tasks are skipped."""
+    from tg_bot.handlers import analysis_runner as runner
+
+    class _FakeTask:
+        def __init__(self, done: bool = False) -> None:
+            self._done = done
+            self.cancelled = False
+
+        def done(self) -> bool:
+            return self._done
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    t_inflight = _FakeTask()
+    t_pending = _FakeTask()
+    t_done = _FakeTask(done=True)
+    task_tickers = {t_inflight: "AAA", t_pending: "BBB", t_done: "CCC"}
+    acquired = {"AAA"}  # only AAA currently holds a slot
+
+    n = runner._cancel_pending_digest_tasks(
+        [t_inflight, t_pending, t_done], task_tickers, acquired
+    )
+    assert n == 1, "only the single pending ticker should be cancelled"
+    assert t_inflight.cancelled is False, "in-flight ticker must NOT be Task.cancelled"
+    assert t_pending.cancelled is True, "pending ticker must be Task.cancelled"
+    assert t_done.cancelled is False, "done task must be skipped"
+
+
+async def test_analyze_one_for_digest_tracks_acquired_slot(monkeypatch) -> None:
+    """L3 plumbing: while the real `_analyze_one_for_digest` holds a slot,
+    its ticker is in the `acquired_tracker`; after it returns the ticker is
+    removed. That membership is exactly what lets the cancel handler spare an
+    in-flight ticker."""
+    from tg_bot.handlers import analysis_runner as runner
+
+    tracker: set[str] = set()
+    seen_in_tracker_during_run: list[bool] = []
+
+    def _fake_run(ticker, reporter):
+        # Runs inside to_thread while the slot is held — the tracker must
+        # already contain the ticker at this point.
+        seen_in_tracker_during_run.append(ticker in tracker)
+        return ({"final_trade_decision": "BUY"}, "BUY")
+
+    async def _pub(*_a, **_k):
+        return "https://telegra.ph/x"
+
+    sem = asyncio.Semaphore(1)
+    monkeypatch.setattr(runner, "TRADINGAGENTS_AVAILABLE", True)
+    monkeypatch.setattr(runner, "_get_run_semaphore", lambda: sem)
+    monkeypatch.setattr(runner, "run_trading_analysis", _fake_run)
+    monkeypatch.setattr(runner.result_cache, "lookup", lambda *a, **k: None)
+    monkeypatch.setattr(runner.result_cache, "store", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "publish_to_telegraph", _pub)
+
+    await runner._analyze_one_for_digest(
+        1, "NVDA", reporter=None, today_iso="2026-06-26", acquired_tracker=tracker
+    )
+
+    assert seen_in_tracker_during_run == [True], "ticker absent from tracker mid-run"
+    assert "NVDA" not in tracker, "ticker must be discarded from tracker after release"
+    assert sem._value == 1, "slot released"
+
+
+# ─── M6: cache hit short-circuits before acquiring a slot ───────────────
+
+
+async def test_analyze_one_for_digest_cache_hit_skips_semaphore(monkeypatch) -> None:
+    """M6: a cache hit must short-circuit BEFORE acquiring a semaphore slot —
+    no LLM run, no 'Starting…' event, no slot burned. Pins that a pre-seeded
+    cache returns the cached shape without touching the semaphore or
+    `run_trading_analysis`. (The cancel-no-poison half of M6 is covered by
+    `test_digest_inflight_cancel_propagates_not_logged_as_failure`.)"""
+    from tg_bot.handlers import analysis_runner as runner
+
+    sem = asyncio.Semaphore(1)
+    ran: list[int] = []
+    monkeypatch.setattr(runner, "_get_run_semaphore", lambda: sem)
+    monkeypatch.setattr(runner, "run_trading_analysis", lambda *a, **k: ran.append(1))
+    monkeypatch.setattr(
+        runner.result_cache,
+        "lookup",
+        lambda *a, **k: {"signal": "HOLD", "telegraph_url": "https://t.ly/c"},
+    )
+
+    result = await runner._analyze_one_for_digest(
+        1, "NVDA", reporter=None, today_iso="2026-06-26"
+    )
+
+    assert result == {
+        "ticker": "NVDA",
+        "signal": "HOLD",
+        "telegraph_url": "https://t.ly/c",
+    }
+    assert ran == [], "LLM run must not fire on a cache hit"
+    assert sem._value == 1, "semaphore must NOT be acquired on a cache hit"
+
+
+# ─── M5: late render must not overwrite the final summary ───────────────
+
+
+async def test_fanout_late_render_does_not_overwrite_summary(monkeypatch) -> None:
+    """M5: a progress render owned by a fire-and-forget reporter coroutine
+    (the `run_coroutine_threadsafe` path in production) that is still sleeping
+    in its throttle when the last ticker completes must NOT repaint progress
+    over the final summary. The `finished` latch makes it bail on wake.
+
+    Repro: a fake analyze fires one render (sets `last_edit_at` to 'now', so
+    the next render must sleep), then schedules a second render fire-and-forget
+    and yields so it acquires the single-flight ownership and parks in the
+    throttle sleep — exactly the untracked owner. When the fan-out finishes
+    and the summary lands, that render is mid-sleep; on wake it must observe
+    `finished`. Distinguishes summary (reply_markup=None) from a progress
+    repaint (carries the cancel keyboard)."""
+    from tg_bot.handlers import analysis_runner as runner
+
+    monkeypatch.setattr(runner, "_DIGEST_PROGRESS_INTERVAL", 0.15)
+
+    class _W:
+        def get_watchlist(self, _u):
+            return ["NVDA"]
+
+    late = {}
+
+    async def _fake(_uid, ticker, reporter=None, today_iso=None, **_kwargs):
+        loop = asyncio.get_running_loop()
+        # First render: sets last_edit_at≈now so the next one must throttle-sleep.
+        await reporter.report("Market Analyst")
+        # Fire-and-forget second render (the untracked owner); yield so it
+        # acquires edit_in_flight and parks in `await asyncio.sleep(interval)`.
+        late["task"] = loop.create_task(reporter.report("News Analyst"))
+        await asyncio.sleep(0)
+        return {"ticker": ticker, "signal": "BUY", "telegraph_url": "https://t.ly/x"}
+
+    orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
+    orig_a = runner._analyze_one_for_digest
+    runner.watchlist_storage = _W()
+    runner.user_config_storage = _AllEnrolledUserConfig()
+    runner._analyze_one_for_digest = _fake
+    try:
+        app = _FakeFanOutApp()
+        await runner.run_user_digest(app, 42, 999)
+        # Summary has landed; wait past the throttle so the late render wakes.
+        await asyncio.sleep(0.3)
+        await late["task"]
+
+        last = app.bot.edits[-1]
+        assert last.get("reply_markup") is None, (
+            "a late progress render overwrote the summary (M5): the final "
+            f"edit still carries a cancel keyboard — {last!r}"
+        )
+    finally:
+        runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
+        runner._analyze_one_for_digest = orig_a

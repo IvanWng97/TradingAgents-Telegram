@@ -914,4 +914,23 @@ async def test_parse_mode_contract_across_lifecycle() -> None:
         )
 
 
+# --- _try_acquire_nonblocking CPython-private-attr fallback (L9) ------------
+
+
+def test_try_acquire_nonblocking_degrades_when_private_attrs_absent() -> None:
+    """L9: the documented AttributeError fallback. `_try_acquire_nonblocking`
+    reaches into CPython-private `Semaphore._value`/`_waiters`; if a future
+    CPython reshapes them, it must return False (caller degrades to the
+    blocking `sem.acquire()` path, user sees ⏳ Queued) rather than raise and
+    crash the run. A stand-in exposing `locked()` but neither private attr
+    forces the `except AttributeError` branch — which no real-Semaphore test
+    can reach because the fast path always succeeds first."""
+    from tg_bot.handlers import analysis_runner as runner
+
+    # `locked()` returns False so the guard proceeds to read `_waiters`,
+    # which is absent → AttributeError → fallback returns False.
+    fake_sem = SimpleNamespace(locked=lambda: False)
+    assert runner._try_acquire_nonblocking(fake_sem) is False
+
+
 # --- Runner ----------------------------------------------------------------
