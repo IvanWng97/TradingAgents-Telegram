@@ -1396,9 +1396,11 @@ async def run_user_digest(application, user_id: int, chat_id: int) -> None:
         digest_cancels.pop(header.message_id, None)
 
     # Latch the run as finished BEFORE the summary edit, with no `await`
-    # between `gather` returning and this assignment — so any progress
-    # render already queued on the loop (e.g. a threadsafe `_on_step`)
-    # observes `finished` and bails instead of overwriting the summary (M5).
+    # between `gather` returning and this assignment — INCLUDING the `finally`
+    # above, which must stay synchronous (its `digest_cancels.pop` is). Any
+    # `await` inserted anywhere in that window would let a progress render
+    # already queued on the loop (e.g. a threadsafe `_on_step`) run and repaint
+    # progress over the summary before `finished` is set, reopening the M5 race.
     finished = True
 
     if blocked:
