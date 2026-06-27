@@ -38,9 +38,9 @@ _SLUG_SAFE = re.compile(r"[^A-Za-z0-9_.-]")
 class AnalysisConfigKey:
     """Frozen tuple of the knobs that influence analysis output.
 
-    Two configs with identical `(provider, deep, quick, rounds, effort)`
-    produce identical analyses; they share a cache slot, a caption
-    "via" line, and a Telegraph URL. Anything outside this five-tuple
+    Two configs with identical `(provider, deep, quick, rounds, effort,
+    temperature)` produce identical analyses; they share a cache slot, a
+    caption "via" line, and a Telegraph URL. Anything outside this tuple
     (chat_id, user_id, ticker, date) is orthogonal and lives at the
     callsite, not in the key itself."""
 
@@ -49,6 +49,7 @@ class AnalysisConfigKey:
     quick: str
     rounds: int = 1
     effort: str | None = None
+    temperature: str | None = None
 
     @classmethod
     def from_config(cls, config: dict) -> AnalysisConfigKey:
@@ -60,6 +61,12 @@ class AnalysisConfigKey:
         values rather than hardcoding so a new provider adding a thinking
         knob only needs to register its key in `analysis.py`.
 
+        `temperature` is a single cross-provider key (`temperature`,
+        v0.3.0+); upstream's default is `None` (provider default), so an
+        unset temperature is omitted from the identity and default-config
+        users keep their existing cache slot. An empty-string env value is
+        treated as unset (matches tradingagents' own `!= ""` gate).
+
         Late import: `analysis.py` already depends on this module
         transitively (through `formatters` and `cache`), and importing
         analysis at module load would create a cycle. The dict is
@@ -67,6 +74,7 @@ class AnalysisConfigKey:
         is cached after first call."""
         from tg_bot.pipeline.analysis import EFFORT_KEY_BY_PROVIDER
 
+        temp = config.get("temperature")
         return cls(
             provider=config.get("llm_provider", "unknown"),
             deep=config.get("deep_think_llm", "default"),
@@ -76,46 +84,52 @@ class AnalysisConfigKey:
                 (config[k] for k in EFFORT_KEY_BY_PROVIDER.values() if config.get(k)),
                 None,
             ),
+            temperature=str(temp) if temp not in (None, "") else None,
         )
 
     def slug(self) -> str:
         """Filesystem-safe cache directory slug.
 
-        Shape: `provider__deep__quick[__r{n}][__e{level}]`. The
-        `__r{n}` / `__e{level}` suffixes are appended only when those
-        knobs differ from default, so users on default config keep their
-        existing cache slot when new knobs ship (no orphaning).
+        Shape: `provider__deep__quick[__r{n}][__e{level}][__t{temp}]`. The
+        `__r{n}` / `__e{level}` / `__t{temp}` suffixes are appended only
+        when those knobs differ from default, so users on default config
+        keep their existing cache slot when new knobs ship (no orphaning).
 
         Provider / model strings can contain `/`, `:` etc. (e.g.
         `openai/gpt-4o`, `meta:llama3`) which aren't directory-safe; the
-        regex squashes them to `_`."""
+        regex squashes them to `_`. The temperature suffix is sanitized
+        too — it's a free-form env value that ends up as a directory name."""
         base = _SLUG_SAFE.sub("_", f"{self.provider}__{self.deep}__{self.quick}")
         if self.rounds != 1:
             base += f"__r{self.rounds}"
         if self.effort:
             base += f"__e{self.effort}"
+        if self.temperature is not None:
+            base += "__t" + _SLUG_SAFE.sub("_", self.temperature)
         return base
 
     def caption(self) -> str:
         """Caption fragment for the photo `via <caption>` line.
 
-        Shape: `<provider> · <deep>/<quick> [· r{n}] [· e={level}]`.
-        Middot separator + space matches the broader caption aesthetic
-        (`<i>Generated …</i> · <i>via …</i>`). Rounds/effort are
-        appended only when customized so the common-case line stays
-        tight."""
+        Shape: `<provider> · <deep>/<quick> [· r{n}] [· e={level}]
+        [· t={temp}]`. Middot separator + space matches the broader
+        caption aesthetic (`<i>Generated …</i> · <i>via …</i>`).
+        Rounds/effort/temperature are appended only when customized so the
+        common-case line stays tight."""
         parts = [self.provider, f"{self.deep}/{self.quick}"]
         if self.rounds != 1:
             parts.append(f"r{self.rounds}")
         if self.effort:
             parts.append(f"e={self.effort}")
+        if self.temperature is not None:
+            parts.append(f"t={self.temperature}")
         return " · ".join(parts)
 
     def telegraph_title(self, ticker: str) -> str:
         """Title submitted to Telegraph's `create_page` / `edit_page`.
 
         Shape: `<TICKER> Analysis · <provider> · <deep>/<quick> [· r{n}]
-        [· e={level}]`. The config suffix matches `caption()` so the
+        [· e={level}] [· t={temp}]`. The config suffix matches `caption()` so the
         URL Telegraph slugifies (`https://telegra.ph/NVDA-Analysis-…`)
         self-documents which config produced the analysis instead of
         all configs colliding on `NVDA-Analysis-05-10` and Telegraph

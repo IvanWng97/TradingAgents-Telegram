@@ -41,10 +41,12 @@ from tg_bot.pipeline.progress import (  # noqa: E402
 
 # Snapshot of every node `tradingagents/graph/setup.py` registers via
 # `workflow.add_node(...)` that fires an LLM call (and therefore reaches
-# our callback). Verified against v0.2.5 by reading the source — the four
-# analyst names are built dynamically (`f"{analyst_type.capitalize()} Analyst"`
-# with `analyst_type` in {"market", "social", "news", "fundamentals"}), the
-# rest are hardcoded.
+# our callback). Verified against v0.3.0 by reading the source — the four
+# analyst node names now come from `AnalystNodeSpec.agent_node` in
+# `graph/analyst_execution.py` ("Market Analyst", "Sentiment Analyst",
+# "News Analyst", "Fundamentals Analyst" — the social analyst node was
+# renamed "Social Analyst" → "Sentiment Analyst" upstream); the rest are
+# hardcoded in setup.py and unchanged from v0.2.5.
 #
 # Excluded: `Msg Clear *` (state-clearing nodes, no LLM call) and `tools_*`
 # (tool-execution nodes, no LLM call). These never reach our progress
@@ -52,9 +54,9 @@ from tg_bot.pipeline.progress import (  # noqa: E402
 #
 # Bump this set in lockstep with `_STEP_MAP` when upgrading tradingagents —
 # the alignment test below catches drift in either direction.
-_UPSTREAM_LLM_NODE_NAMES_V025 = {
+_UPSTREAM_LLM_NODE_NAMES_V030 = {
     "Market Analyst",
-    "Social Analyst",
+    "Sentiment Analyst",
     "News Analyst",
     "Fundamentals Analyst",
     "Bull Researcher",
@@ -68,23 +70,24 @@ _UPSTREAM_LLM_NODE_NAMES_V025 = {
 }
 
 
-def test_step_map_covers_all_upstream_v025_nodes() -> None:
-    """Every node name tradingagents v0.2.5 emits via `add_node()` must
+def test_step_map_covers_all_upstream_v030_nodes() -> None:
+    """Every node name tradingagents v0.3.0 emits via `add_node()` must
     resolve in our `_STEP_MAP` with a valid ordinal — otherwise the
     `(n/12)` badge silently disappears for that step (user-visible
     regression, exactly the VPS issue this test was added to prevent).
 
     When tradingagents is upgraded, walk `setup.py`'s `add_node()` calls
-    and update both this set AND `_STEP_MAP` together. The new WARN log
-    in `resolve_step` is the runtime canary; this test is the build-time
+    (analyst node names live in `graph/analyst_execution.py` as of v0.3.0)
+    and update both this set AND `_STEP_MAP` together. The WARN log in
+    `resolve_step` is the runtime canary; this test is the build-time
     canary."""
     missing: dict[str, str] = {}
-    for node_name in _UPSTREAM_LLM_NODE_NAMES_V025:
+    for node_name in _UPSTREAM_LLM_NODE_NAMES_V030:
         friendly, ordinal = resolve_step(node_name)
         if ordinal is None:
             missing[node_name] = friendly
     assert not missing, (
-        f"Upstream tradingagents v0.2.5 emits these node names that are "
+        f"Upstream tradingagents v0.3.0 emits these node names that are "
         f"NOT in `_STEP_MAP` (badge will disappear for these steps): "
         f"{missing}. Add them to `_STEP_MAP` in progress.py."
     )
@@ -105,10 +108,10 @@ def test_total_steps_derived_from_step_map_max_ordinal() -> None:
 
 def test_step_map_sentiment_analyst_alias_resolves_to_social() -> None:
     """Upstream issue #557 renamed `create_social_analyst` →
-    `create_sentiment_analyst`. v0.2.5 keeps the node name `"Social Analyst"`
-    for back-compat, but newer pip-from-git installs (observed on user's
-    VPS) emit `"Sentiment Analyst"` directly. Both must resolve to step 2
-    so the badge survives the upstream switch."""
+    `create_sentiment_analyst`. v0.2.5 kept the node name `"Social Analyst"`
+    for back-compat; v0.3.0 emits `"Sentiment Analyst"` directly (the
+    `AnalystNodeSpec.agent_node` in `graph/analyst_execution.py`). Both must
+    resolve to step 2 so the badge survives the upstream switch."""
     social_friendly, social_ord = resolve_step("social_analyst")
     sentiment_friendly, sentiment_ord = resolve_step("sentiment_analyst")
     assert social_ord == sentiment_ord == 2

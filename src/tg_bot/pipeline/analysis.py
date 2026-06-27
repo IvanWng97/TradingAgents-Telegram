@@ -21,14 +21,20 @@ logger = logging.getLogger(__name__)
 
 # Per-provider key for the "thinking effort" knob. Vocabulary
 # (low/medium/high) is shared across providers but the config-dict key
-# differs. Providers absent from this map have no effort knob — we
-# silently skip applying it.
+# differs. Providers absent from this map have no effort knob.
 #
-# Single source of truth for which provider stores effort where.
-# `AnalysisConfigKey.from_config` iterates `.values()` so a new provider
+# Single source of truth for which provider stores effort where:
+# `AnalysisConfigKey.from_config` iterates `.values()` to read the active
+# effort for the cache slug / caption / Telegraph title, so a new provider
 # adding a thinking knob only needs to register its key here.
-# Defined before `_LOCAL_EFFORT_OVERRIDES` (which derives env-var names
-# from these keys) — keeps the dict the single source for both surfaces.
+#
+# Population is upstream's job. As of tradingagents v0.3.0, upstream's own
+# `_ENV_OVERRIDES` maps `TRADINGAGENTS_OPENAI_REASONING_EFFORT` /
+# `TRADINGAGENTS_ANTHROPIC_EFFORT` / `TRADINGAGENTS_GOOGLE_THINKING_LEVEL`
+# onto exactly these config keys at lib import. We previously carried a
+# local `_apply_local_effort_overlay` to fill that gap (upstream <0.3.0
+# didn't expose them); it was removed when the pin moved to v0.3.0 — these
+# keys now arrive pre-populated and we only READ them here.
 EFFORT_KEY_BY_PROVIDER = {
     "openai": "openai_reasoning_effort",
     "anthropic": "anthropic_effort",
@@ -36,49 +42,19 @@ EFFORT_KEY_BY_PROVIDER = {
 }
 
 
-# Mapping from env var name → DEFAULT_CONFIG key for the per-provider
-# reasoning-effort knob. Upstream tradingagents' `_ENV_OVERRIDES` covers
-# provider/models/debate-rounds but NOT these provider-specific keys, so
-# we overlay them locally to keep `.env` as the single source of truth.
-# Derived from `EFFORT_KEY_BY_PROVIDER` so a new provider added there
-# automatically gets env-var overlay support — no second edit needed.
-_LOCAL_EFFORT_OVERRIDES = {
-    f"TRADINGAGENTS_{config_key.upper()}": config_key
-    for config_key in EFFORT_KEY_BY_PROVIDER.values()
-}
-
-
-def _apply_local_effort_overlay(config: dict, env: "dict | None" = None) -> None:
-    """Overlay our local `TRADINGAGENTS_*_EFFORT` env vars onto `config`
-    in place. Mirrors upstream's `_apply_env_overrides` pattern. Only
-    writes when the env var is non-empty — leaves the upstream default
-    in place otherwise (which is None for all three effort keys today).
-
-    `env` arg is for testability (default: `os.environ`). Callers in
-    production pass nothing; tests pass a controlled mapping."""
-    src = env if env is not None else os.environ
-    for env_var, config_key in _LOCAL_EFFORT_OVERRIDES.items():
-        raw = src.get(env_var)
-        if raw:
-            config[config_key] = raw
-
-
 def build_config() -> dict:
     """Return a fresh copy of the active tradingagents config dict.
 
-    Source of truth: tradingagents' `DEFAULT_CONFIG` (already overlaid
-    by upstream's `_ENV_OVERRIDES` at lib import time for provider /
-    models / debate-rounds / etc.) + our local effort overlay applied
-    immediately after the import below for the per-provider effort keys
-    upstream doesn't expose. `.env` is the single source of truth — there
-    is no per-user override path.
+    Source of truth: tradingagents' `DEFAULT_CONFIG`, already overlaid by
+    upstream's `_ENV_OVERRIDES` at lib import time from the `TRADINGAGENTS_*`
+    env vars (provider / models / debate-rounds / per-provider reasoning
+    effort / etc.). `.env` is the single source of truth — there is no
+    per-user override path.
 
-    Both overlays run ONCE at module-import time, not on every call.
+    The upstream overlay runs ONCE at lib import, not on every call.
     Changing env vars at run time (e.g. a test patching `os.environ`)
-    will NOT be reflected — production env vars don't change post-start,
-    and tests that need to round-trip env values should call
-    `_apply_local_effort_overlay(config, env=...)` directly with an
-    explicit env dict.
+    will NOT be reflected — production env vars don't change post-start;
+    restart the bot to apply `.env` changes.
 
     Returns a **shallow** copy: top-level scalars are safe to mutate,
     but if `DEFAULT_CONFIG` ever gains a nested mutable (list / dict),
@@ -134,7 +110,26 @@ PROVIDER_ENV_KEYS: dict[str, str | None] = {
     # surface "OPENROUTER_API_KEY not set" instead of the cryptic downstream
     # "OPENAI_API_KEY missing" from the openai SDK when the env isn't loaded.
     "openrouter": "OPENROUTER_API_KEY",
-    # azure: intentionally absent — no native tradingagents support yet.
+    # Hosted OpenAI-compatible providers added upstream in v0.3.0 that REQUIRE a
+    # key. Model IDs are user-specified; only the API-key env var matters for the
+    # precheck. Values verified against `PROVIDER_API_KEY_ENV`; pinned by
+    # `test_provider_env_keys_match_upstream`.
+    "mistral": "MISTRAL_API_KEY",
+    "kimi": "MOONSHOT_API_KEY",  # Moonshot AI
+    "groq": "GROQ_API_KEY",
+    "nvidia": "NVIDIA_API_KEY",  # NVIDIA NIM
+    # bedrock authenticates via the AWS credential chain, not a single key
+    # env — mirror upstream's `None` so the precheck treats it as "no key
+    # check possible" (same shape as ollama) rather than silently passing.
+    "bedrock": None,
+    # openai_compatible: intentionally absent. Upstream maps it to
+    # OPENAI_COMPATIBLE_API_KEY but treats it as KEY-OPTIONAL — keyless local
+    # vLLM / LM Studio servers are valid. Listing it would make
+    # `check_llm_configured` hard-block those keyless setups (env var present but
+    # unset → "not set" error), so we omit it like azure and let a wrong/absent
+    # key surface downstream instead.
+    # azure: intentionally absent — needs an endpoint + deployment, not just
+    # a key, so the single-env-var precheck doesn't model it.
 }
 
 
@@ -317,26 +312,21 @@ try:
 
     TradingAgentsGraph = _TradingAgentsGraph
     DEFAULT_CONFIG = _DEFAULT_CONFIG
-    # Apply our local effort env-var overlay onto DEFAULT_CONFIG. Upstream's
-    # own `_apply_env_overrides` has already run inside tradingagents at its
-    # module load; this closes the gap for the per-provider effort keys
-    # upstream's `_ENV_OVERRIDES` list doesn't cover. Once applied, every
-    # consumer of `DEFAULT_CONFIG` (build_config, AnalysisConfigKey.from_config)
-    # sees the env-derived effort.
-    #
-    # **Run-order matters**: we run AFTER upstream, so if upstream ever adds
-    # `TRADINGAGENTS_OPENAI_REASONING_EFFORT` / `TRADINGAGENTS_ANTHROPIC_EFFORT` /
-    # `TRADINGAGENTS_GOOGLE_THINKING_LEVEL` to its own `_ENV_OVERRIDES`, OUR
-    # write wins (last writer). The effective behavior is "this overlay is
-    # the source of truth for the three keys in `EFFORT_KEY_BY_PROVIDER`."
-    # If upstream coverage lands and we want to defer to it, drop the
-    # provider's entry from `EFFORT_KEY_BY_PROVIDER` instead of hoisting
-    # this call before the import — the test in `test_pipeline_analysis.py`
-    # pins the derivation contract.
-    _apply_local_effort_overlay(DEFAULT_CONFIG)
+    # Effort knobs (openai_reasoning_effort / anthropic_effort /
+    # google_thinking_level) are already populated on DEFAULT_CONFIG by
+    # upstream's `_apply_env_overrides` at lib import (v0.3.0+). We read them
+    # via `EFFORT_KEY_BY_PROVIDER`; no local overlay needed anymore.
     TRADINGAGENTS_AVAILABLE = True
 except ImportError as e:
     logger.warning("TradingAgents not available: %s", e)
+except ValueError as e:
+    # tradingagents v0.3.0+ fails loud on an invalid bool/int `TRADINGAGENTS_*`
+    # env value: `_apply_env_overrides` raises `ValueError` at lib import
+    # (e.g. `TRADINGAGENTS_MAX_DEBATE_ROUNDS=two`). Degrade gracefully like a
+    # missing install rather than crashing the whole bot at startup — the
+    # operator gets an actionable log line and every analysis path
+    # short-circuits via `TRADINGAGENTS_AVAILABLE=False`.
+    logger.error("TradingAgents config rejected a TRADINGAGENTS_* .env value: %s", e)
 
 
 def run_trading_analysis(
@@ -350,10 +340,11 @@ def run_trading_analysis(
     bound to the current thread for the duration of propagate() so the
     singleton callback can dispatch to it.
 
-    Graph instances come from a per-(provider, deep, quick) pool so single-
-    tap and parallel queue runs both benefit from caching. Pool grows on
-    demand up to `Config.MAX_CONCURRENT_ANALYSES`; the asyncio semaphore in
-    the handler bounds how many runs reach the pool at once.
+    Graph instances come from a single process-wide pool (config is
+    process-wide via `.env`) so single-tap and parallel queue runs both
+    benefit from caching. Pool grows on demand up to
+    `Config.MAX_CONCURRENT_ANALYSES`; the asyncio semaphore in the handler
+    bounds how many runs reach the pool at once.
 
     Returns (final_state, signal). (None, None) if tradingagents isn't
     available — caller should surface a helpful error.

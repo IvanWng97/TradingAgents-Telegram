@@ -1,6 +1,6 @@
 """Smoke tests for `AnalysisConfigKey` — the single source of truth for
-the (provider, deep, quick, rounds, effort) tuple shared across the
-cache slug, the caption "via" line, and the Telegraph title suffix.
+the (provider, deep, quick, rounds, effort, temperature) tuple shared
+across the cache slug, the caption "via" line, and the Telegraph title.
 
 Cross-cutting invariant #1 in CLAUDE.md is the human-enforced "keep all
 three shapes in sync when adding a knob" rule; these scenarios are the
@@ -277,6 +277,91 @@ def test_telegraph_title_differs_across_configs_preventing_collision() -> None:
         provider="deepseek", deep="deepseek-v4-pro", quick="deepseek-v4-flash"
     )
     assert a.telegraph_title("NVDA") != b.telegraph_title("NVDA")
+
+
+# ---------- temperature (cross-provider knob, v0.3.0+) ----------
+
+
+def test_from_config_temperature_picks_up() -> None:
+    """`temperature` is a single cross-provider config key — `from_config`
+    reads it directly (no EFFORT_KEY_BY_PROVIDER iteration). Stored as a
+    string for the identity, matching how the env overlay lands it."""
+    k = AnalysisConfigKey.from_config(
+        {
+            "llm_provider": "openai",
+            "deep_think_llm": "gpt-4o",
+            "quick_think_llm": "o4-mini",
+            "temperature": "0.7",
+        }
+    )
+    assert k.temperature == "0.7"
+
+
+def test_from_config_temperature_unset_and_empty_are_none() -> None:
+    """Upstream default is None (provider default) → omitted from the
+    identity so default-config users keep their cache slot. An empty
+    string is treated as unset too (tradingagents' own `!= ""` gate)."""
+    unset = AnalysisConfigKey.from_config(
+        {
+            "llm_provider": "openai",
+            "deep_think_llm": "gpt-4o",
+            "quick_think_llm": "o4-mini",
+        }
+    )
+    empty = AnalysisConfigKey.from_config(
+        {
+            "llm_provider": "openai",
+            "deep_think_llm": "gpt-4o",
+            "quick_think_llm": "o4-mini",
+            "temperature": "",
+        }
+    )
+    assert unset.temperature is None
+    assert empty.temperature is None
+
+
+def test_slug_appends_temperature_when_set() -> None:
+    k = AnalysisConfigKey(
+        provider="openai", deep="gpt-4o", quick="o4-mini", temperature="0.7"
+    )
+    # `.` is filesystem-safe (kept by _SLUG_SAFE); the suffix is sanitized.
+    assert k.slug() == "openai__gpt-4o__o4-mini__t0.7"
+
+
+def test_slug_default_temperature_none_omits_suffix() -> None:
+    """No temperature → no `__t` suffix, so existing cache slots survive
+    the knob shipping (backward compat, same guarantee as rounds/effort)."""
+    k = AnalysisConfigKey(provider="openai", deep="gpt-4o", quick="o4-mini")
+    assert "__t" not in k.slug()
+
+
+def test_slug_appends_all_knobs_in_order() -> None:
+    """rounds → effort → temperature suffix order is stable."""
+    k = AnalysisConfigKey(
+        provider="openai",
+        deep="gpt-4o",
+        quick="o4-mini",
+        rounds=3,
+        effort="high",
+        temperature="0.2",
+    )
+    assert k.slug() == "openai__gpt-4o__o4-mini__r3__ehigh__t0.2"
+
+
+def test_caption_appends_temperature_with_equals_prefix() -> None:
+    k = AnalysisConfigKey(
+        provider="openai", deep="gpt-4o", quick="o4-mini", temperature="0.7"
+    )
+    assert k.caption() == "openai · gpt-4o/o4-mini · t=0.7"
+
+
+def test_telegraph_title_includes_temperature() -> None:
+    k = AnalysisConfigKey(
+        provider="openai", deep="gpt-4o", quick="o4-mini", temperature="0.7"
+    )
+    assert (
+        k.telegraph_title("NVDA") == "NVDA Analysis · openai · gpt-4o/o4-mini · t=0.7"
+    )
 
 
 # ---------- ordering ----------

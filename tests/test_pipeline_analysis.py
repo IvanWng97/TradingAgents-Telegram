@@ -18,8 +18,6 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from tg_bot.pipeline.analysis import (  # noqa: E402
     EFFORT_KEY_BY_PROVIDER,
-    _LOCAL_EFFORT_OVERRIDES,
-    _apply_local_effort_overlay,
     build_config,
     check_llm_configured,
     get_current_config_key,
@@ -27,100 +25,41 @@ from tg_bot.pipeline.analysis import (  # noqa: E402
 from tg_bot.pipeline.config_key import AnalysisConfigKey  # noqa: E402
 
 
-# ─── _LOCAL_EFFORT_OVERRIDES derivation ─────────────────────────────────
+# ─── EFFORT_KEY_BY_PROVIDER → AnalysisConfigKey.from_config resolution ──────
+#
+# As of tradingagents v0.3.0 upstream's own `_ENV_OVERRIDES` populates the
+# three per-provider effort keys on DEFAULT_CONFIG from the
+# `TRADINGAGENTS_*_EFFORT` env vars at lib import — the bot's former local
+# `_apply_local_effort_overlay` was removed with the v0.3.0 pin. What the
+# bot still owns is READING the active effort off the resolved config for
+# the cache slug / caption / Telegraph title; `from_config` iterates
+# `EFFORT_KEY_BY_PROVIDER.values()` to do that, so these pin that contract.
 
 
-async def test_local_effort_overrides_derived_from_effort_keys() -> None:
-    """Pin the derivation: each env var name is `TRADINGAGENTS_` + the
-    upper-cased config-key, mapping back to its original config-key.
-    Adding a provider to `EFFORT_KEY_BY_PROVIDER` automatically extends
-    the overlay — no second-edit needed."""
-    expected = {
-        f"TRADINGAGENTS_{key.upper()}": key for key in EFFORT_KEY_BY_PROVIDER.values()
-    }
-    assert _LOCAL_EFFORT_OVERRIDES == expected
-    # Concrete snapshot so a typo in EFFORT_KEY_BY_PROVIDER would fail
-    # loudly here too, not just the derivation rule.
-    assert _LOCAL_EFFORT_OVERRIDES == {
-        "TRADINGAGENTS_OPENAI_REASONING_EFFORT": "openai_reasoning_effort",
-        "TRADINGAGENTS_ANTHROPIC_EFFORT": "anthropic_effort",
-        "TRADINGAGENTS_GOOGLE_THINKING_LEVEL": "google_thinking_level",
-    }
+async def test_from_config_resolves_effort_for_each_provider_key() -> None:
+    """Each provider's effort key, present on the config, surfaces as
+    `AnalysisConfigKey.effort`. Registering a new provider in
+    `EFFORT_KEY_BY_PROVIDER` is all it takes for its effort to flow into the
+    config identity — no second edit."""
+    for provider, key in EFFORT_KEY_BY_PROVIDER.items():
+        config = {
+            "llm_provider": provider,
+            "deep_think_llm": "d",
+            "quick_think_llm": "q",
+            key: "high",
+        }
+        assert AnalysisConfigKey.from_config(config).effort == "high", key
 
 
-# ─── _apply_local_effort_overlay ────────────────────────────────────────
-
-
-async def test_overlay_writes_openai_effort_when_env_set() -> None:
-    config = {"llm_provider": "openai", "openai_reasoning_effort": None}
-    _apply_local_effort_overlay(
-        config, env={"TRADINGAGENTS_OPENAI_REASONING_EFFORT": "high"}
-    )
-    assert config["openai_reasoning_effort"] == "high"
-
-
-async def test_overlay_writes_anthropic_effort_when_env_set() -> None:
-    config = {"llm_provider": "anthropic", "anthropic_effort": None}
-    _apply_local_effort_overlay(
-        config, env={"TRADINGAGENTS_ANTHROPIC_EFFORT": "medium"}
-    )
-    assert config["anthropic_effort"] == "medium"
-
-
-async def test_overlay_writes_google_thinking_level_when_env_set() -> None:
-    config = {"llm_provider": "google", "google_thinking_level": None}
-    _apply_local_effort_overlay(
-        config, env={"TRADINGAGENTS_GOOGLE_THINKING_LEVEL": "low"}
-    )
-    assert config["google_thinking_level"] == "low"
-
-
-async def test_overlay_no_op_when_env_empty() -> None:
-    """An env mapping with no relevant vars leaves the config untouched
-    — the upstream default (None) survives."""
+async def test_from_config_effort_none_when_no_effort_key_set() -> None:
+    """No effort key on the config → effort is None, so default-config users
+    keep their cache slot (no spurious `__e` slug suffix)."""
     config = {
-        "llm_provider": "openai",
-        "openai_reasoning_effort": None,
-        "anthropic_effort": None,
-        "google_thinking_level": None,
+        "llm_provider": "deepseek",
+        "deep_think_llm": "d",
+        "quick_think_llm": "q",
     }
-    snapshot = dict(config)
-    _apply_local_effort_overlay(config, env={"UNRELATED_VAR": "value"})
-    assert config == snapshot
-
-
-async def test_overlay_skips_empty_string_values() -> None:
-    """An empty-string env var is treated as unset — matches the
-    "falsy means missing" convention used throughout the bot."""
-    config = {"openai_reasoning_effort": None}
-    _apply_local_effort_overlay(
-        config, env={"TRADINGAGENTS_OPENAI_REASONING_EFFORT": ""}
-    )
-    assert config["openai_reasoning_effort"] is None
-
-
-async def test_overlay_writes_all_three_when_all_set() -> None:
-    """All effort keys present simultaneously — the config doesn't reject
-    multiple keys being set (only one matches the active provider, but
-    that's `AnalysisConfigKey.from_config`'s problem)."""
-    config = {
-        "openai_reasoning_effort": None,
-        "anthropic_effort": None,
-        "google_thinking_level": None,
-    }
-    _apply_local_effort_overlay(
-        config,
-        env={
-            "TRADINGAGENTS_OPENAI_REASONING_EFFORT": "high",
-            "TRADINGAGENTS_ANTHROPIC_EFFORT": "medium",
-            "TRADINGAGENTS_GOOGLE_THINKING_LEVEL": "low",
-        },
-    )
-    assert config == {
-        "openai_reasoning_effort": "high",
-        "anthropic_effort": "medium",
-        "google_thinking_level": "low",
-    }
+    assert AnalysisConfigKey.from_config(config).effort is None
 
 
 # ─── build_config ───────────────────────────────────────────────────────
@@ -209,9 +148,33 @@ async def test_check_llm_configured_openrouter_names_openrouter_key() -> None:
             os.environ["OPENROUTER_API_KEY"] = saved
 
 
+async def test_check_llm_configured_kimi_names_moonshot_key() -> None:
+    """kimi (Moonshot AI) authenticates with MOONSHOT_API_KEY — the env-var
+    name doesn't echo the provider name, so without the explicit
+    `kimi → MOONSHOT_API_KEY` row the precheck would silently pass and the
+    run would 401 at upstream API-call time. Pins the row added in the v0.3.0
+    sync (mistral/kimi/groq/nvidia)."""
+    saved = os.environ.pop("MOONSHOT_API_KEY", None)
+    try:
+        reason = check_llm_configured({"llm_provider": "kimi"})
+        assert reason is not None and "MOONSHOT_API_KEY" in reason, reason
+    finally:
+        if saved is not None:
+            os.environ["MOONSHOT_API_KEY"] = saved
+
+
 async def test_check_llm_configured_ollama_no_env_needed() -> None:
     """ollama runs locally — no env var required, gate opens immediately."""
     assert check_llm_configured({"llm_provider": "ollama"}) is None
+
+
+async def test_check_llm_configured_bedrock_no_env_needed() -> None:
+    """bedrock authenticates via the AWS credential chain (env/profile/IAM),
+    not a single API key, so its `PROVIDER_ENV_KEYS` value is `None` — the
+    precheck must open the gate (return None) rather than invent an env-var
+    name to demand. Pairs with the ollama/`None`-value branch; pins that a
+    `None` map value is a pass, not a `KeyError`/false-block."""
+    assert check_llm_configured({"llm_provider": "bedrock"}) is None
 
 
 async def test_check_llm_configured_cn_variant_names_cn_suffixed_key() -> None:
@@ -315,3 +278,50 @@ async def test_pool_stats_returns_one_pool_with_instance_count_after_init() -> N
         assert analysis_mod.pool_stats() == (1, 1)
     finally:
         analysis_mod._graph_pool = saved
+
+
+# ─── import guard degrades on upstream fail-loud (v0.3.0+) ──────────────
+
+
+async def test_import_guard_degrades_on_config_valueerror() -> None:
+    """tradingagents v0.3.0+ fails LOUD at lib import on an invalid
+    `TRADINGAGENTS_*` env value — `_apply_env_overrides` raises `ValueError`
+    (e.g. `TRADINGAGENTS_MAX_DEBATE_ROUNDS=two`), not `ImportError`. The
+    import guard's `except ValueError` clause must catch it so the bot
+    degrades to `TRADINGAGENTS_AVAILABLE=False` (analysis paths short-circuit
+    with a helpful error) instead of crashing the whole process at startup.
+
+    Loads a FRESH copy of `analysis.py` (not a reload of the shared module,
+    which would clobber the real one for later tests) with
+    `tradingagents.default_config` stubbed to raise on the `DEFAULT_CONFIG`
+    attribute access the guard performs."""
+    import importlib.util
+    import types
+
+    src_path = ROOT / "src" / "tg_bot" / "pipeline" / "analysis.py"
+
+    class _RaisingDefaultConfig(types.ModuleType):
+        def __getattr__(self, name: str):
+            if name == "DEFAULT_CONFIG":
+                raise ValueError(
+                    "Invalid value for TRADINGAGENTS_MAX_DEBATE_ROUNDS: 'two'"
+                )
+            raise AttributeError(name)
+
+    saved = sys.modules.get("tradingagents.default_config")
+    sys.modules["tradingagents.default_config"] = _RaisingDefaultConfig(
+        "tradingagents.default_config"
+    )
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "tg_bot.pipeline._analysis_guard_probe", src_path
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert mod.TRADINGAGENTS_AVAILABLE is False
+        assert mod.DEFAULT_CONFIG is None
+    finally:
+        if saved is not None:
+            sys.modules["tradingagents.default_config"] = saved
+        else:
+            sys.modules.pop("tradingagents.default_config", None)
