@@ -91,7 +91,7 @@ The image is rebuilt automatically by a daily GitHub Action whenever upstream [`
 | `/refresh NVDA` | Direct fast-path: drop today's cached result for `NVDA` and re-run the analysis. |
 | `/refresh` (no args) | Same paginated multi-select picker as `/watch`, but the Done button is `🔄 Refresh (N)` and tapping it drops today's cache for each selected ticker before running. Useful when several tickers' intraday data has shifted and you want to refresh them in one shot. |
 | `/email [<addr>\|off\|test]` | Configure the daily-digest email mirror (Resend, opt-in). Bare `/email` shows current setting. `/email foo@bar.com` saves (validates locally). `/email off` clears. `/email test` sends a synthetic one-off email to verify wiring. Requires the operator to set `RESEND_API_KEY` + `RESEND_FROM` in `.env`. |
-| `/status` | Operational snapshot: uptime, # analyses since boot, graph-pool size, active LLM config (provider + deep + quick + rounds + effort) loaded from `.env` |
+| `/status` | Operational snapshot: uptime, # analyses since boot, graph-pool size, active LLM config (provider + deep + quick + rounds + effort + temperature when set) loaded from `.env` |
 
 The Telegram client also exposes a Menu button next to the input field with the same commands (populated via `set_my_commands`), and `/`-autocomplete works after typing the first letter or two.
 

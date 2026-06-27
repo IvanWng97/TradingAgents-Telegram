@@ -859,6 +859,10 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # actually threads through.
     effort_key = EFFORT_KEY_BY_PROVIDER.get(provider)
     effort = (config.get(effort_key) if effort_key else None) or "default"
+    # Temperature is a cross-provider knob (v0.3.0+); surfaced only when set —
+    # when unset it's the provider default and not part of the config identity
+    # (mirrors AnalysisConfigKey omitting it from slug/caption/title).
+    temperature = config.get("temperature")
 
     # Digest line: only shown when fully configured + enabled. Surfaces the
     # next-firing instant + human-readable delta so users can sanity-check
@@ -933,6 +937,15 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     else:
         pool_line = f"• Graph pool: `{pool_instances}` instance\\(s\\) built\n"
 
+    # Temperature bullet appears only when the operator set it — keeps the
+    # common-case LLM block tight, consistent with caption()/slug() omitting
+    # it when unset.
+    temp_line = (
+        f"\n• Temperature: `{escape_markdown(str(temperature), version=2)}`"
+        if temperature not in (None, "")
+        else ""
+    )
+
     message = (
         "*Bot status*\n"
         f"• Uptime: `{escape_markdown(uptime_str, version=2)}`\n"
@@ -947,6 +960,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"• Quick: `{escape_markdown(quick, version=2)}`\n"
         f"• Rounds: `{rounds}`\n"
         f"• Effort: `{escape_markdown(effort, version=2)}`"
+        f"{temp_line}"
     )
     if setup_reason is not None:
         message += f"\n\n⚠️ `{escape_markdown(setup_reason, version=2)}`"

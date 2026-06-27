@@ -110,19 +110,24 @@ PROVIDER_ENV_KEYS: dict[str, str | None] = {
     # surface "OPENROUTER_API_KEY not set" instead of the cryptic downstream
     # "OPENAI_API_KEY missing" from the openai SDK when the env isn't loaded.
     "openrouter": "OPENROUTER_API_KEY",
-    # Hosted OpenAI-compatible providers added upstream in v0.3.0. Model IDs
-    # are user-specified; only the API-key env var matters for the precheck.
-    # Values verified against `PROVIDER_API_KEY_ENV`; pinned by
+    # Hosted OpenAI-compatible providers added upstream in v0.3.0 that REQUIRE a
+    # key. Model IDs are user-specified; only the API-key env var matters for the
+    # precheck. Values verified against `PROVIDER_API_KEY_ENV`; pinned by
     # `test_provider_env_keys_match_upstream`.
     "mistral": "MISTRAL_API_KEY",
     "kimi": "MOONSHOT_API_KEY",  # Moonshot AI
     "groq": "GROQ_API_KEY",
     "nvidia": "NVIDIA_API_KEY",  # NVIDIA NIM
-    "openai_compatible": "OPENAI_COMPATIBLE_API_KEY",  # vLLM / LM Studio / relays
     # bedrock authenticates via the AWS credential chain, not a single key
     # env — mirror upstream's `None` so the precheck treats it as "no key
     # check possible" (same shape as ollama) rather than silently passing.
     "bedrock": None,
+    # openai_compatible: intentionally absent. Upstream maps it to
+    # OPENAI_COMPATIBLE_API_KEY but treats it as KEY-OPTIONAL — keyless local
+    # vLLM / LM Studio servers are valid. Listing it would make
+    # `check_llm_configured` hard-block those keyless setups (env var present but
+    # unset → "not set" error), so we omit it like azure and let a wrong/absent
+    # key surface downstream instead.
     # azure: intentionally absent — needs an endpoint + deployment, not just
     # a key, so the single-env-var precheck doesn't model it.
 }
@@ -335,10 +340,11 @@ def run_trading_analysis(
     bound to the current thread for the duration of propagate() so the
     singleton callback can dispatch to it.
 
-    Graph instances come from a per-(provider, deep, quick) pool so single-
-    tap and parallel queue runs both benefit from caching. Pool grows on
-    demand up to `Config.MAX_CONCURRENT_ANALYSES`; the asyncio semaphore in
-    the handler bounds how many runs reach the pool at once.
+    Graph instances come from a single process-wide pool (config is
+    process-wide via `.env`) so single-tap and parallel queue runs both
+    benefit from caching. Pool grows on demand up to
+    `Config.MAX_CONCURRENT_ANALYSES`; the asyncio semaphore in the handler
+    bounds how many runs reach the pool at once.
 
     Returns (final_state, signal). (None, None) if tradingagents isn't
     available — caller should surface a helpful error.
