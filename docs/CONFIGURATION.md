@@ -18,14 +18,14 @@ Upstream `tradingagents` reads these env vars at library-import time via its `_E
 
 | Variable | Required | Notes |
 |---|---|---|
-| `TRADINGAGENTS_LLM_PROVIDER` | yes | One of `openai`, `anthropic`, `google`, `xai`, `deepseek`, `qwen`, `qwen-cn`, `glm`, `glm-cn`, `minimax`, `minimax-cn`, `openrouter`, `ollama`. |
+| `TRADINGAGENTS_LLM_PROVIDER` | yes | One of `openai`, `anthropic`, `google`, `xai`, `deepseek`, `qwen`, `qwen-cn`, `glm`, `glm-cn`, `minimax`, `minimax-cn`, `openrouter`, `ollama`, or (v0.3.0+) `mistral`, `kimi`, `groq`, `nvidia`, `bedrock`, `openai_compatible`. |
 | `TRADINGAGENTS_DEEP_THINK_LLM` | yes | The "deep think" model — agents use this for thesis + risk + research. Heavier / slower / pricier. |
 | `TRADINGAGENTS_QUICK_THINK_LLM` | yes | The "quick think" model — agents use this for fast tool-call orchestration. Cheaper / faster. |
-| Provider API key | yes (1) | The key matching `TRADINGAGENTS_LLM_PROVIDER`: `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`, `DASHSCOPE_API_KEY` (qwen), `DASHSCOPE_CN_API_KEY` (qwen-cn — **distinct** from non-CN), `ZHIPU_API_KEY` (glm — renamed upstream in v0.2.5 from `ZHIPUAI_API_KEY`), `ZHIPU_CN_API_KEY` (glm-cn — distinct), `MINIMAX_API_KEY` (minimax — added in v0.2.5), `MINIMAX_CN_API_KEY` (minimax-cn — distinct), `OPENROUTER_API_KEY`. Ollama needs no key. Sibling provider keys can stay blank — only the one matching `TRADINGAGENTS_LLM_PROVIDER` is read at run time. The bot startup logs a WARNING if the key for the configured provider is missing. |
+| Provider API key | yes (1) | The key matching `TRADINGAGENTS_LLM_PROVIDER`: `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`, `DASHSCOPE_API_KEY` (qwen), `DASHSCOPE_CN_API_KEY` (qwen-cn — **distinct** from non-CN), `ZHIPU_API_KEY` (glm — renamed upstream in v0.2.5 from `ZHIPUAI_API_KEY`), `ZHIPU_CN_API_KEY` (glm-cn — distinct), `MINIMAX_API_KEY` (minimax — added in v0.2.5), `MINIMAX_CN_API_KEY` (minimax-cn — distinct), `OPENROUTER_API_KEY`. v0.3.0+ providers: `MISTRAL_API_KEY` (mistral), `MOONSHOT_API_KEY` (kimi), `GROQ_API_KEY` (groq), `NVIDIA_API_KEY` (nvidia), `OPENAI_COMPATIBLE_API_KEY` (openai_compatible — optional for keyless local servers). Ollama needs no key; Bedrock auths via the AWS credential chain (no single key env var). Sibling provider keys can stay blank — only the one matching `TRADINGAGENTS_LLM_PROVIDER` is read at run time. The bot startup logs a WARNING if the key for the configured provider is missing. |
 | `TRADINGAGENTS_MAX_DEBATE_ROUNDS` | no | `1`/`2`/`3`, default `1`. Higher = more nuanced thesis (~1.5–2× cost). |
-| `TRADINGAGENTS_OPENAI_REASONING_EFFORT` | no | `low`/`medium`/`high`. Applied only when provider is `openai`. Local overlay (upstream doesn't expose this). |
-| `TRADINGAGENTS_ANTHROPIC_EFFORT` | no | `low`/`medium`/`high`. Applied only when provider is `anthropic`. Local overlay. |
-| `TRADINGAGENTS_GOOGLE_THINKING_LEVEL` | no | `low`/`medium`/`high`. Applied only when provider is `google`. Local overlay. |
+| `TRADINGAGENTS_OPENAI_REASONING_EFFORT` | no | `low`/`medium`/`high`. Applied only when provider is `openai`. Native upstream knob (v0.3.0+), gated to models that accept it. |
+| `TRADINGAGENTS_ANTHROPIC_EFFORT` | no | `low`/`medium`/`high`. Applied only when provider is `anthropic`. Native upstream knob (v0.3.0+). |
+| `TRADINGAGENTS_GOOGLE_THINKING_LEVEL` | no | `low`/`medium`/`high`. Applied only when provider is `google`. Native upstream knob (v0.3.0+). |
 
 ### Bot tuning + persistence
 
@@ -51,6 +51,6 @@ Per-user `/email set <addr>` opts in; the bot mirrors each daily digest to that 
 Set `TRADINGAGENTS_LLM_PROVIDER` to one of:
 
 - **First-class** (tradingagents catalog ships canonical deep + quick model pairs): `openai`, `google`, `anthropic`, `xai`, `deepseek`, `qwen`, `qwen-cn`, `glm`, `glm-cn`, `minimax`, `minimax-cn`, `ollama`, `openrouter`.
-- **Custom-only** (no catalog defaults; configure the deep/quick model IDs manually via `TRADINGAGENTS_DEEP_THINK_LLM` / `TRADINGAGENTS_QUICK_THINK_LLM`): `azure`.
+- **Custom-only** (no catalog defaults; configure the deep/quick model IDs manually via `TRADINGAGENTS_DEEP_THINK_LLM` / `TRADINGAGENTS_QUICK_THINK_LLM`): `azure`, plus the v0.3.0 additions `mistral`, `kimi`, `groq`, `nvidia`, `bedrock`, `openai_compatible`.
 
 The full upstream model catalog lives in `tradingagents.llm_clients.model_catalog.get_model_options(provider, mode)` — `start.sh` writes the first entry per provider as the canonical default. Edit `TRADINGAGENTS_DEEP_THINK_LLM` / `TRADINGAGENTS_QUICK_THINK_LLM` in `.env` to switch to a different model from the catalog.
