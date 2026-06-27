@@ -6,17 +6,22 @@ routing surface for every inline-button tap, yet nothing exercised it
 
   * each prefix routes to its intended sub-handler with the correctly
     parsed post-prefix payload (and to NO other handler), and
-  * the TWO documented order-sensitive pairs — `cancel_analysis:` must
-    win over `cancel:`, and `digest_cancel:` must win over `digest:`.
-    These guard the regression where a reorder (or dropping the trailing
-    colon from a prefix) silently misroutes a cancel tap into the picker
-    handler.
+  * the TWO combined-prefix pairs — `cancel_analysis:` routes to the
+    analysis-cancel handler (not `cancel:`'s) and `digest_cancel:` to the
+    digest-cancel handler (not `digest:`'s). With the current
+    colon-terminated prefixes these can't actually collide regardless of
+    chain order (`"cancel_analysis:".startswith("cancel:")` is False), so
+    the "checked before" ordering is defensive, not load-bearing today.
+    What these guard is the FORMAT contract: a future change that drops the
+    disambiguating colon (e.g. `startswith("cancel")`) or renames a prefix
+    so one becomes a literal prefix of another would reintroduce the
+    overlap — and then chain position would silently misroute the tap.
 
 Strategy: every module-level handler name the router dispatches to is
 monkeypatched with an async `Recorder`, so calling `button_callback`
 records which handler fired and with what args — without running any
 real handler, storage, or LLM path. The `assert_only` helper asserts
-exactly-one-fired, which is what makes the order-sensitive guard tight.
+exactly-one-fired, which is what makes the disambiguation guard tight.
 """
 
 from __future__ import annotations
@@ -173,14 +178,20 @@ async def test_button_callback_routes_each_prefix(
     assert update.callback_query.answered is True
 
 
-# ─── MANDATORY order-sensitive guards ───────────────────────────────────
+# ─── combined-prefix disambiguation guards ──────────────────────────────
 
 
 async def test_cancel_analysis_wins_over_cancel(monkeypatch):
-    """`cancel_analysis:<uuid>` must route to the analysis-cancel handler,
-    NOT `_handle_cancel`. `cancel_analysis:` is checked before `cancel:` in
-    the chain; reordering (or dropping a trailing colon) would misroute a
-    Cancel-button tap into the picker-cancel flow."""
+    """`cancel_analysis:<uuid>` routes to the analysis-cancel handler, NOT
+    `_handle_cancel`. With the current colon-terminated prefixes the two
+    can't collide regardless of chain order
+    (`"cancel_analysis:run-7".startswith("cancel:")` is False), so the
+    documented "checked before `cancel:`" ordering is defensive, not
+    load-bearing today. This guards the FORMAT contract: a future change
+    that drops the disambiguating colon (e.g. `startswith("cancel")`) or
+    renames a prefix so one becomes a literal prefix of the other would
+    reintroduce the overlap — and then chain position would silently
+    misroute a Cancel-button tap into the picker-cancel flow."""
     recorders, _, _ = await _dispatch(monkeypatch, "cancel_analysis:run-7")
     assert recorders["_handle_cancel_analysis"].called is True
     assert recorders["_handle_cancel"].called is False
@@ -188,9 +199,13 @@ async def test_cancel_analysis_wins_over_cancel(monkeypatch):
 
 
 async def test_digest_cancel_wins_over_digest(monkeypatch):
-    """`digest_cancel:<msg_id>` must route to the digest-cancel handler,
-    NOT `_handle_digest`. `digest_cancel:` is checked before `digest:`;
-    a reorder would swallow the abort tap into the digest picker dispatch."""
+    """`digest_cancel:<msg_id>` routes to the digest-cancel handler, NOT
+    `_handle_digest`. Same shape as the cancel pair: the colon-terminated
+    prefixes can't collide today
+    (`"digest_cancel:555".startswith("digest:")` is False), so the "checked
+    before `digest:`" ordering is defensive. This guards against a future
+    prefix-format change reintroducing the overlap and swallowing the abort
+    tap into the digest picker dispatch."""
     recorders, _, _ = await _dispatch(monkeypatch, "digest_cancel:555")
     assert recorders["_handle_digest_cancel"].called is True
     assert recorders["_handle_digest"].called is False
