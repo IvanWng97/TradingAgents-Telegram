@@ -35,3 +35,14 @@ Backup and portability: serialize a user's watchlist to JSON so it can be saved,
 Two use cases the architect review on PR #75 flagged would benefit: (1) migrating between bot instances when the operator restarts on a fresh Docker host without persistent `data/` mount; (2) sharing a watchlist between accounts (e.g., personal + work Telegram accounts maintained by the same person). Today both require manual `/add NVDA AAPL ...` line-by-line.
 
 **Out of scope.** No CSV/XLSX support (JSON is enough). No partial export (whole user state or nothing). No history/cache export (that's separate — `data/result_cache/` is server-side and isn't user-shareable anyway).
+
+
+## Native Rich Messages (Bot API 10.1) — blocked on upstream PTB
+
+Migrate the analysis output from the Telegraph round-trip to native Telegram **Rich Messages** (`sendRichMessage` / `InputRichMessage`, Bot API 10.1, released 2026-06-11). Block-based formatting — `RichBlockTable`, `RichBlockList`, `RichBlockDetails` (collapsible), `RichBlockThinking`, `RichBlockPhoto` — could render the fundamentals/market tables, per-agent rationale, and the finviz chart **inline in Telegram**, potentially shrinking or removing the Telegraph dependency and the caption table-stripping the 1024-char budget forces today.
+
+**Blocked — do not build yet.** `python-telegram-bot` doesn't expose these: installed 22.7 targets Bot API 9.5; latest 22.8 (2026-06-12) targets 10.0. Native support is tracked in [PTB#5261](https://github.com/python-telegram-bot/python-telegram-bot/issues/5261) under the **v23** milestone (due ~2026-09-01), but maintainers **explicitly paused** it pending an internal refactor — the rushed send-side PRs (#5263 / #5275) were closed because the refactor would force a redo. Revisit when PTB ships v23 with `Bot.send_rich_message`.
+
+**Why wait, not raw-HTTP now.** A raw `sendRichMessage` shim over PTB's transport works (a downstream project does exactly this), but the `RichBlock*` field shapes aren't fully documented yet and the API is ~2 weeks old — too unstable to pin production rendering to. Once PTB exposes typed support, scope the `rendering/` migration: `format_analysis_result_markdown` (rich blocks instead of Telegraph HTML), the caption builders in `formatters.py`, and the two sanitizers all touch this.
+
+**Out of scope (until adopted).** No raw-HTTP shim in production; no partial migration — Telegraph stays the canonical full-report surface until Rich Messages can fully replace it.
