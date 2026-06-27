@@ -268,8 +268,31 @@ def store(
         # failure would orphan yesterday's still-valid entry. The sweep
         # is best-effort: an unlink error here doesn't roll back the
         # successful write (the new entry is already on disk).
-        for sibling in path.parent.glob("*.json"):
-            if sibling.name != path.name:
+        #
+        # Drop ONLY siblings strictly older than the just-written date. A
+        # blanket "unlink every other name" sweep mis-fires whenever a
+        # NEWER sibling legitimately coexists: (1) two runs straddling
+        # midnight finish out of order — an older frozen-date store landing
+        # last would delete the newer file; (2) manual /watch keys on the
+        # server-local date while a digest keys on the user-tz date, so the
+        # same wall-day can produce two stems that would otherwise evict
+        # each other every run (breaking the one-LLM-run-per-day contract
+        # for non-UTC-aligned users). Unparseable stems are left untouched
+        # — never delete a file we can't date.
+        try:
+            written_date = _date.fromisoformat(date_iso)
+        except ValueError:
+            written_date = None
+        if written_date is not None:
+            for sibling in path.parent.glob("*.json"):
+                if sibling.name == path.name:
+                    continue
+                try:
+                    sibling_date = _date.fromisoformat(sibling.stem)
+                except ValueError:
+                    continue  # not a <date>.json file — leave it alone
+                if sibling_date >= written_date:
+                    continue  # same wall-day (other tz) or newer — keep
                 try:
                     sibling.unlink()
                 except OSError:

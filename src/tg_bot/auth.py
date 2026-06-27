@@ -28,11 +28,26 @@ async def authorize(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     logger.warning("Unauthorized access attempt from user_id=%s", user.id)
-    if update.callback_query is not None:
-        await update.callback_query.answer("Not authorized.", show_alert=True)
-    elif update.effective_message is not None:
-        await update.effective_message.reply_text(
-            f"Not authorized\\. Your user ID is `{user.id}`\\.",
-            parse_mode="MarkdownV2",
+    # The rejection notification is best-effort and MUST NOT gate the stop.
+    # If the notify await raises — `BadRequest: Query is too old` on a stale
+    # inline button (deterministic), or a transient TimedOut/NetworkError/
+    # Forbidden — an un-guarded `raise` below would never be reached, PTB's
+    # process_error would return False (no error handler historically
+    # registered), and the unauthorized update would fall through into the
+    # command/callback groups. Swallow the notify failure so the gate ALWAYS
+    # fails closed (fail-closed contract; see module docstring).
+    try:
+        if update.callback_query is not None:
+            await update.callback_query.answer("Not authorized.", show_alert=True)
+        elif update.effective_message is not None:
+            await update.effective_message.reply_text(
+                f"Not authorized\\. Your user ID is `{user.id}`\\.",
+                parse_mode="MarkdownV2",
+            )
+    except Exception:
+        logger.debug(
+            "auth: failed to notify unauthorized user_id=%s (gate still closes)",
+            user.id,
+            exc_info=True,
         )
     raise ApplicationHandlerStop

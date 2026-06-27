@@ -57,3 +57,42 @@ def test_default_builder_is_single_worker_control():
     """
     plain = ApplicationBuilder().token("123:dummy-token-for-build-only").build()
     assert plain.concurrent_updates == 1
+
+
+def test_build_application_registers_error_handler():
+    """H1 defense-in-depth: `_build_application` must register a top-level
+    error handler. Without one, an unhandled exception in any handler makes
+    PTB's `process_error` return False; for the group=-1 auth gate that is
+    the fail-open path (the update continues into later groups). A registered
+    handler guarantees unhandled exceptions are logged and never alter
+    dispatch flow.
+    """
+    saved = Config.TELEGRAM_BOT_TOKEN
+    Config.TELEGRAM_BOT_TOKEN = "123:dummy-token-for-build-only"
+    try:
+        application = app._build_application()
+    finally:
+        Config.TELEGRAM_BOT_TOKEN = saved
+
+    # PTB stores registered error handlers in `application.error_handlers`
+    # (a dict keyed by callback). A non-empty dict == at least one handler.
+    assert application.error_handlers, (
+        "no error handler registered — unhandled handler exceptions would "
+        "silently fall through (H1 fail-open backstop missing)"
+    )
+    assert app._on_error in application.error_handlers
+
+
+async def test_on_error_logs_the_exception(caplog):
+    """`_on_error` surfaces the unhandled exception at ERROR level so it is
+    never silently swallowed (the codebase otherwise has no structured error
+    logging)."""
+    import logging
+    from types import SimpleNamespace
+
+    context = SimpleNamespace(error=RuntimeError("boom in a handler"))
+    with caplog.at_level(logging.ERROR, logger="tg_bot.app"):
+        await app._on_error(update=object(), context=context)
+    assert any(
+        "boom in a handler" in r.getMessage() or r.exc_info for r in caplog.records
+    )

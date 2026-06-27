@@ -2749,3 +2749,55 @@ async def test_fanout_success_then_cancel_discards_result() -> None:
         runner.watchlist_storage = orig_w
         runner.user_config_storage = orig_uc
         runner._analyze_one_for_digest = orig_a
+
+
+# ─── real _analyze_one_for_digest: in-flight cancel boundary (M4) ────────
+
+
+async def test_digest_inflight_cancel_propagates_not_logged_as_failure(
+    monkeypatch,
+) -> None:
+    """M4 regression. An in-flight digest cancel raises `CancelledByUserError`
+    (a `RuntimeError` subclass) out of `run_trading_analysis` during
+    `propagate()`. The REAL `_analyze_one_for_digest` must let it PROPAGATE
+    to `_wrapped` (which renders the row "cancelled"), NOT swallow it in the
+    generic `except Exception` that logs a spurious ERROR "analysis failed"
+    traceback indistinguishable from a real crash (Invariant #5: same
+    exception boundary on the manual + digest paths).
+
+    Unlike every other digest test, this drives the real worker (not a
+    stub), so it also pins — toward the M6 coverage gap — that on cancel the
+    Telegraph publish and `cache.store` are never reached and the semaphore
+    slot is released in `finally`.
+    """
+    import pytest
+    from unittest.mock import AsyncMock, Mock
+
+    from tg_bot.handlers import analysis_runner as runner
+    from tg_bot.pipeline.progress import CancelledByUserError
+
+    def _raise_cancel(ticker, reporter):
+        # Sync — runs under asyncio.to_thread, mirroring the real
+        # run_trading_analysis signature.
+        raise CancelledByUserError(f"cancel during {ticker}")
+
+    publish_mock = AsyncMock()
+    store_mock = Mock()
+    sem = asyncio.Semaphore(1)
+
+    monkeypatch.setattr(runner, "TRADINGAGENTS_AVAILABLE", True)
+    monkeypatch.setattr(runner, "run_trading_analysis", _raise_cancel)
+    monkeypatch.setattr(runner, "_get_run_semaphore", lambda: sem)
+    monkeypatch.setattr(runner.result_cache, "lookup", lambda *a, **k: None)
+    monkeypatch.setattr(runner.result_cache, "store", store_mock)
+    monkeypatch.setattr(runner, "publish_to_telegraph", publish_mock)
+
+    with pytest.raises(CancelledByUserError):
+        await runner._analyze_one_for_digest(
+            1, "NVDA", reporter=None, today_iso="2026-06-26"
+        )
+
+    publish_mock.assert_not_called()
+    store_mock.assert_not_called()
+    # Slot released in `finally` even on the raised cancel path — no leak.
+    assert sem._value == 1, "semaphore slot leaked on the cancel path"
