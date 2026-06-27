@@ -13,6 +13,7 @@ from telegram import (
 from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
+from tg_bot.config import Config
 from tg_bot.pipeline.analysis import (
     EFFORT_KEY_BY_PROVIDER,
     build_config,
@@ -48,6 +49,42 @@ logger = logging.getLogger(__name__)
 # handler doesn't fire on every reply to the bot.
 ADD_PROMPT = "📝 Send the ticker symbol(s) to add (e.g. NVDA AAPL TSLA):"
 EMAIL_PROMPT = "📧 Send your email address to mirror the daily digest:"
+
+# Email-mirror abuse controls (M3). The mirror sends through the operator's
+# verified Resend domain to a user-supplied recipient, so two guards apply:
+#   1. Open-mode refusal — when ALLOWED_USER_IDS is empty the bot is open to
+#      anyone, so a stranger could point `/email` at an arbitrary victim and
+#      relay/spam them on the operator's domain. The email feature is disabled
+#      entirely in that mode (enforced here in `email_cmd` / `email_via_reply`,
+#      with a backstop in `send_digest_email`). `/email off` stays allowed so a
+#      stale address can always be cleared.
+#   2. Per-user cooldown on immediate test sends (`/email test` and the
+#      test-send leg of `/email diagnose`) so even a vetted, allow-listed user
+#      can't hold the button down and hammer Resend. The dict is bounded by the
+#      allowlist size (open mode is refused before it is ever reached), so no
+#      eviction is needed.
+_EMAIL_OPEN_MODE_NOTICE = (
+    "📧 The email mirror is disabled while the bot is open to everyone "
+    "\\(`ALLOWED_USER_IDS` is empty\\)\\.\n\n"
+    "It relays through the operator's email domain, so it's only enabled once "
+    "the bot is locked down to an allowlist\\. Ask the operator to set "
+    "`ALLOWED_USER_IDS` and restart\\."
+)
+_EMAIL_TEST_COOLDOWN_S = 60.0
+_email_test_last_sent: dict[int, float] = {}
+
+
+def _email_test_cooldown_remaining(user_id: int) -> float | None:
+    """Per-user throttle for immediate test sends. Returns the remaining
+    cooldown in seconds if `user_id` sent a test within the window; otherwise
+    records this attempt and returns None. Monotonic clock so a wall-clock
+    adjustment can't widen or collapse the window."""
+    now = time.monotonic()
+    last = _email_test_last_sent.get(user_id)
+    if last is not None and (remaining := _EMAIL_TEST_COOLDOWN_S - (now - last)) > 0:
+        return remaining
+    _email_test_last_sent[user_id] = now
+    return None
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -191,6 +228,12 @@ async def email_via_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     user_id = update.effective_user.id
+    # Open-mode abuse gate (M3) — same policy as `email_cmd`. The bare
+    # `/email` that opened this prompt is itself gated, so this only fires if
+    # the allowlist was removed after the prompt was shown; refuse the save.
+    if not Config.ALLOWED_USER_IDS:
+        await msg.reply_text(_EMAIL_OPEN_MODE_NOTICE, parse_mode="MarkdownV2")
+        return
     addr = (msg.text or "").strip()
     ok = await user_config_storage.set_digest_email(str(user_id), addr)
     if not ok:
@@ -665,6 +708,15 @@ async def _email_diagnose(update: Update, current: str | None) -> None:
         )
     elif not is_email_configured():
         lines.append("• Test send: ⏭ skipped \\(env not configured\\)")
+    elif (
+        cooldown := _email_test_cooldown_remaining(update.effective_user.id)
+    ) is not None:
+        # Shares the `/email test` cooldown bucket — both burn the operator's
+        # Resend quota, so a diagnose right after a test is throttled too.
+        lines.append(
+            f"• Test send: ⏳ rate\\-limited "
+            f"\\(wait {int(cooldown) + 1}s — a test was sent recently\\)"
+        )
     else:
         today = _date.today().isoformat()
         result = await send_digest_email(
@@ -715,6 +767,17 @@ async def email_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     digest = user_config_storage.get_digest(user_id) or {}
     current = digest.get("email")
 
+    sub = args[0].lower().strip() if args else None
+
+    # Open-mode abuse gate (M3): refuse the whole feature when the bot is open
+    # to everyone, EXCEPT `/email off` (which only clears a possibly-stale
+    # address — always safe). See `_EMAIL_OPEN_MODE_NOTICE` for the rationale.
+    if sub != "off" and not Config.ALLOWED_USER_IDS:
+        await update.message.reply_text(
+            _EMAIL_OPEN_MODE_NOTICE, parse_mode="MarkdownV2"
+        )
+        return
+
     if not args:
         # Bare `/email` — open a ForceReply prompt, same UX as bare `/add`.
         # The current setting (if any) lives in `/status` now; surfacing it
@@ -725,8 +788,6 @@ async def email_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=ForceReply(selective=True),
         )
         return
-
-    sub = args[0].lower().strip()
 
     if sub == "off":
         ok = await user_config_storage.clear_digest_email(str(user_id))
@@ -752,6 +813,14 @@ async def email_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(
                 "⚠️ `RESEND_API_KEY` / `RESEND_FROM` not set in `\\.env`\\.\n\n"
                 "Ask the operator to add them and restart the bot\\.",
+                parse_mode="MarkdownV2",
+            )
+            return
+        cooldown = _email_test_cooldown_remaining(user_id)
+        if cooldown is not None:
+            await update.message.reply_text(
+                f"⏳ Slow down — wait {int(cooldown) + 1}s before sending "
+                "another test email\\.",
                 parse_mode="MarkdownV2",
             )
             return
