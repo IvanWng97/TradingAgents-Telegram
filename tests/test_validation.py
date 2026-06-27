@@ -28,6 +28,7 @@ FAIL = "\033[91m✗\033[0m"
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from tg_bot import validation  # noqa: E402
 from tg_bot.history import normalize_ticker as history_normalize  # noqa: E402
 from tg_bot.validation import _normalize as validation_normalize  # noqa: E402
 
@@ -73,3 +74,56 @@ def test_lowercase_input_round_trips() -> None:
     assert validation_normalize("brk-b") == "BRK-B"
     assert history_normalize("..") is None
     assert validation_normalize("..") is None
+
+
+# --- Invariant #10: class-share dot→dash yfinance retry ----------------------
+# `validate_ticker` re-queries the dash form (`BRK-B`) via `_class_share_alt`
+# when the user-typed dot form (`BRK.B`) returns an empty yfinance history.
+# The existing tests above only exercise the `_normalize` regex; the yfinance
+# retry path is never invoked. These pin it by stubbing the `yf.Ticker(...).
+# history(...)` seam validate_ticker actually calls (validation.py imports
+# `import yfinance as yf`, so the live attribute is `validation.yf.Ticker`).
+
+
+def _make_fake_ticker(known: set[str]):
+    """Build a stand-in `yf.Ticker` whose `.history()` reports a non-empty
+    frame only for symbols in `known` (mirrors `df.empty` truthiness)."""
+
+    class _FakeHistory:
+        def __init__(self, empty: bool) -> None:
+            self.empty = empty
+
+    class _FakeTicker:
+        def __init__(self, symbol: str) -> None:
+            self._symbol = symbol
+
+        def history(self, *args: object, **kwargs: object) -> _FakeHistory:
+            return _FakeHistory(empty=self._symbol not in known)
+
+    return _FakeTicker
+
+
+async def test_class_share_dot_retried_as_dash(monkeypatch) -> None:
+    """BRK.B is empty on Yahoo but BRK-B is not → validate_ticker auto-corrects
+    to the dash form and surfaces the class-share note."""
+    validation._CACHE.clear()
+    monkeypatch.setattr(validation.yf, "Ticker", _make_fake_ticker({"BRK-B"}))
+
+    symbol, hint = await validation.validate_ticker("BRK.B")
+
+    assert symbol == "BRK-B"
+    assert hint is not None and "BRK-B" in hint
+
+
+async def test_unknown_class_share_form_fails_after_both_lookups(
+    monkeypatch,
+) -> None:
+    """When BOTH the dot form and its dash rewrite are empty, validate_ticker
+    returns the not-found shape (None symbol + hint)."""
+    validation._CACHE.clear()
+    monkeypatch.setattr(validation.yf, "Ticker", _make_fake_ticker(set()))
+
+    symbol, hint = await validation.validate_ticker("ZZZZ.Q")
+
+    assert symbol is None
+    assert hint is not None and "not found" in hint
