@@ -2585,3 +2585,145 @@ def _caplog_warning(logger_name: str):  # noqa: E402  (function, not import)
             logger.removeHandler(handler)
 
     return _cm()
+
+
+# --- _post_init JobQueue rebuild (Invariant #9) ----------------------------
+
+
+async def test_post_init_registers_enabled_digests_only() -> None:
+    """Invariant #9: `app._post_init` rebuilds the in-memory JobQueue from
+    storage by walking `iter_enabled_digests` → `register_digest_job` →
+    `job_queue.run_daily`. No other test drives the REAL `_post_init`
+    end-to-end — `test_post_init_backfill_idempotent` reimplements only
+    the backfill loop inline, and `test_iter_enabled_digests_skips_disabled_users`
+    pins the storage iterator in isolation. So a regression in the
+    post_init registration walk itself (dropping the loop, iterating
+    `iter_users_with_digest` instead of `iter_enabled_digests` and thereby
+    scheduling DISABLED users, or registering a job per user twice) would
+    sail through unpinned.
+
+    Seed two fully-configured enabled digests + one disabled; call the
+    real `_post_init` against a fake app whose `_FakeJobQueue` records
+    `run_daily`; assert EXACTLY the two enabled users got a `digest:<uid>`
+    job and the disabled one was skipped."""
+    from tg_bot import app as appmod
+
+    s, _ = fresh_storage()
+    # Two fully-configured + enabled digests.
+    await s.set_digest_tz("111", "America/New_York")
+    await s.set_digest_hour("111", 9, 1001)
+    await s.set_digest_tz("222", "Europe/London")
+    await s.set_digest_hour("222", 14, 2002)
+    # One disabled (was enabled, then turned off) — must NOT schedule.
+    await s.set_digest_tz("333", "America/Los_Angeles")
+    await s.set_digest_hour("333", 7, 3003)
+    await s.disable_digest("333")
+
+    class _W:
+        def get_watchlist(self, _uid):
+            return []
+
+    async def _noop_set_commands(*_a, **_kw):
+        return None
+
+    orig_uc = appmod.user_config_storage
+    orig_w = appmod.watchlist_storage
+    orig_llm = appmod.check_llm_configured
+    # Swap the module-level storage singletons `_post_init` reads, and
+    # stub the LLM precheck so the walk is hermetic (not env-dependent).
+    appmod.user_config_storage = s
+    appmod.watchlist_storage = _W()
+    appmod.check_llm_configured = lambda *_a, **_kw: None
+    try:
+        app = _FakeFanOutApp()
+        # `_post_init` stamps bot_data["start_time"] and calls
+        # bot.set_my_commands — give the fake the surfaces it reaches for.
+        app.bot_data = {}
+        app.bot.set_my_commands = _noop_set_commands
+
+        await appmod._post_init(app)
+
+        # Exactly the two enabled users got a job; the disabled one didn't.
+        assert len(app.job_queue.get_jobs_by_name("digest:111")) == 1
+        assert len(app.job_queue.get_jobs_by_name("digest:222")) == 1
+        assert app.job_queue.get_jobs_by_name("digest:333") == []
+        # Pin the EXACT scheduled set — no extra jobs leaked, no dupes.
+        names = sorted(j.name for j in app.job_queue._jobs if not j.removed)
+        assert names == ["digest:111", "digest:222"], names
+        # Each enabled job carries the user's hour/tz/chat_id from storage.
+        j111 = app.job_queue.get_jobs_by_name("digest:111")[0]
+        assert j111.time.hour == 9
+        assert str(j111.time.tzinfo) == "America/New_York"
+        assert j111.data == {"user_id": 111, "chat_id": 1001}
+        # And the process-start stamp /status reads was set.
+        assert "start_time" in app.bot_data
+    finally:
+        appmod.user_config_storage = orig_uc
+        appmod.watchlist_storage = orig_w
+        appmod.check_llm_configured = orig_llm
+
+
+# --- Digest success-then-cancel race-close (Invariant #5 success branch) ---
+
+
+async def test_fanout_success_then_cancel_discards_result() -> None:
+    """Digest race-close, SUCCESS branch (analysis_runner.py:1293-1298):
+    when `_analyze_one_for_digest` RETURNS a real successful result but the
+    shared `cancel_event` fired after `to_thread(propagate)` returned (a
+    late Cancel tap landing in the window between completion and
+    result-recording), `_wrapped`'s post-return check
+    `if cancel_event.is_set(): status[ticker] = "cancelled"` must DISCARD
+    the result.
+
+    The existing digest-cancel tests
+    (`test_fanout_cancel_pending_via_task_cancel`,
+    `test_fanout_pending_task_cancel_sets_status_cancelled`,
+    `test_fanout_cancel_mid_run`) all make `_analyze_one_for_digest` RAISE
+    `CancelledByUserError` / `asyncio.CancelledError`, exercising only the
+    `except` clause. None cover the path where analyze returns normally
+    while the flag is set — so a refactor that drops the post-return
+    flag-check (recording the stale BUY result instead of cancelling)
+    would go unnoticed. This pins that distinct branch."""
+    from tg_bot.handlers import analysis_runner as runner
+
+    class _W:
+        def get_watchlist(self, _uid):
+            return ["NVDA"]
+
+    async def _success_then_cancel(_uid, ticker, reporter=None, today_iso=None):
+        # The analysis completes with a real result, but the cancel button
+        # was tapped while `to_thread(propagate)` was on the wire — set the
+        # SHARED cancel_event (the reporter holds the same object the
+        # `_wrapped` post-return check reads) the instant before returning
+        # the now-stale success result.
+        assert reporter is not None and reporter.cancel_event is not None
+        reporter.cancel_event.set()
+        return {
+            "ticker": ticker,
+            "signal": "BUY",
+            "telegraph_url": f"https://telegra.ph/{ticker}",
+        }
+
+    orig_w = runner.watchlist_storage
+    orig_uc = runner.user_config_storage
+    orig_a = runner._analyze_one_for_digest
+    runner.watchlist_storage = _W()
+    runner.user_config_storage = _AllEnrolledUserConfig()
+    runner._analyze_one_for_digest = _success_then_cancel
+    try:
+        app = _FakeFanOutApp()
+        await runner.run_user_digest(app, 42, 999)
+
+        # Summary must render NVDA as ⛔ cancelled, NOT the 🟢 BUY result —
+        # proving the post-return flag-check discarded the stale success.
+        summary = app.bot.edits[-1]["text"]
+        assert "⛔ <b>NVDA</b> — cancelled" in summary, summary
+        assert "🟢" not in summary, f"stale success result leaked: {summary!r}"
+        assert "BUY" not in summary, f"stale BUY signal leaked: {summary!r}"
+        # Tally counts it as cancelled, not failed (❓).
+        assert "1 cancelled" in summary and "of 1" in summary
+        assert "❓" not in summary, f"unexpected error row: {summary!r}"
+    finally:
+        runner.watchlist_storage = orig_w
+        runner.user_config_storage = orig_uc
+        runner._analyze_one_for_digest = orig_a

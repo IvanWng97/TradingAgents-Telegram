@@ -13,10 +13,13 @@ Run with: pytest tests/test_storage.py
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
 from pathlib import Path
+
+import pytest
 
 
 PASS = "\033[92m✓\033[0m"
@@ -68,3 +71,54 @@ async def test_corrupt_json_resets_state_and_renames_file() -> None:
     # the contract that lets `/watch` render its empty-watchlist nudge
     # instead of a 500 in the handler.
     assert storage.get_watchlist("1") == []
+
+
+async def test_save_failure_leaves_original_intact_and_no_tempfile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins Invariant #8 / `_base.py:_save` atomic-write durability at the
+    shared `JsonStorage` base level (inherited by WatchlistStorage AND
+    UserConfigStorage). `_save` writes to a tempfile, fsyncs, then
+    `os.replace`s into place; if the rename fails it unlinks the tempfile
+    and re-raises. The guarantee under test: a failed save NEVER corrupts
+    the existing on-disk file (no partial/truncated write) and NEVER leaves
+    an orphan `*.tmp` accumulating in `data/`. Only the cache layer pinned
+    this before (test_cache.py); the storage base was unpinned."""
+    d = _fresh_data_dir()
+    path = d / "watchlist.json"
+
+    # Seed a known-good, complete JSON file — the "only copy of user data".
+    seed = {"1": ["AAPL", "MSFT"]}
+    path.write_text(json.dumps(seed, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    from tg_bot.storage import _base
+    from tg_bot.storage.watchlist import WatchlistStorage
+
+    storage = WatchlistStorage(path)
+
+    # Make the atomic rename fail mid-save. Patch the exact `os.replace`
+    # that `_base._save` calls (it does `import os` then `os.replace(...)`),
+    # so this hits the real write path, not a stand-in.
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated rename failure")
+
+    monkeypatch.setattr(_base.os, "replace", _boom)
+
+    # Mutate-then-save: `add_ticker` appends to `_data` then awaits
+    # `_save_async` → `_save`, where `os.replace` now blows up. The OSError
+    # must propagate (the except unlinks the tempfile and re-raises).
+    with pytest.raises(OSError, match="simulated rename failure"):
+        await storage.add_ticker("1", "NVDA")
+
+    # (a) The original on-disk file is untouched — same bytes, still
+    # complete/valid JSON, no NVDA leaked through, not truncated to a
+    # partial write.
+    raw = path.read_text(encoding="utf-8")
+    assert json.loads(raw) == seed, (
+        f"failed save must not corrupt the original file; got {raw!r}"
+    )
+
+    # (b) No orphan tempfile left behind. `_save` names tempfiles
+    # `<name>.<random>.tmp` in the same dir; the except unlinks on failure.
+    leftover = sorted(p.name for p in d.glob("*.tmp"))
+    assert leftover == [], f"failed save leaked tempfiles: {leftover}"

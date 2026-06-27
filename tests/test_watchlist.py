@@ -537,3 +537,149 @@ async def test_list_handler_non_empty_path_sets_parse_mode() -> None:
     grid_end = body.index("\n```", grid_start)
     grid_body = body[grid_start:grid_end]
     assert "AAPL" in grid_body and "NVDA" in grid_body, grid_body
+
+
+# ─── Invariant #7: watch_mode → force_refresh translation + state pop ─────
+#
+# Invariant #7 (root CLAUDE.md) says the picker's `chat_data["watch_mode"]`
+# is the single carrier of the watch-vs-refresh choice, and that the
+# Done/Cancel handlers in `handlers/callbacks.py` are the ones that
+# translate "refresh" → `force_refresh=True` and pop the three picker keys
+# (`watch_mode` / `watch_selection` / `watch_page`). The rest of the suite
+# only ever pins `build_watchlist_response` rendering or passes
+# `force_refresh` straight into `_run_analysis_for_ticker`, so the
+# mode→kwarg translation and the state-pop contract in `_handle_done` /
+# `_handle_cancel` had NO test that would fail if either broke. These pin it.
+#
+# NOTE: `callbacks.check_llm_configured` is no-op'd session-wide by the
+# autouse `_disable_digest_llm_precheck` conftest fixture, so `_handle_done`
+# clears the LLM precheck and reaches the run/pop path without arming a
+# provider + env key.
+
+
+class _FakeQuery:
+    """Minimal callback-query stand-in for the Done/Cancel handlers.
+
+    Only the attributes those two handlers touch are populated; the
+    single-ticker `_handle_done` path reads `message.chat_id` and calls
+    `delete_message()`, the cancel path may fall back to
+    `edit_message_text()`. Everything is recorded so misroutes surface."""
+
+    def __init__(self, chat_id: int = 555) -> None:
+        self.message = SimpleNamespace(chat_id=chat_id, message_id=999)
+        self.answers: list[tuple] = []
+        self.deleted = False
+        self.edits: list[tuple] = []
+
+    async def answer(self, text=None, show_alert=False):
+        self.answers.append((text, show_alert))
+
+    async def delete_message(self):
+        self.deleted = True
+
+    async def edit_message_text(self, text, **kw):
+        self.edits.append((text, kw))
+
+
+async def test_handle_done_refresh_threads_force_refresh_true_and_pops_state() -> None:
+    """`_handle_done` reads `chat_data["watch_mode"]`, translates
+    "refresh" → `force_refresh=True`, and pops all three picker keys
+    before dispatching. Pins the mode→kwarg translation that the rest of
+    the suite bypasses by passing `force_refresh` straight into
+    `_run_analysis_for_ticker`."""
+    import tg_bot.handlers.callbacks as callbacks
+
+    recorded: dict = {}
+
+    async def fake_run(context, chat_id, user_id, ticker, force_refresh=False):
+        recorded["args"] = (chat_id, user_id, ticker)
+        recorded["force_refresh"] = force_refresh
+        return "completed"
+
+    orig = callbacks._run_analysis_for_ticker
+    callbacks._run_analysis_for_ticker = fake_run
+    try:
+        query = _FakeQuery(chat_id=555)
+        context = SimpleNamespace(
+            chat_data={
+                "watch_mode": "refresh",
+                # Single ticker → direct-call path (no asyncio.gather).
+                "watch_selection": {"NVDA"},
+                "watch_page": 2,
+            }
+        )
+        await callbacks._handle_done(query, context, 1)
+    finally:
+        callbacks._run_analysis_for_ticker = orig
+
+    # refresh mode → force_refresh=True threaded into the runner.
+    assert recorded["force_refresh"] is True, recorded
+    assert recorded["args"] == (555, 1, "NVDA"), recorded
+    # All three picker keys popped after the precheck commits to running.
+    assert "watch_mode" not in context.chat_data, context.chat_data
+    assert "watch_selection" not in context.chat_data, context.chat_data
+    assert "watch_page" not in context.chat_data, context.chat_data
+
+
+async def test_handle_done_watch_threads_force_refresh_false() -> None:
+    """The watch-mode half of the translation: absent/`"watch"` mode →
+    `force_refresh=False`. Same picker, same dispatch — only the flag
+    flips."""
+    import tg_bot.handlers.callbacks as callbacks
+
+    recorded: dict = {}
+
+    async def fake_run(context, chat_id, user_id, ticker, force_refresh=False):
+        recorded["force_refresh"] = force_refresh
+        return "completed"
+
+    orig = callbacks._run_analysis_for_ticker
+    callbacks._run_analysis_for_ticker = fake_run
+    try:
+        query = _FakeQuery()
+        context = SimpleNamespace(
+            chat_data={"watch_mode": "watch", "watch_selection": {"AAPL"}}
+        )
+        await callbacks._handle_done(query, context, 1)
+    finally:
+        callbacks._run_analysis_for_ticker = orig
+
+    assert recorded["force_refresh"] is False, recorded
+    assert "watch_mode" not in context.chat_data, context.chat_data
+    assert "watch_selection" not in context.chat_data, context.chat_data
+
+
+async def test_handle_cancel_pops_watch_state_only_for_watch_what() -> None:
+    """`_handle_cancel` re-pops the same three picker keys, but ONLY when
+    `what == "watch"` (the ❌ Cancel inside the picker). Any other flow
+    (e.g. `del`) must leave the picker state untouched — picker cleanup
+    is mode-scoped, never global. Pins both sides of that branch."""
+    import tg_bot.handlers.callbacks as callbacks
+
+    # what == "watch" → all three popped (mirrors _handle_done's cleanup).
+    query = _FakeQuery()
+    context = SimpleNamespace(
+        chat_data={
+            "watch_mode": "refresh",
+            "watch_selection": {"NVDA"},
+            "watch_page": 1,
+        }
+    )
+    await callbacks._handle_cancel(context, query, 1, "watch")
+    assert "watch_mode" not in context.chat_data, context.chat_data
+    assert "watch_selection" not in context.chat_data, context.chat_data
+    assert "watch_page" not in context.chat_data, context.chat_data
+
+    # what != "watch" (e.g. "del") → the three keys SURVIVE untouched.
+    query2 = _FakeQuery()
+    context2 = SimpleNamespace(
+        chat_data={
+            "watch_mode": "watch",
+            "watch_selection": {"AAPL"},
+            "watch_page": 3,
+        }
+    )
+    await callbacks._handle_cancel(context2, query2, 1, "del")
+    assert context2.chat_data["watch_mode"] == "watch", context2.chat_data
+    assert context2.chat_data["watch_selection"] == {"AAPL"}, context2.chat_data
+    assert context2.chat_data["watch_page"] == 3, context2.chat_data
