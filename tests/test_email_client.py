@@ -16,13 +16,17 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from tg_bot.config import Config  # noqa: E402
 from tg_bot.rendering.email_client import (  # noqa: E402
     EmailSendResult,
     _build_html,
@@ -31,6 +35,25 @@ from tg_bot.rendering.email_client import (  # noqa: E402
     is_email_configured,
     send_digest_email,
 )
+
+
+@pytest.fixture(autouse=True)
+def _email_gating_defaults():
+    """M3: the email mirror is allow-list-gated. Default every scenario to a
+    locked-down bot (so the legacy send/command tests exercise the *enabled*
+    path) and a clean per-user test-send cooldown bucket. Open-mode tests
+    clear `Config.ALLOWED_USER_IDS` themselves inside the test body; the
+    fixture restores it afterward."""
+    from tg_bot.handlers import commands
+
+    saved = Config.ALLOWED_USER_IDS
+    Config.ALLOWED_USER_IDS = [42]
+    commands._email_test_last_sent.clear()
+    try:
+        yield
+    finally:
+        Config.ALLOWED_USER_IDS = saved
+        commands._email_test_last_sent.clear()
 
 
 # ─── is_email_configured ────────────────────────────────────────────────
@@ -583,6 +606,54 @@ async def test_email_via_reply_sets_address_and_confirms() -> None:
         commands.user_config_storage = orig_uc
 
 
+async def test_email_via_reply_refused_in_open_mode() -> None:
+    """M3: the reply save-path honors the open-mode gate too. Replying to
+    EMAIL_PROMPT with an address while `ALLOWED_USER_IDS` is empty must reply
+    with the disabled notice and NOT persist the address (this path is only
+    reachable if the allowlist was cleared after the prompt was shown, since
+    the bare-`/email` prompt is itself gated)."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from tg_bot.handlers import commands
+
+    Config.ALLOWED_USER_IDS = []  # open mode (fixture restores)
+
+    reply_mock = AsyncMock()
+    bot_user = SimpleNamespace(is_bot=True)
+    replied = SimpleNamespace(text=commands.EMAIL_PROMPT, from_user=bot_user)
+    msg = SimpleNamespace(
+        text="victim@example.com",
+        reply_to_message=replied,
+        reply_text=reply_mock,
+    )
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        message=msg,
+    )
+    context = SimpleNamespace(args=[])
+
+    saved: list = []
+
+    class _StubUserConfig:
+        async def set_digest_email(self, uid, addr):
+            saved.append((uid, addr))
+            return True
+
+    orig_uc = commands.user_config_storage
+    commands.user_config_storage = _StubUserConfig()
+    try:
+        await commands.email_via_reply(update, context)
+        assert saved == [], "address must NOT be saved via reply in open mode"
+        reply_mock.assert_called_once()
+        notice = reply_mock.call_args[0][0]
+        assert "ALLOWED_USER_IDS" in notice, (
+            f"expected open-mode notice; got: {notice!r}"
+        )
+    finally:
+        commands.user_config_storage = orig_uc
+
+
 async def test_email_via_reply_rejects_invalid_address() -> None:
     """A non-email reply must surface the same `_EMAIL_RE` rejection that
     `/email <addr>` shows, NOT silently no-op. Pinning so the regression
@@ -848,3 +919,197 @@ async def test_email_diagnose_handles_resend_api_error_gracefully() -> None:
         os.environ.pop("RESEND_API_KEY", None)
         os.environ.pop("RESEND_FROM", None)
         commands.user_config_storage = orig_uc
+
+
+# ─── M3: email-mirror abuse gating ───────────────────────────────────────
+# The mirror relays through the operator's verified Resend domain to a
+# user-supplied recipient. Two guards: (1) refuse all sends when the bot is
+# open to everyone (empty ALLOWED_USER_IDS); (2) per-user cooldown on the
+# immediate `/email test` + `/email diagnose` test sends.
+
+
+async def test_send_digest_email_refuses_in_open_mode() -> None:
+    """Backstop gate: even with env configured + a recipient set,
+    `send_digest_email` must refuse (ok=False, error='open_mode') and never
+    touch the Resend SDK when ALLOWED_USER_IDS is empty. This is the layer
+    that protects the *daily* mirror too, not just the command surface."""
+    from types import SimpleNamespace
+
+    Config.ALLOWED_USER_IDS = []  # open mode (fixture restores)
+    os.environ["RESEND_API_KEY"] = "re_fake"
+    os.environ["RESEND_FROM"] = "bot@example.com"
+
+    sent_calls: list = []
+
+    def fake_send(payload):
+        sent_calls.append(payload)
+        return {"id": "SHOULD_NOT_SEND"}
+
+    fake_resend = SimpleNamespace(
+        api_key="",
+        Emails=SimpleNamespace(send=fake_send),
+    )
+    try:
+        with patch.dict("sys.modules", {"resend": fake_resend}):
+            result = await send_digest_email(
+                to_addr="victim@example.com",
+                watchlist=["NVDA"],
+                status={"NVDA": {"signal": "BUY", "telegraph_url": None}},
+                safe_date="2026-06-26",
+                date_iso="2026-06-26",
+            )
+        assert result.ok is False
+        assert result.error == "open_mode", (
+            f"expected open_mode refusal; got error={result.error!r}"
+        )
+        assert result.recipient == "victim@example.com"
+        assert result.message_id is None
+        assert sent_calls == [], "Resend.Emails.send must NOT be called in open mode"
+    finally:
+        os.environ.pop("RESEND_API_KEY", None)
+        os.environ.pop("RESEND_FROM", None)
+
+
+async def test_email_cmd_refuses_set_in_open_mode() -> None:
+    """`/email <addr>` in open mode must reply with the disabled notice and
+    NOT persist the address — otherwise a stranger could register a victim's
+    address as a relay target."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from tg_bot.handlers import commands
+
+    Config.ALLOWED_USER_IDS = []  # open mode
+
+    reply_mock = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        message=SimpleNamespace(reply_text=reply_mock),
+    )
+    context = SimpleNamespace(args=["victim@example.com"])
+
+    set_calls: list = []
+
+    class _StubUserConfig:
+        def get_digest(self, _uid):
+            return {}
+
+        async def set_digest_email(self, uid, addr):
+            set_calls.append((uid, addr))
+            return True
+
+    orig_uc = commands.user_config_storage
+    commands.user_config_storage = _StubUserConfig()
+    try:
+        await commands.email_cmd(update, context)
+        sent = reply_mock.call_args[0][0]
+        assert "ALLOWED_USER_IDS" in sent, f"expected open-mode notice; got: {sent!r}"
+        assert set_calls == [], "address must NOT be saved in open mode"
+    finally:
+        commands.user_config_storage = orig_uc
+
+
+async def test_email_cmd_off_allowed_in_open_mode() -> None:
+    """`/email off` is the one carve-out: it only clears a (possibly stale)
+    address, so it stays allowed even in open mode."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from tg_bot.handlers import commands
+
+    Config.ALLOWED_USER_IDS = []  # open mode
+
+    reply_mock = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        message=SimpleNamespace(reply_text=reply_mock),
+    )
+    context = SimpleNamespace(args=["off"])
+
+    cleared: list = []
+
+    class _StubUserConfig:
+        def get_digest(self, _uid):
+            return {"email": "user@example.com"}
+
+        async def clear_digest_email(self, uid):
+            cleared.append(uid)
+            return True
+
+    orig_uc = commands.user_config_storage
+    commands.user_config_storage = _StubUserConfig()
+    try:
+        await commands.email_cmd(update, context)
+        sent = reply_mock.call_args[0][0]
+        assert "ALLOWED_USER_IDS" not in sent, (
+            f"`off` must not hit the open-mode notice; got: {sent!r}"
+        )
+        assert cleared == ["42"], "off must clear the address even in open mode"
+    finally:
+        commands.user_config_storage = orig_uc
+
+
+async def test_email_test_cooldown_blocks_rapid_second_send() -> None:
+    """Two `/email test` in a row: the first sends, the second is throttled
+    (no send). Pins the per-user cooldown so an allow-listed user can't hammer
+    Resend on the operator's domain."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from tg_bot.handlers import commands
+
+    os.environ["RESEND_API_KEY"] = "re_fake"
+    os.environ["RESEND_FROM"] = "bot@example.com"
+
+    reply_mock = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        message=SimpleNamespace(reply_text=reply_mock),
+    )
+    context = SimpleNamespace(args=["test"])
+
+    class _StubUserConfig:
+        def get_digest(self, _uid):
+            return {"email": "user@example.com"}
+
+    orig_uc = commands.user_config_storage
+    commands.user_config_storage = _StubUserConfig()
+
+    send_count = {"n": 0}
+
+    async def fake_send(**kwargs):
+        send_count["n"] += 1
+        return EmailSendResult(ok=True, recipient=kwargs["to_addr"], message_id="re_ok")
+
+    try:
+        with patch.object(commands, "send_digest_email", side_effect=fake_send):
+            await commands.email_cmd(update, context)
+            first = reply_mock.call_args[0][0]
+            await commands.email_cmd(update, context)
+            second = reply_mock.call_args[0][0]
+        assert "✅ Test email sent" in first, f"first send should succeed: {first!r}"
+        assert "Slow down" in second, (
+            f"second send should be throttled; got: {second!r}"
+        )
+        assert send_count["n"] == 1, "only ONE email should actually be sent"
+    finally:
+        os.environ.pop("RESEND_API_KEY", None)
+        os.environ.pop("RESEND_FROM", None)
+        commands.user_config_storage = orig_uc
+
+
+async def test_email_test_cooldown_remaining_helper() -> None:
+    """Unit-pin the cooldown arithmetic: first call records + returns None,
+    an immediate repeat returns a positive remaining, and once the window has
+    elapsed it returns None again (resetting the bucket)."""
+    from tg_bot.handlers import commands
+
+    uid = 777
+    assert commands._email_test_cooldown_remaining(uid) is None
+    remaining = commands._email_test_cooldown_remaining(uid)
+    assert remaining is not None and 0 < remaining <= commands._EMAIL_TEST_COOLDOWN_S
+    # Backdate past the window — next call is a clean miss again.
+    commands._email_test_last_sent[uid] = (
+        time.monotonic() - commands._EMAIL_TEST_COOLDOWN_S - 1
+    )
+    assert commands._email_test_cooldown_remaining(uid) is None

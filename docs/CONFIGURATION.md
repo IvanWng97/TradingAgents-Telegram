@@ -42,6 +42,8 @@ Upstream `tradingagents` reads these env vars at library-import time via its `_E
 
 Per-user `/email set <addr>` opts in; the bot mirrors each daily digest to that inbox via Resend. Both env vars below must be set for any send to fire — bare `/email` shows the current setting and warns when the env isn't configured.
 
+> **The email mirror requires a non-empty `ALLOWED_USER_IDS`.** It relays through your verified Resend domain to a user-supplied recipient, so in open mode (empty allowlist) any stranger could point `/email` at a victim and spam them on your domain's reputation. While the bot is open, every `/email` sub-command except `off` is refused (and the daily mirror is skipped at the send layer). Lock the bot to an allowlist to enable it. Immediate `/email test` / `/email diagnose` test sends are additionally rate-limited per user (60s) so an allow-listed user can't hammer Resend.
+
 | Variable | Required | Notes |
 |---|---|---|
 | `RESEND_API_KEY` | no (only if any user opted in) | From [resend.com](https://resend.com) — free tier is 3000 emails/mo, 100/day. Format `re_...`. |

@@ -37,6 +37,7 @@ import os
 from dataclasses import dataclass
 from html import escape as _html_escape
 
+from tg_bot.config import Config
 from tg_bot.history import load_historical_state
 from tg_bot.rendering.chart import finviz_chart_url
 from tg_bot.rendering.formatters import DECISION_EMOJI, format_full_md_report
@@ -327,6 +328,23 @@ async def send_digest_email(
     second line so a hot-removed env var doesn't crash on the Resend
     SDK's internal validation.
     """
+    # Abuse backstop (M3): the mirror relays through the operator's
+    # verified Resend domain to an arbitrary, user-supplied recipient.
+    # With an empty ALLOWED_USER_IDS (open bot) any stranger could point
+    # `/email` at a victim and spam them, burning the operator's domain
+    # reputation. Refuse ALL sends in open mode — covers the daily mirror
+    # AND the immediate `/email test` / `/email diagnose` test sends, since
+    # every send path funnels through here. The command layer also refuses
+    # earlier with a clearer message; this is the defensive backstop
+    # (parity with the `is_email_configured` second-line check below).
+    if not Config.ALLOWED_USER_IDS:
+        logger.warning(
+            "send_digest_email: refusing send in open mode "
+            "(ALLOWED_USER_IDS empty) to %s",
+            to_addr,
+        )
+        return EmailSendResult(ok=False, recipient=to_addr, error="open_mode")
+
     if not is_email_configured():
         logger.warning(
             "send_digest_email: RESEND_API_KEY/RESEND_FROM not set, skipping send to %s",
