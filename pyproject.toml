@@ -57,7 +57,7 @@ dependencies = [
 # Note: when bumping `ruff`, also bump the same `rev:` in
 # `.pre-commit-config.yaml` so the local hook runs the same version.
 dev = [
-    "ruff==0.15.18",
+    "ruff==0.15.20",
     "pre-commit>=4.6.0",
     # pytest runs the `tests/test_*.py` suite (config in
     # [tool.pytest.ini_options] below). pytest-asyncio's auto mode lets
