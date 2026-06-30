@@ -48,7 +48,7 @@ jobs:
 
       - name: Look up previously built tradingagents SHA
         id: ta_cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: .last-tradingagents-sha
           key: tradingagents-sha-${{ steps.ta.outputs.sha }}
