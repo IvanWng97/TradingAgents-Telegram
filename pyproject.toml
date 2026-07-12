@@ -23,7 +23,7 @@ dependencies = [
     # IANA tz database for `zoneinfo` — the python:3.14-slim base image
     # doesn't ship system tzdata, so ZoneInfo("America/Los_Angeles") would
     # raise ZoneInfoNotFoundError without this. Pure-Python wheel, ~700 KB.
-    "tzdata>=2026.2",
+    "tzdata>=2026.3",
     # Exchange trading-session calendars (NYSE, NASDAQ, LSE, TSE, HKEX,
     # SSE, NSE, etc. — 102 calendars shipped). The digest gate at
     # `market_calendar.py` resolves each ticker's exchange by yfinance
