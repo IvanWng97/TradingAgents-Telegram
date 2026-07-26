@@ -58,7 +58,7 @@ dependencies = [
 # `.pre-commit-config.yaml` so the local hook runs the same version.
 dev = [
     "ruff==0.15.22",
-    "pre-commit>=4.6.0",
+    "pre-commit>=4.6.1",
     # pytest runs the `tests/test_*.py` suite (config in
     # [tool.pytest.ini_options] below). pytest-asyncio's auto mode lets
     # `async def test_*` functions run without a per-test marker.
