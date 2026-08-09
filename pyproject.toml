@@ -18,7 +18,7 @@ dependencies = [
     "python-telegram-bot[rate-limiter,job-queue]>=22.8",
     "python-dotenv>=1.2.2",
     "telegraph>=2.2.0",
-    "markdown>=3.10.2",
+    "markdown>=3.10.3",
     "beautifulsoup4>=4.15.0",
     # IANA tz database for `zoneinfo` — the python:3.14-slim base image
     # doesn't ship system tzdata, so ZoneInfo("America/Los_Angeles") would
