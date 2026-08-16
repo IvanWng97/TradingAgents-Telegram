@@ -42,7 +42,7 @@ dependencies = [
     # to the operator's email when they opt in via `/email set <addr>`.
     # Free tier: 3000 emails/mo, 100/day — comfortably covers a
     # single-operator deployment. REST + small dep footprint.
-    "resend>=2.34.0",
+    "resend>=2.36.0",
     # Pin to a release tag, not bare HEAD: a bare-HEAD pin makes local
     # installs, CI, and Docker rebuilds resolve to whatever HEAD happens to
     # be at pull time (we drifted local=0.2.5 vs Docker=post-0.3.0 HEAD this
